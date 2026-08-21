@@ -17,11 +17,26 @@ the compatibility guarantees in SPEC.md §11 take effect.
   prefix that lets a client recognise an unsupported major version.
 - Machine-readable schema (`schema/vtp1.yaml`) as the source of truth, with
   generation of the spec tables, the C header and the conformance vectors.
-- Conformance corpus: 27 vectors across 4 record types, including must-reject
+- Conformance corpus: 38 vectors across 5 record types, including must-reject
   cases for truncated and over-long payloads.
 - C99 reference decoder and encoder, no dependencies, separate translation
   units so a client links only the decoder and a device only the encoder.
 - Schema-driven Python reference decoder.
+- Transport requirements for link-layer payload, PHY and connection parameters
+  (SPEC.md §2.1-§2.3): a device must extend the link-layer payload to match the
+  ATT MTU it negotiates, should request the 2M PHY, and must function at
+  whatever connection parameters the central grants rather than the ones it
+  asked for. These bound the radio airtime a VTP device takes from other
+  peripherals sharing the same central.
+- `GET_LINK_PARAMS` (opcode `0x31`) and the `link_params` record (SPEC.md §9.1):
+  the device reports its own view of the negotiated ATT MTU, link-layer payload,
+  connection parameters and PHY. Every field is governed by a validity bit, and
+  the `phy` enum has no zero member, so "the controller does not expose this"
+  cannot be confused with LE 1M. This is the only way a client can verify the
+  transport requirements of §2.1-§2.3, none of which are visible to an
+  application through its own Bluetooth stack on at least one major platform.
+- SPEC.md §12.1, distinguishing requirements the conformance corpus can test
+  from integration requirements it structurally cannot.
 - Implementation-agnostic conformance runner, with two optional checks beyond
   the decode: an `absent` field set (making "absence is the bitmask's job, never
   a value" mechanically testable) and an encoder round-trip required to be

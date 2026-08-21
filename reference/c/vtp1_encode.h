@@ -40,6 +40,10 @@ int vtp_encode_imu_batch(const vtp_imu_header_t *hdr,
 
 int vtp_encode_info(const vtp_info_t *info, uint8_t *out, size_t cap);
 
+/* Fields whose validity bit is clear are written as zero, as everywhere else:
+ * a device that cannot determine its PHY cannot accidentally ship a stale one. */
+int vtp_encode_link_params(const vtp_link_params_t *lp, uint8_t *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

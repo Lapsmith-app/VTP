@@ -122,6 +122,35 @@ typedef struct {
 int vtp_decode_info(const uint8_t *buf, size_t len,
                     vtp_info_t *out, const char **err);
 
+/* ---- Link parameters ------------------------------------------------- */
+
+/* SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response. Reporting only:
+ * nothing here is negotiated through VTP/1.
+ *
+ * Every field is gated by a validity bit, because a controller that cannot
+ * report a parameter must say so rather than guess. Note that the phy enum has
+ * no zero member, so a zeroed phy_tx can never pass for LE 1M. */
+typedef struct {
+    uint16_t validity;
+    uint16_t att_mtu;
+    uint16_t ll_max_tx_octets, ll_max_rx_octets;
+    uint16_t conn_interval;        /* 1.25 ms units */
+    uint16_t peripheral_latency;
+    uint16_t supervision_timeout;  /* 10 ms units */
+    uint8_t  phy_tx, phy_rx;
+} vtp_link_params_t;
+
+static inline int vtp_link_valid(const vtp_link_params_t *l, uint16_t bit) {
+    return (l->validity & bit) != 0;
+}
+
+/* Non-zero when the PHY value is one this build recognises. A false result
+ * means UNKNOWN and MUST NOT be treated as any particular PHY. */
+int vtp_phy_known(uint8_t phy);
+
+int vtp_decode_link_params(const uint8_t *buf, size_t len,
+                           vtp_link_params_t *out, const char **err);
+
 #ifdef __cplusplus
 }
 #endif

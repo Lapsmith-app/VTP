@@ -74,6 +74,29 @@ static void put_absent(const vtp_gps_fix_t *f) {
     printf("]");
 }
 
+/* The same idea for link_params: which validity bit gates which field. */
+static const struct { const char *name; uint16_t bit; } LINK_GATED[] = {
+    {"att_mtu",             VTP_LINK_VALIDITY_ATT_MTU},
+    {"ll_max_tx_octets",    VTP_LINK_VALIDITY_LL_DATA_LENGTH},
+    {"ll_max_rx_octets",    VTP_LINK_VALIDITY_LL_DATA_LENGTH},
+    {"conn_interval",       VTP_LINK_VALIDITY_CONN_PARAMS},
+    {"peripheral_latency",  VTP_LINK_VALIDITY_CONN_PARAMS},
+    {"supervision_timeout", VTP_LINK_VALIDITY_CONN_PARAMS},
+    {"phy_tx",              VTP_LINK_VALIDITY_PHY},
+    {"phy_rx",              VTP_LINK_VALIDITY_PHY},
+};
+
+static void put_link_absent(const vtp_link_params_t *l) {
+    printf(",\"absent\":[");
+    int first = 1;
+    for (size_t i = 0; i < sizeof LINK_GATED / sizeof LINK_GATED[0]; i++) {
+        if (vtp_link_valid(l, LINK_GATED[i].bit)) continue;
+        printf("%s\"%s\"", first ? "" : ",", LINK_GATED[i].name);
+        first = 0;
+    }
+    printf("]");
+}
+
 static void put_hex(const uint8_t *p, size_t n) {
     for (size_t i = 0; i < n; i++) printf("%02x", p[i]);
 }
@@ -190,6 +213,23 @@ int main(void) {
                    v.can_max_frames_per_s, v.imu_rate_hz, v.imu_max_rate_hz,
                    v.can_max_payload, v.clock_flags, v.max_notify_bytes);
             finish(enc, vtp_encode_info(&v, enc, sizeof enc));
+
+        } else if (!strcmp(record, "link_params")) {
+            vtp_link_params_t l;
+            if (vtp_decode_link_params(buf, len, &l, &err)) { reject(err); continue; }
+            printf("{\"ok\":true,\"validity\":%u,\"att_mtu\":%u,"
+                   "\"ll_max_tx_octets\":%u,\"ll_max_rx_octets\":%u,"
+                   "\"conn_interval\":%u,\"peripheral_latency\":%u,"
+                   "\"supervision_timeout\":%u,\"phy_tx\":%u,\"phy_rx\":%u,"
+                   "\"phy_tx_known\":%s,\"phy_rx_known\":%s",
+                   l.validity, l.att_mtu, l.ll_max_tx_octets, l.ll_max_rx_octets,
+                   l.conn_interval, l.peripheral_latency, l.supervision_timeout,
+                   l.phy_tx, l.phy_rx,
+                   vtp_phy_known(l.phy_tx) ? "true" : "false",
+                   vtp_phy_known(l.phy_rx) ? "true" : "false");
+            put_link_absent(&l);
+            finish(enc, vtp_encode_link_params(&l, enc, sizeof enc));
+
         } else {
             reject("unknown-record");
         }

@@ -56,6 +56,58 @@ of state, the reserved bits in `gps_fix.validity`, `fix_flags` and
 `info.capabilities` exist for exactly that. Appendix A of SPEC.md lists the
 reserved space.
 
+## Releases and version numbers
+
+Two version numbers exist here and they move independently. Conflating them is
+the most common confusion this repository produces.
+
+**Protocol version — on the wire.** `major` fixes the service UUID family and
+`protocol_major`; `minor` is `protocol_minor` in the Info characteristic. Both
+live in `schema/vtp1.yaml` under `protocol:`. SPEC.md §11 governs what may
+change in each. A client uses `protocol_minor` to know which additive features
+a device has.
+
+**Specification version — the git tag.** Semver, tagged `vX.Y.Z`, describing
+this document and the code in this repository. It is what an implementer cites
+when they say which version they built against.
+
+`VTP/1 at specification version 0.4.0` is a coherent statement: the protocol is
+major 1, the document describing it is still draft.
+
+### Before specification 1.0
+
+The wire format may change without notice. Everything lands under
+`[Unreleased]` in CHANGELOG.md, and `protocol.minor` stays `0` — additive
+changes fold into the eventual 1.0.0 rather than each earning a minor bump.
+Tags in the `v0.x` range are baselines, not compatibility promises.
+
+### After specification 1.0
+
+SPEC.md §11 takes effect and the discipline changes. An additive wire change —
+a new opcode, a new extension type, a newly assigned reserved bit — requires
+**both**:
+
+1. `protocol.minor` incremented in `schema/vtp1.yaml`, then
+   `python3 tools/generate.py` re-run (it feeds `VTP_MINOR` in the generated C
+   header), and
+2. a minor bump of the specification version.
+
+A change that SPEC.md §11.3 prohibits is not a minor version in either sense.
+It requires a new service UUID and a new schema — see "What will be refused"
+above.
+
+### Cutting a release
+
+1. Confirm CI is green: `python3 tools/generate.py --check`, both reference
+   decoders passing the corpus.
+2. Move the `[Unreleased]` entries in CHANGELOG.md under a `## [X.Y.Z] - DATE`
+   heading and leave a fresh empty `[Unreleased]`.
+3. Update the status table in README.md if anything in it has changed —
+   particularly the conformance corpus count and the implementations row.
+4. Tag `vX.Y.Z` and push the tag.
+
+There is no release automation. If that changes, document it here.
+
 ## Style
 
 Specification text is normative and terse; RFC 2119 keywords in capitals, and

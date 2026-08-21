@@ -207,16 +207,26 @@ def encode(schema, record, values):
     return bytes(buf)
 
 
-def _gate_gps(schema, values):
-    """Zero every gps_fix field whose validity bit is clear."""
+def _bit_of(schema, record):
+    """name -> bit, for the validity bitmask governing `record`."""
+    bm = schema["records"][record]["validity"]
+    return {b["name"]: b["bit"] for b in schema["bitmasks"][bm]["bits"]}
+
+
+def _gated_fields(schema, record, values):
+    """Fields of `record` whose validity bit is clear, i.e. MUST read absent."""
     validity = values.get("validity", 0)
-    bit_of = {b["name"]: b["bit"]
-              for b in schema["bitmasks"]["gps_validity"]["bits"]}
+    bit_of = _bit_of(schema, record)
+    return sorted(f["name"] for f in schema["records"][record]["fields"]
+                  if f.get("valid_bit") is not None
+                  and not (validity & (1 << bit_of[f["valid_bit"]])))
+
+
+def _gate(schema, record, values):
+    """Zero every field of `record` whose validity bit is clear."""
     out = dict(values)
-    for f in schema["records"]["gps_fix"]["fields"]:
-        gate = f.get("valid_bit")
-        if gate is not None and not (validity & (1 << bit_of[gate])):
-            out[f["name"]] = 0
+    for name in _gated_fields(schema, record, values):
+        out[name] = 0
     return out
 
 
@@ -232,8 +242,8 @@ def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=Non
     # zero, which is the only coverage the encoder's gating rule gets. Exempting
     # it left that rule completely untested.
     gated = values
-    if record == "gps_fix":
-        gated = _gate_gps(schema, values)
+    if schema["records"][record].get("validity"):
+        gated = _gate(schema, record, values)
         if canonical:
             values = gated
 
@@ -251,30 +261,31 @@ def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=Non
     # such a conclusion. It went unasserted in the first version of this
     # corpus, so all three reference decoders could have coerced an unknown
     # fix_type to 3D and still passed.
-    if record == "gps_fix":
-        # The set a conforming decoder MUST report as absent. This is the
-        # protocol's central rule (SPEC.md 1.1) and without this it was
-        # asserted only by prose: every implementation could return zero for a
-        # gated field and the corpus would not notice.
-        validity = values.get("validity", 0)
-        bit_of = {b["name"]: b["bit"]
-                  for b in schema["bitmasks"]["gps_validity"]["bits"]}
-        c_absent = sorted(
-            f["name"] for f in schema["records"][record]["fields"]
-            if f.get("valid_bit") is not None
-            and not (validity & (1 << bit_of[f["valid_bit"]])))
+    # The set a conforming decoder MUST report as absent. This is the
+    # protocol's central rule (SPEC.md 1.1) and without this it was
+    # asserted only by prose: every implementation could return zero for a
+    # gated field and the corpus would not notice.
+    #
+    # Driven off the record's `validity` key rather than its name, so a record
+    # that gains a validity mask in a later minor is covered without editing
+    # this -- the rule is the protocol's, not gps_fix's.
+    c_absent = None
+    if rec.get("validity"):
+        c_absent = _gated_fields(schema, record, values)
 
-        known = {m["value"] for m in SCHEMA_ENUMS["fix_type"]}
-        # Asserted on EVERY case, not just the unknown one, so a decoder that
-        # reports everything as unknown fails too.
-        expect["fix_type_known"] = expect["fix_type"] in known
+    # Asserted on EVERY case with an enum field, not just the unknown-value
+    # one, so a decoder that reports everything as unknown fails too.
+    for f in rec["fields"]:
+        if f.get("enum"):
+            known = {m["value"] for m in SCHEMA_ENUMS[f["enum"]]}
+            expect[f["name"] + "_known"] = expect[f["name"]] in known
 
     c = {"name": name, "desc": desc, "record": record, "hex": raw.hex()}
     if reject:
         c["must_reject"] = reject
     else:
         c["expect"] = expect
-        if record == "gps_fix":
+        if c_absent is not None:
             c["expect_absent"] = c_absent
         if scaled:
             c["expect_scaled"] = scaled
@@ -507,6 +518,90 @@ def vectors(schema):
                   can_max_payload=64, clock_flags=0b11, max_notify_bytes=498),
              "Minor 7 with a capability bit this client has never heard of. A client MUST "
              "ignore the unknown bit and use everything it does understand."),
+    ]
+
+    # ---- Link params -----------------------------------------------------
+    L = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["link_validity"]["bits"]}
+    all_valid = L["att_mtu"] | L["ll_data_length"] | L["conn_params"] | L["phy"]
+    files["link-params.json"] = [
+        case(schema, "link_params", "well-configured-link",
+             dict(validity=all_valid, att_mtu=247, ll_max_tx_octets=251,
+                  ll_max_rx_octets=251, conn_interval=12, peripheral_latency=0,
+                  supervision_timeout=500, phy_tx=2, phy_rx=2),
+             "A device that did everything SPEC.md 2 asks: link-layer payload raised to "
+             "match the MTU, 2M PHY, 15 ms interval.",
+             note="conn_interval is in 1.25 ms units, so 12 is 15 ms."),
+        case(schema, "link_params", "mtu-without-data-length",
+             dict(validity=all_valid, att_mtu=247, ll_max_tx_octets=27,
+                  ll_max_rx_octets=27, conn_interval=24, peripheral_latency=0,
+                  supervision_timeout=500, phy_tx=1, phy_rx=1),
+             "A large ATT MTU over the default 27-octet link-layer payload. Conforming, "
+             "decodable, and roughly three times the radio airtime per byte.",
+             note="This is the condition SPEC.md 2.1 exists to prevent and which a "
+                  "client cannot observe from its own BLE stack on any platform. It "
+                  "is a diagnostic, not a reject: the device is not malformed, it is "
+                  "expensive."),
+        case(schema, "link_params", "asymmetric-data-length",
+             dict(validity=all_valid, att_mtu=247, ll_max_tx_octets=251,
+                  ll_max_rx_octets=27, conn_interval=12, peripheral_latency=0,
+                  supervision_timeout=500, phy_tx=2, phy_rx=2),
+             "Link-layer payload negotiated asymmetrically: the device may send 251 "
+             "octets but may only receive 27. Legal, and the two fields are distinct.",
+             note="The only vector where ll_max_tx_octets and ll_max_rx_octets differ. "
+                  "Without it, a decoder that reads both from the same offset passes "
+                  "the whole corpus -- the tx/rx pair is otherwise symmetric in every "
+                  "case, which is exactly the kind of hole mutation testing finds and "
+                  "review does not."),
+        case(schema, "link_params", "phy-not-determinable",
+             dict(validity=L["att_mtu"] | L["ll_data_length"] | L["conn_params"],
+                  att_mtu=185, ll_max_tx_octets=251, ll_max_rx_octets=251,
+                  conn_interval=24, peripheral_latency=0, supervision_timeout=500),
+             "A controller that does not expose its PHY. The phy bit is clear, so phy_tx "
+             "and phy_rx MUST be reported absent -- NOT decoded as LE 1M.",
+             note="LE 1M is 1 and there is no zero member, precisely so that a zeroed "
+                  "byte cannot pass for the most common PHY."),
+        case(schema, "link_params", "stale-values-behind-cleared-bits",
+             dict(validity=0, att_mtu=247, ll_max_tx_octets=251,
+                  ll_max_rx_octets=251, conn_interval=12, peripheral_latency=0,
+                  supervision_timeout=500, phy_tx=2, phy_rx=2),
+             "A non-conforming device that clears every validity bit but leaves the "
+             "previous values in the bytes. A decoder MUST report every field absent on "
+             "the strength of the mask alone, and MUST NOT read LE 2M or a 247-byte MTU "
+             "out of them.",
+             canonical=False,
+             note="Not byte-canonical, so the round-trip asserts that a conforming "
+                  "encoder NORMALISES these bytes to zero. Every validity bit is clear "
+                  "in one case deliberately: this is the only coverage the link_params "
+                  "encoder's gating rule gets, and a case that cleared just one bit "
+                  "would leave the other three gates untested — which is exactly how "
+                  "the gps_fix encoder gate went uncovered in the first corpus."),
+        case(schema, "link_params", "nothing-determinable",
+             dict(validity=0),
+             "A stack that exposes none of it. Every field is zero AND every validity "
+             "bit is clear; a client MUST conclude 'unknown', not 'MTU 0 on no PHY'."),
+        case(schema, "link_params", "unknown-phy-value",
+             dict(validity=all_valid, att_mtu=247, ll_max_tx_octets=251,
+                  ll_max_rx_octets=251, conn_interval=12, peripheral_latency=0,
+                  supervision_timeout=500, phy_tx=9, phy_rx=2),
+             "A PHY value from a future Bluetooth revision. A decoder MUST report it "
+             "unknown and MUST NOT fall back to LE 1M."),
+        case(schema, "link_params", "reserved-validity-bit-set",
+             dict(validity=all_valid | (1 << 9), att_mtu=247, ll_max_tx_octets=251,
+                  ll_max_rx_octets=251, conn_interval=12, peripheral_latency=0,
+                  supervision_timeout=500, phy_tx=2, phy_rx=2),
+             "A future minor set link_validity bit 9. A decoder MUST ignore the unknown "
+             "bit and decode every known field normally."),
+        {"name": "short-payload",
+         "desc": "15 bytes. A truncated control response MUST be rejected whole.",
+         "record": "link_params",
+         "hex": encode(schema, "link_params", dict(validity=all_valid))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "long-payload",
+         "desc": "17 bytes. link_params is a fixed-size record with no extension "
+                 "mechanism, so trailing bytes MUST be rejected.",
+         "record": "link_params",
+         "hex": (encode(schema, "link_params", dict(validity=all_valid)) + b"\x00").hex(),
+         "must_reject": "length"},
     ]
     return files
 

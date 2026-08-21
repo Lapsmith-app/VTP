@@ -164,3 +164,29 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     wr16(out + VTP_INFO_OFF_MAX_NOTIFY_BYTES, v->max_notify_bytes);
     return VTP_INFO_SIZE;
 }
+
+int vtp_encode_link_params(const vtp_link_params_t *l, uint8_t *out, size_t cap) {
+    if (cap < VTP_LINK_PARAMS_SIZE) return -1;
+    memset(out, 0, VTP_LINK_PARAMS_SIZE);
+
+    const uint32_t v = l->validity;
+
+    wr16(out + VTP_LINK_PARAMS_OFF_VALIDITY, l->validity);
+    wr16(out + VTP_LINK_PARAMS_OFF_ATT_MTU,
+         (uint16_t)gate32(l->att_mtu, v, VTP_LINK_VALIDITY_ATT_MTU));
+    wr16(out + VTP_LINK_PARAMS_OFF_LL_MAX_TX_OCTETS,
+         (uint16_t)gate32(l->ll_max_tx_octets, v, VTP_LINK_VALIDITY_LL_DATA_LENGTH));
+    wr16(out + VTP_LINK_PARAMS_OFF_LL_MAX_RX_OCTETS,
+         (uint16_t)gate32(l->ll_max_rx_octets, v, VTP_LINK_VALIDITY_LL_DATA_LENGTH));
+    wr16(out + VTP_LINK_PARAMS_OFF_CONN_INTERVAL,
+         (uint16_t)gate32(l->conn_interval, v, VTP_LINK_VALIDITY_CONN_PARAMS));
+    wr16(out + VTP_LINK_PARAMS_OFF_PERIPHERAL_LATENCY,
+         (uint16_t)gate32(l->peripheral_latency, v, VTP_LINK_VALIDITY_CONN_PARAMS));
+    wr16(out + VTP_LINK_PARAMS_OFF_SUPERVISION_TIMEOUT,
+         (uint16_t)gate32(l->supervision_timeout, v, VTP_LINK_VALIDITY_CONN_PARAMS));
+    out[VTP_LINK_PARAMS_OFF_PHY_TX] =
+         (uint8_t)gate32(l->phy_tx, v, VTP_LINK_VALIDITY_PHY);
+    out[VTP_LINK_PARAMS_OFF_PHY_RX] =
+         (uint8_t)gate32(l->phy_rx, v, VTP_LINK_VALIDITY_PHY);
+    return VTP_LINK_PARAMS_SIZE;
+}

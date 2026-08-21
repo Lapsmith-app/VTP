@@ -129,11 +129,37 @@ def decode_info(buf):
     return _unpack("info", buf)
 
 
+def decode_link_params(buf):
+    """SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response.
+
+    Fixed size with no extension mechanism, so any other length is rejected.
+    """
+    if len(buf) != _size("link_params"):
+        raise Reject("length")
+    lp = _unpack("link_params", buf)
+
+    # Same rule as gps_fix, derived the same way: absence is the bitmask's job.
+    # A cleared phy bit means the controller did not report a PHY, which is not
+    # the same as LE 1M -- and is why the phy enum has no zero member.
+    bit_of = {b["name"]: b["bit"]
+              for b in SCHEMA["bitmasks"]["link_validity"]["bits"]}
+    lp["absent"] = sorted(
+        f["name"] for f in SCHEMA["records"]["link_params"]["fields"]
+        if f.get("valid_bit") is not None
+        and not (lp["validity"] & (1 << bit_of[f["valid_bit"]])))
+
+    known = {m["value"] for m in SCHEMA["enums"]["phy"]["members"]}
+    lp["phy_tx_known"] = lp["phy_tx"] in known
+    lp["phy_rx_known"] = lp["phy_rx"] in known
+    return lp
+
+
 DECODERS = {
     "gps_fix": decode_gps_fix,
     "can_batch": decode_can_batch,
     "imu_batch": decode_imu_batch,
     "info": decode_info,
+    "link_params": decode_link_params,
 }
 
 

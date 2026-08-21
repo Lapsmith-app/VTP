@@ -177,3 +177,31 @@ int vtp_decode_info(const uint8_t *b, size_t len,
     o->max_notify_bytes       = rd16(b + VTP_INFO_OFF_MAX_NOTIFY_BYTES);
     return 0;
 }
+
+int vtp_phy_known(uint8_t p) {
+    switch (p) {
+        case VTP_PHY_LE_1M:
+        case VTP_PHY_LE_2M:
+        case VTP_PHY_LE_CODED:
+            return 1;
+        default:
+            return 0;   /* A future Bluetooth revision's PHY. Stays unknown. */
+    }
+}
+
+int vtp_decode_link_params(const uint8_t *b, size_t len,
+                           vtp_link_params_t *o, const char **err) {
+    /* Fixed size, no extension mechanism: any other length is malformed. */
+    if (len != VTP_LINK_PARAMS_SIZE) { *err = "length"; return -1; }
+
+    o->validity            = rd16(b + VTP_LINK_PARAMS_OFF_VALIDITY);
+    o->att_mtu             = rd16(b + VTP_LINK_PARAMS_OFF_ATT_MTU);
+    o->ll_max_tx_octets    = rd16(b + VTP_LINK_PARAMS_OFF_LL_MAX_TX_OCTETS);
+    o->ll_max_rx_octets    = rd16(b + VTP_LINK_PARAMS_OFF_LL_MAX_RX_OCTETS);
+    o->conn_interval       = rd16(b + VTP_LINK_PARAMS_OFF_CONN_INTERVAL);
+    o->peripheral_latency  = rd16(b + VTP_LINK_PARAMS_OFF_PERIPHERAL_LATENCY);
+    o->supervision_timeout = rd16(b + VTP_LINK_PARAMS_OFF_SUPERVISION_TIMEOUT);
+    o->phy_tx              = b[VTP_LINK_PARAMS_OFF_PHY_TX];
+    o->phy_rx              = b[VTP_LINK_PARAMS_OFF_PHY_RX];
+    return 0;
+}
