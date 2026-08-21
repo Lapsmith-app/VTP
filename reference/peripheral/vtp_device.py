@@ -59,9 +59,12 @@ ST_OK, ST_UNSUPPORTED, ST_BAD_PARAMS = 0, 1, 2
 ST_TABLE_FULL, ST_RATE_EXCEEDED = 3, 4
 ST_UNKNOWN_HANDLE = 7
 
-# SPEC.md §9.2 — CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK with every id bit set.
-MASK_EXACT = 0x1FFFFFFF
-CAN_ID_BITS = 0x1FFFFFFF
+# SPEC.md §9.2 — matching runs over bits 0-29: the arbitration identifier and
+# the standard/extended format bit. Bits 30 and 31 say how a frame was
+# transmitted, not which frame it is, and take no part. CAN_SUBSCRIBE is
+# CAN_SUBSCRIBE_MASK with every one of those bits set.
+CAN_MATCH_BITS = 0x3FFFFFFF
+MASK_EXACT = 0x3FFFFFFF
 
 SUB_EVERY_FRAME, SUB_PERIODIC, SUB_ON_CHANGE, SUB_EVERY_NTH = 0, 1, 2, 3
 
@@ -501,27 +504,31 @@ class VtpDevice:
             handle, sub = self._governing(cid)
             if sub is None:
                 continue
+            # SPEC.md §6.8 — one set of mode state per matching identifier.
+            st = sub["per_id"].setdefault(
+                cid, {"last": 0, "seen": 0, "emitted_at": 0,
+                      "last_payload": None})
             interval = round(1_000_000 / rate_hz)
-            if now - sub["last"] < interval:
+            if now - st["last"] < interval:
                 continue
-            sub["seen"] += 1
+            st["seen"] += 1
             # SPEC.md §6.8 — the first matching frame is forwarded in every
             # mode. A client that installs a subscription and waits for a value
             # to display should not have to wait for a second frame.
-            first = sub["seen"] == 1
+            first = st["seen"] == 1
             emit = True
             if sub["mode"] == SUB_PERIODIC and sub["arg"] and not first:
-                emit = (now - sub["emitted_at"]) >= sub["arg"] * 1000
+                emit = (now - st["emitted_at"]) >= sub["arg"] * 1000
             elif sub["mode"] == SUB_EVERY_NTH and sub["arg"]:
-                emit = ((sub["seen"] - 1) % sub["arg"]) == 0
+                emit = ((st["seen"] - 1) % sub["arg"]) == 0
             elif sub["mode"] == SUB_ON_CHANGE and not first:
-                emit = payload != sub["last_payload"]
+                emit = payload != st["last_payload"]
                 if emit and sub["arg"]:
-                    emit = (now - sub["emitted_at"]) >= sub["arg"] * 1000
-            sub["last"] = now
+                    emit = (now - st["emitted_at"]) >= sub["arg"] * 1000
+            st["last"] = now
             if emit:
-                sub["emitted_at"] = now
-                sub["last_payload"] = payload
+                st["emitted_at"] = now
+                st["last_payload"] = payload
                 yield {"id": cid, "payload": payload, "_t": now}
 
     # -- Control ----------------------------------------------------------
@@ -559,8 +566,8 @@ class VtpDevice:
             # SPEC.md §6.8 — N of 0 selects no frames at all and is meaningless.
             if mode == SUB_EVERY_NTH and arg == 0:
                 return reply(ST_BAD_PARAMS)
-            cid &= CAN_ID_BITS
-            mask &= CAN_ID_BITS
+            cid &= CAN_MATCH_BITS
+            mask &= CAN_MATCH_BITS
 
             # SPEC.md §9.2 — the same (id, mask) updates in place and keeps its
             # handle, so a client reprogramming on every connect cannot exhaust
@@ -584,7 +591,11 @@ class VtpDevice:
             self._next_handle = (self._next_handle % 0xFFFF) + 1
             self._subscriptions[handle] = {
                 "id": cid, "mask": mask, "mode": mode, "arg": arg,
-                "last": 0, "seen": 0, "emitted_at": 0, "last_payload": None,
+                # SPEC.md §6.8 — mode state is per matching identifier, not per
+                # subscription. A mask covering three identifiers keeps three
+                # independent sets; sharing one would let whichever frame
+                # arrived first consume the interval for the whole group.
+                "per_id": {},
             }
             return reply(ST_OK, struct.pack("<H", handle))
 

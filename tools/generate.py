@@ -554,6 +554,15 @@ def vectors(schema):
                                                 "no ext_count accounts for MUST be rejected.",
          "record": "gps_fix", "hex": (encode(schema, "gps_fix", nominal) + b"\x00").hex(),
          "must_reject": "length"},
+        {"name": "ext-count-exceeds-payload",
+         "desc": "A well-formed 74-byte fix declaring one extension that is not "
+                 "there. The record MUST be rejected: a decoder that trusts "
+                 "ext_count without checking the buffer reads past the end. The "
+                 "mirror of long-payload-no-ext -- the same disagreement about "
+                 "where the record ends, in the opposite direction.",
+         "record": "gps_fix",
+         "hex": encode(schema, "gps_fix", dict(nominal, ext_count=1)).hex(),
+         "must_reject": "ext-truncated"},
     ]
     files["gps-fix.json"] = gps
 
@@ -681,19 +690,60 @@ def vectors(schema):
                  + can_rec(0, 0x1A0, bytes.fromhex("FF"), rtr=True)).hex(),
          "must_reject": "rtr-with-payload"},
         {"name": "len-above-maximum",
-         "desc": "A record declaring a 100-byte payload. `len` is 0..64 even for CAN "
-                 "FD, so the record is malformed and the batch MUST be rejected — not "
-                 "clamped, and not read as 100 bytes.",
+         "desc": "A record declaring a 100-byte payload on a Classic frame. No bus "
+                 "carries it -- Classic stops at 8 and the CAN FD ladder at 64 -- so "
+                 "the record is malformed and the batch MUST be rejected, not clamped "
+                 "and not read as 100 bytes.",
          "record": "can_batch",
          "hex": (encode(schema, "can_header",
                         dict(seq=10, dropped=0, t_base=1, count=1, flags=0))
                  + struct.pack("<HIB", 0, 0x1A0, 100) + bytes(100)).hex(),
-         "must_reject": "bad-length",
+         "must_reject": "classic-length",
          "note": "The corpus cannot reach this rule by construction — every legal "
                  "vector has len <= 64, so removing the bound check changed nothing "
                  "and all 43 vectors still passed. Found by source mutation, which is "
                  "why tools/mutate.py earns its place alongside "
                  "tools/check_corpus.py."},
+        can_batch("can-fd-twelve-byte",
+                  "A CAN FD frame at the first rung above eight. SPEC.md 6.10 -- "
+                  "twelve is representable, eleven is not, and a decoder that "
+                  "accepts any length up to 64 cannot tell them apart.",
+                  dict(seq=17, dropped=0, t_base=9_000_000, count=1, flags=0),
+                  [can_rec(2, 0x2F0, bytes(range(12)), fd=True)],
+                  [{"dt": 2, "id": 0x2F0, "extended": False, "fd": True, "rtr": False,
+                    "len": 12, "payload": bytes(range(12)).hex(),
+                    "t_device_us": 9_000_020}]),
+        {"name": "classic-length-nine",
+         "desc": "A Classic frame declaring nine payload bytes. A Classic frame "
+                 "carries 0..8, so this length is impossible rather than merely "
+                 "large, and the batch MUST be rejected. SPEC.md 6.10.",
+         "record": "can_batch",
+         "hex": (encode(schema, "can_header",
+                        dict(seq=18, dropped=0, t_base=1, count=1, flags=0))
+                 + can_rec(0, 0x1A0, bytes(9))).hex(),
+         "must_reject": "classic-length"},
+        {"name": "fd-length-nine",
+         "desc": "A CAN FD frame declaring nine payload bytes. Above eight the FD "
+                 "DLC ladder jumps to twelve, so nine is a length no controller can "
+                 "produce and the batch MUST be rejected. SPEC.md 6.10.",
+         "record": "can_batch",
+         "hex": (encode(schema, "can_header",
+                        dict(seq=19, dropped=0, t_base=1, count=1, flags=0))
+                 + can_rec(0, 0x1A0, bytes(9), fd=True)).hex(),
+         "must_reject": "fd-length"},
+        {"name": "trailing-bytes-after-batch",
+         "desc": "A complete, well-formed batch followed by two bytes the header "
+                 "does not account for. The notification MUST be rejected: the "
+                 "surplus means the reader and the writer disagree about the batch, "
+                 "so the records already read cannot be trusted either. Distinct "
+                 "from count-exceeds-payload, which is the same disagreement in the "
+                 "opposite direction -- and until this vector existed, relaxing the "
+                 "trailing-byte check to `off > len` passed all 79 vectors.",
+         "record": "can_batch",
+         "hex": (encode(schema, "can_header",
+                        dict(seq=20, dropped=0, t_base=1, count=1, flags=0))
+                 + can_rec(0, 0x1A0, bytes.fromhex("0011")) + b"\xAA\xBB").hex(),
+         "must_reject": "length"},
         {"name": "short-payload",
          "desc": "15 bytes: shorter than the batch header itself. MUST be rejected "
                  "rather than read past the end.",
@@ -808,6 +858,17 @@ def vectors(schema):
                        dict(seq=7, dropped=0, t_base=1, period=5000,
                             count=0, flags=0b011))[:-1].hex(),
          "must_reject": "length"},
+        {"name": "count-exceeds-payload",
+         "desc": "Header declares four samples, one is present. MUST be rejected: "
+                 "a decoder that trusts count without checking the buffer reads "
+                 "three samples of whatever follows the notification.",
+         "record": "imu_batch",
+         "hex": (encode(schema, "imu_header",
+                        dict(seq=20, dropped=0, t_base=1, period=5000, count=4,
+                             flags=0b011))
+                 + encode(schema, "imu_sample",
+                          dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6))).hex(),
+         "must_reject": "length"},
         {"name": "long-payload",
          "desc": "One sample declared, one sample present, plus a trailing byte. The "
                  "length MUST equal the header plus count samples exactly.",
@@ -881,7 +942,7 @@ def vectors(schema):
     ]
 
     # ---- CAN subscription table -----------------------------------------
-    EXACT = 0x1FFFFFFF
+    EXACT = 0x3FFFFFFF  # SPEC.md 9.2
 
     def sub(handle, cid, mask, mode, arg):
         return dict(handle=handle, id=cid, mask=mask, mode=mode, arg=arg)
@@ -910,7 +971,7 @@ def vectors(schema):
                  dict(total=0, index=0, count=0), []),
         can_list("one-exact-id",
                  "A single exact-id subscription. CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK "
-                 "with mask 0x1FFFFFFF, so that is what the table reports.",
+                 "with mask 0x3FFFFFFF, so that is what the table reports.",
                  dict(total=1, index=0, count=1),
                  [sub(1, 0x0C0, EXACT, 0, 0)]),
         can_list("mask-and-exact-overlapping",
@@ -1085,6 +1146,14 @@ def vectors(schema):
          "desc": "5 bytes: shorter than the page header. MUST be rejected.",
          "record": "monitor_list",
          "hex": encode(schema, "monitor_page", dict(total=0, index=0, count=0))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "count-exceeds-page",
+         "desc": "Page declares three entries, one is present. MUST be rejected: "
+                 "a decoder that trusts count without checking the buffer reads "
+                 "two channel assignments out of adjacent memory.",
+         "record": "monitor_list",
+         "hex": (encode(schema, "monitor_page", dict(total=3, index=0, count=3))
+                 + encode(schema, "monitor_channel", dict(slot=0, channel=1))).hex(),
          "must_reject": "length"},
         {"name": "long-page",
          "desc": "One entry declared, one present, plus a trailing byte. MUST be "

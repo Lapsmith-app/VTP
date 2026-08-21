@@ -217,6 +217,13 @@
       "must_reject": "length"
     },
     {
+      "name": "count-exceeds-page",
+      "desc": "Page declares three entries, one is present. MUST be rejected: a decoder that trusts count without checking the buffer reads two channel assignments out of adjacent memory.",
+      "record": "monitor_list",
+      "hex": "03000000030000010000",
+      "must_reject": "length"
+    },
+    {
       "name": "long-page",
       "desc": "One entry declared, one present, plus a trailing byte. MUST be rejected.",
       "record": "monitor_list",

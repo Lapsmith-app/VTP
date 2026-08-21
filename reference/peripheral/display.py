@@ -83,7 +83,7 @@ def render_lines(state):
 
 def format_can_id(can_id, mask):
     """`0x0C0` for an exact subscription, `0x100/1FFFFF0` for a masked one."""
-    exact = 0x1FFFFFFF
+    exact = 0x3FFFFFFF
     return (f"0x{can_id:03X}" if mask == exact
             else f"0x{can_id:03X}/{mask:X}")
 
@@ -490,8 +490,8 @@ if __name__ == "__main__":
             "unwanted": {"gps": 0, "can": 0, "imu": int(t)},
             "rate": {"gps": 10.0, "can": 27.0, "imu": 5.0},
             "pending_dropped": {"gps": 0, "can": 0, "imu": 0},
-            "can_table": [(1, 0x0C0, 0x1FFFFFFF, 0, 0),
-                          (2, 0x1A0, 0x1FFFFFFF, 1, 40),
+            "can_table": [(1, 0x0C0, 0x3FFFFFFF, 0, 0),
+                          (2, 0x1A0, 0x3FFFFFFF, 1, 40),
                           (3, 0x2E0, 0x1FFFFF00, 3, 5)],
             "control": [("12:00:01", "CAN_SUBSCRIBE tag=2 id=0x0C0 mode=0 arg=0", "ok"),
                         ("12:00:01", "CAN_LIST tag=5 start=0", "ok")],

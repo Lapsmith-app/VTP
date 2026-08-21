@@ -197,6 +197,13 @@
       "must_reject": "length"
     },
     {
+      "name": "count-exceeds-payload",
+      "desc": "Header declares four samples, one is present. MUST be rejected: a decoder that trusts count without checking the buffer reads three samples of whatever follows the notification.",
+      "record": "imu_batch",
+      "hex": "1400000001000000000000008813000004030000010002000300040005000600",
+      "must_reject": "length"
+    },
+    {
       "name": "long-payload",
       "desc": "One sample declared, one sample present, plus a trailing byte. The length MUST equal the header plus count samples exactly.",
       "record": "imu_batch",

@@ -125,11 +125,22 @@ def _describe_request(value):
     opcode, tag, params = value[0], value[1], value[2:]
     name = OPCODES.get(opcode, f"0x{opcode:02X}")
     detail = ""
-    if opcode in (0x02, 0x03) and len(params) >= 7:
-        cid, mode, arg = struct.unpack("<IBH", params[:7] if opcode == 0x02
-                                       else params[:4] + params[8:11])
-        detail = f" id=0x{cid & 0x1FFFFFFF:03X} mode={mode} arg={arg}"
-    elif opcode == 0x05 and len(params) == 2:
+    # Each opcode is guarded by the length its own branch reads. One shared
+    # `>= 7` guard let a short CAN_SUBSCRIBE_MASK reach a slice needing 11, and
+    # the struct.error took the peripheral down while logging a request the
+    # device itself had already handled correctly.
+    if opcode == 0x02 and len(params) >= 7:
+        cid, mode, arg = struct.unpack("<IBH", params[:7])
+        mask = 0x3FFFFFFF
+    elif opcode == 0x03 and len(params) >= 11:
+        cid, mask, mode, arg = struct.unpack("<IIBH", params[:11])
+    else:
+        cid = None
+    if cid is not None:
+        fmt = "ext" if cid & (1 << 29) else "std"
+        detail = (f" id=0x{cid & 0x1FFFFFFF:03X}/{fmt} mask=0x{mask:08X} "
+                  f"mode={mode} arg={arg}")
+    if opcode == 0x05 and len(params) == 2:
         detail = f" start={struct.unpack('<H', params)[0]}"
     return f"{name} tag={tag}{detail} params={params.hex() or '-'}"
 

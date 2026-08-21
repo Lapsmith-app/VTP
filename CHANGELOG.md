@@ -8,6 +8,75 @@ conformance vector.
 
 ## [Unreleased]
 
+### Changed — wire format
+- **A CAN subscription now identifies a frame by its format as well as its
+  identifier.** Matching ran over `0x1FFFFFFF`, the twenty-nine arbitration
+  bits. Bit 29 — the standard/extended flag — fell outside it, and the
+  peripheral masked the bit off the frame before comparing, so an exact
+  subscription to standard `0x1A0` also matched extended `0x1A0`. Those are two
+  different frames from possibly two different ECUs, so a client received a
+  payload it had not asked for behind an identifier that looked exactly right:
+  the failure §1.1 exists to prevent.
+
+  Matching now runs over bits 0–29, and `CAN_SUBSCRIBE` is `CAN_SUBSCRIBE_MASK`
+  with a mask of `0x3FFFFFFF` (§9.2). Bits 30 and 31 — CAN FD and RTR —
+  describe how a frame was transmitted rather than which frame it is, and take
+  no part. A client that genuinely wants both formats clears bit 29 in its own
+  mask, which the device can honour precisely because it can see it was asked.
+
+- **Payload lengths a CAN bus cannot carry are now rejected (§6.10).** `len`
+  was bounded at 0..64 for every frame, but the legal lengths are not
+  contiguous. A Classic frame carries 0..8; a CAN FD frame carries a length its
+  four-bit DLC can express, which above eight is the ladder 12, 16, 20, 24, 32,
+  48, 64. Both decoders accepted a nine-byte Classic frame and a nine-byte FD
+  frame, neither of which any controller can produce. A length off the ladder
+  means the reader and the writer disagree about where the record ends — so
+  every byte after it is suspect, including the next frame's identifier — and
+  the batch is rejected rather than repaired.
+
+  These rules subsume the old 0..64 bound in every branch, so it has been
+  removed. A redundant check is worse than none: it can be deleted without any
+  vector noticing, which is exactly what `tools/mutate.py` reported.
+
+### Changed
+- **A device MUST keep subscription mode state per matching identifier
+  (§6.8).** The specification said nothing about masked subscriptions, and the
+  peripheral kept one set of state per subscription. A mask covering `0x0C0`,
+  `0x1A0` and `0x2E0` therefore delivered `0x0C0` alone: the first frame of
+  each tick consumed the interval and the other two were suppressed. All three
+  modes fail differently under shared state — `on_change` worst, comparing one
+  identifier's payload against another's, where "changed" carries no meaning at
+  all — and every one of those failures looks like a quiet bus rather than a
+  bug.
+
+- **Both encoders now refuse to emit anything their own decoders reject.**
+  Over-long standard identifiers, CAN FD with RTR, remote frames carrying a
+  payload and impossible lengths were all encodable. A device that ships one
+  has produced a notification no conforming client can read, and it finds out
+  from the field rather than from a test.
+
+### Fixed
+- **The corpus could not detect a decoder that ignored trailing bytes on a CAN
+  batch.** Relaxing the trailing-byte check from `off != len` to `off > len`
+  passed all 79 vectors. `tools/check_corpus.py` reported full coverage because
+  it sorted must-reject vectors into two buckets — shorter than the base
+  record, and "at or beyond" it — which lumped a truncated batch together with
+  one carrying surplus bytes. Those are opposite faults caught by opposite
+  comparisons, and `count-exceeds-payload` was satisfying the requirement for
+  both.
+
+  The checker now classifies each must-reject vector against its own declared
+  length, in three buckets rather than two. It immediately found the same gap
+  in three more records: `gps_fix`, `imu_batch` and `monitor_list` had no
+  vector whose payload stops short of what its header declares, so a decoder
+  that trusted `count` without checking the buffer passed. Seven vectors added
+  in all; `off > len` now fails.
+
+- **`tools/check_docs.py` held released changelog entries to the current corpus
+  size.** A released entry records what that release contained, and rewriting
+  it to match today's count would falsify history. Only `[Unreleased]` is now
+  checked against the corpus on disk.
+
 ### Changed
 - **The peripheral's synthetic vehicle now varies.** It ran at constant speed on
   a circle, which made every CAN value a constant: engine speed, road speed,

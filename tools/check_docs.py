@@ -47,6 +47,8 @@ HEADING = re.compile(r"^#{2,4}\s+(?:Appendix\s+)?(\d+(?:\.\d+)*)\.?\s")
 REFERENCE = re.compile(
     r"(SPEC|RATIONALE)?(?:\.md)?\s*§\s?(\d+(?:\.\d+)*)")
 COUNT = re.compile(r"(\d+)\s+vectors\s+across\s+(\d+)\s+record\s+types")
+# Everything from the first released heading onward is history.
+RELEASED = re.compile(r"^##\s+\[(?!Unreleased\])")
 
 
 def headings(name):
@@ -89,7 +91,16 @@ def check_counts(problems):
     seen = False
     for name in ("README.md", "CHANGELOG.md"):
         path = ROOT / name
+        released = False
         for n, line in enumerate(path.read_text().splitlines(), 1):
+            # A released changelog entry is a record of what that release
+            # contained, not a claim about the corpus as it stands now.
+            # Rewriting it to match today's count would falsify history, so
+            # only [Unreleased] is held to the current corpus.
+            if name == "CHANGELOG.md" and RELEASED.match(line):
+                released = True
+            if released:
+                continue
             for cases, records in COUNT.findall(line):
                 seen = True
                 if (int(cases), int(records)) != (actual_cases, actual_files):
