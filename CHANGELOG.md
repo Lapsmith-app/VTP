@@ -32,6 +32,18 @@ conformance vector.
 - The device's requested channel set is configurable, and it now asks for six.
 
 ### Fixed
+- **The peripheral replayed its backlog after a stall instead of discarding
+  it.** The IMU catch-up loop emitted one sample per elapsed period however
+  long it had been since the last poll, so a device left unpolled for a minute
+  delivered six thousand batches as fast as the radio would take them. Found by
+  reading the log of a real run: 12,400 notifications in 0.2 seconds after the
+  process spent 38 minutes waiting on a permission prompt.
+
+  Delivering a backlog is worse than losing it. The timestamps say when the
+  samples were taken, so a client cannot tell the stream is behind — it just
+  receives a flood of stale data with old times on it. SPEC.md §8.3 already
+  says what to do: discard what cannot be delivered and report it in `dropped`.
+  The device now bounds the catch-up to one batch and counts the rest.
 - The display window is created **after** the server starts advertising. Tk
   takes over the main run loop when it initialises, and CoreBluetooth needs that
   run loop to deliver its power-on callback; creating the window first left

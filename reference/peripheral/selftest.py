@@ -325,6 +325,23 @@ def main():
     check(reconnected and reconnected[0]["seq"] == 1,
           "seq MUST restart at 0 on a new connection")
 
+    # ---- A stall must lose samples, not replay them (§8.3) --------------
+    stalled = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=0,
+                            imu_hz=100)
+    clock[0] += 60_000_000          # a minute with nobody polling
+    burst = stalled.poll()
+    check(len(burst) <= 2,
+          f"a minute of backlog produced {len(burst)} notifications in one "
+          f"poll; a device MUST discard what it cannot deliver, not replay it")
+    decoded = [decode(c, p) for c, p in burst if c == "imu"]
+    check(decoded and decoded[0]["header"]["dropped"] > 0,
+          "samples discarded during a stall MUST be reported in dropped, not "
+          "dropped silently")
+    ts = [s["t_device_us"] for b in decoded for s in b["samples"]]
+    check(all(t > 59_000_000 for t in ts),
+          f"the samples delivered after a stall MUST be recent ones, not the "
+          f"start of the backlog: {ts[:3]}")
+
     # ---- Monitor: the client supplies, the device displays (§13) --------
     mon = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=0, imu_hz=0)
     info2 = vtp1.decode_info(mon.info())

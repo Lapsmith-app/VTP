@@ -349,6 +349,19 @@ class VtpDevice:
             self._next_gps_us = now + round(1_000_000 / self.gps_hz)
 
         if self.imu_hz:
+            # A device that has not been polled for a while must not replay the
+            # gap. Delivering a backlog means stale samples arriving as fast as
+            # the radio will take them, which is worse than losing them: the
+            # timestamps say when they were taken, so a client cannot tell the
+            # stream is behind. SPEC.md §8.3 says discard and report it.
+            period = self._imu_period_us
+            capacity = self._imu_capacity()
+            if now > self._next_imu_us:
+                behind = (now - self._next_imu_us) // period
+                if behind > capacity:
+                    skipped = behind - capacity
+                    self._dropped["imu"] += skipped
+                    self._next_imu_us += skipped * period
             while now >= self._next_imu_us:
                 t = self._next_imu_us
                 if self._imu_batch_t0 is None:
