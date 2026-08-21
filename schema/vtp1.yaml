@@ -157,22 +157,22 @@ records:
       - {name: seq,      offset: 0,  size: 2, type: u16, desc: "Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection"}
       - {name: dropped,  offset: 2,  size: 2, type: u16, desc: "Fixes accepted then discarded since the previous notification; saturates, never wraps"}
       - {name: validity, offset: 4,  size: 4, type: u32, bitmask: gps_validity}
-      - {name: t_device, offset: 8,  size: 8, type: u64, units: us,  desc: "Monotonic device clock"}
+      - {name: t_device, offset: 8,  size: 8, type: u64, units: µs,  desc: "Monotonic device clock (§8.1)"}
       - {name: t_utc,    offset: 16, size: 8, type: i64, units: ms,  desc: "Unix epoch", valid_bit: t_utc}
-      - {name: lat,      offset: 24, size: 4, type: i32, units: deg, scale: 1.0e-7, valid_bit: position}
-      - {name: lon,      offset: 28, size: 4, type: i32, units: deg, scale: 1.0e-7, valid_bit: position}
-      - {name: alt_msl,       offset: 32, size: 4, type: i32, units: mm, valid_bit: alt_msl}
-      - {name: alt_ellipsoid, offset: 36, size: 4, type: i32, units: mm, valid_bit: alt_ellipsoid}
-      - {name: vel_n,    offset: 40, size: 4, type: i32, units: mm/s, valid_bit: velocity}
-      - {name: vel_e,    offset: 44, size: 4, type: i32, units: mm/s, valid_bit: velocity}
-      - {name: vel_d,    offset: 48, size: 4, type: i32, units: mm/s, valid_bit: velocity}
-      - {name: head_mot, offset: 52, size: 4, type: i32, units: deg, scale: 1.0e-5, valid_bit: head_mot}
-      - {name: h_acc,    offset: 56, size: 4, type: u32, units: mm,   desc: "1 sigma", valid_bit: h_acc}
-      - {name: v_acc,    offset: 60, size: 4, type: u32, units: mm,   desc: "1 sigma", valid_bit: v_acc}
-      - {name: s_acc,    offset: 64, size: 4, type: u32, units: mm/s, desc: "1 sigma", valid_bit: s_acc}
-      - {name: p_dop,    offset: 68, size: 2, type: u16, scale: 0.01, valid_bit: p_dop}
+      - {name: lat,      offset: 24, size: 4, type: i32, units: deg, scale: 1.0e-7, valid_bit: position, desc: "Latitude — positive north, negative south"}
+      - {name: lon,      offset: 28, size: 4, type: i32, units: deg, scale: 1.0e-7, valid_bit: position, desc: "Longitude — positive east, negative west"}
+      - {name: alt_msl,       offset: 32, size: 4, type: i32, units: mm, valid_bit: alt_msl, desc: "Altitude above mean sea level"}
+      - {name: alt_ellipsoid, offset: 36, size: 4, type: i32, units: mm, valid_bit: alt_ellipsoid, desc: "Altitude above the WGS-84 ellipsoid"}
+      - {name: vel_n,    offset: 40, size: 4, type: i32, units: mm/s, valid_bit: velocity, desc: "Velocity, north component"}
+      - {name: vel_e,    offset: 44, size: 4, type: i32, units: mm/s, valid_bit: velocity, desc: "Velocity, east component"}
+      - {name: vel_d,    offset: 48, size: 4, type: i32, units: mm/s, valid_bit: velocity, desc: "Velocity, down component — positive descending"}
+      - {name: head_mot, offset: 52, size: 4, type: i32, units: deg, scale: 1.0e-5, valid_bit: head_mot, desc: "Heading of motion, clockwise from true north"}
+      - {name: h_acc,    offset: 56, size: 4, type: u32, units: mm,   desc: "Horizontal position accuracy estimate, 1 sigma", valid_bit: h_acc}
+      - {name: v_acc,    offset: 60, size: 4, type: u32, units: mm,   desc: "Vertical position accuracy estimate, 1 sigma", valid_bit: v_acc}
+      - {name: s_acc,    offset: 64, size: 4, type: u32, units: mm/s, desc: "Speed accuracy estimate, 1 sigma", valid_bit: s_acc}
+      - {name: p_dop,    offset: 68, size: 2, type: u16, scale: 0.01, valid_bit: p_dop, desc: "Position dilution of precision"}
       - {name: fix_type, offset: 70, size: 1, type: u8, enum: fix_type}
-      - {name: num_sv,   offset: 71, size: 1, type: u8, valid_bit: num_sv}
+      - {name: num_sv,   offset: 71, size: 1, type: u8, valid_bit: num_sv, desc: "Satellites used in the solution"}
       - {name: fix_flags, offset: 72, size: 1, type: u8, bitmask: fix_flags}
       - {name: ext_count, offset: 73, size: 1, type: u8, desc: "Extension records following the base record"}
 
@@ -183,10 +183,10 @@ records:
     desc: "Batch header. Followed by `count` can_record entries."
     fields:
       - {name: seq,     offset: 0,  size: 2, type: u16, desc: "Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection"}
-      - {name: dropped, offset: 2,  size: 2, type: u16, desc: "Frames accepted then discarded since the previous notification; excludes frames no subscription matched; saturates"}
-      - {name: t_base,  offset: 4,  size: 8, type: u64, units: us, desc: "Bus-arrival time of record 0"}
+      - {name: dropped, offset: 2,  size: 2, type: u16, desc: "Frames accepted then discarded since the previous notification; excludes frames no subscription matched or a subscription mode did not select; saturates"}
+      - {name: t_base,  offset: 4,  size: 8, type: u64, units: µs, desc: "Bus-arrival time of record 0, on the device clock (§8.1)"}
       - {name: count,   offset: 12, size: 1, type: u8}
-      - {name: flags,   offset: 13, size: 1, type: u8, desc: "bit0 device is shedding load"}
+      - {name: flags,   offset: 13, size: 1, type: u8, desc: "bit0 device is shedding load — discarding accepted frames (§6.3)"}
       - {name: reserved, offset: 14, size: 2, type: u16, reserved: true}
 
   can_record:
@@ -194,7 +194,7 @@ records:
     variable: payload
     desc: "One CAN frame with a device-measured bus-arrival time."
     fields:
-      - {name: dt,  offset: 0, size: 2, type: u16, units: "10us", desc: "Ticks since t_base; window is 0..655.35 ms"}
+      - {name: dt,  offset: 0, size: 2, type: u16, units: "10µs", desc: "Ticks since this batch's own t_base; window is 0..655.35 ms"}
       - {name: id,  offset: 2, size: 4, type: u32, desc: "bits 0-28 arbitration id; b29 extended; b30 CAN FD; b31 RTR"}
       - {name: len, offset: 6, size: 1, type: u8,  desc: "Payload length, 0..64"}
 
@@ -206,13 +206,13 @@ records:
     fields:
       - {name: seq,     offset: 0,  size: 2, type: u16, desc: "Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection"}
       - {name: dropped, offset: 2,  size: 2, type: u16, desc: "Samples accepted then discarded since the previous notification; saturates, never wraps"}
-      - {name: t_base,  offset: 4,  size: 8, type: u64, units: us, desc: "Timestamp of sample 0"}
+      - {name: t_base,  offset: 4,  size: 8, type: u64, units: µs, desc: "Device-clock timestamp of sample 0 (§8.1)"}
       # u32 rather than u16: a u16 microsecond period cannot express any rate
       # below 15.26 Hz, so a 10 Hz IMU was unrepresentable. Microseconds rather
       # than a finer unit so this shares the device clock's units with GPS and
       # CAN -- cross-channel alignment is the point, and a second scale would
       # be a division at every comparison.
-      - {name: period,  offset: 12, size: 4, type: u32, units: us, desc: "Interval between samples"}
+      - {name: period,  offset: 12, size: 4, type: u32, units: µs, desc: "Interval between consecutive samples"}
       - {name: count,   offset: 16, size: 1, type: u8}
       - {name: flags,   offset: 17, size: 1, type: u8, desc: "bit0 accel present, bit1 gyro present"}
       - {name: reserved, offset: 18, size: 2, type: u16, reserved: true}
