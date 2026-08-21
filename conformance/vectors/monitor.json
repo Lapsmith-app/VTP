@@ -1,0 +1,227 @@
+{
+  "protocol": "VTP/1",
+  "generated_by": "tools/generate.py",
+  "cases": [
+    {
+      "name": "dash-asks-for-four",
+      "desc": "A display device asking for the four values a lap timer shows. It names channels; it does not send an expression to evaluate.",
+      "record": "monitor_list",
+      "hex": "04000000040000010000010200000204000003060000",
+      "expect": {
+        "page": {
+          "total": 4,
+          "index": 0,
+          "count": 4,
+          "reserved": 0
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "reserved": 0,
+            "channel_known": true
+          },
+          {
+            "slot": 1,
+            "channel": 2,
+            "reserved": 0,
+            "channel_known": true
+          },
+          {
+            "slot": 2,
+            "channel": 4,
+            "reserved": 0,
+            "channel_known": true
+          },
+          {
+            "slot": 3,
+            "channel": 6,
+            "reserved": 0,
+            "channel_known": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "no-channels-requested",
+      "desc": "A device that implements the role but currently wants nothing. Legal, and the state before it has configured itself.",
+      "record": "monitor_list",
+      "hex": "000000000000",
+      "expect": {
+        "page": {
+          "total": 0,
+          "index": 0,
+          "count": 0,
+          "reserved": 0
+        },
+        "entries": []
+      }
+    },
+    {
+      "name": "unknown-channel-requested",
+      "desc": "A device asking for a channel from a later minor. A client MUST report it unknown, MUST NOT substitute another, and MUST answer the slot as absent rather than omitting it.",
+      "record": "monitor_list",
+      "hex": "01000000010009921000",
+      "expect": {
+        "page": {
+          "total": 1,
+          "index": 0,
+          "count": 1,
+          "reserved": 0
+        },
+        "entries": [
+          {
+            "slot": 9,
+            "channel": 4242,
+            "reserved": 0,
+            "channel_known": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "first-lap-nothing-to-report",
+      "desc": "Mid first lap: elapsed time is known, but there is no last lap and no delta yet. Those slots are present-bit clear and zero -- a device that renders 0.000 for a last lap that has not happened has been told something false.",
+      "record": "monitor_update",
+      "hex": "0100030000014ea50000010000000000020000000000",
+      "expect": {
+        "header": {
+          "seq": 1,
+          "count": 3,
+          "reserved": 0
+        },
+        "values": [
+          {
+            "slot": 0,
+            "validity": 1,
+            "value": 42318,
+            "absent": []
+          },
+          {
+            "slot": 1,
+            "validity": 0,
+            "value": 0,
+            "absent": [
+              "value"
+            ]
+          },
+          {
+            "slot": 2,
+            "validity": 0,
+            "value": 0,
+            "absent": [
+              "value"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "second-lap-all-known",
+      "desc": "A lap later: every slot carries a measurement, and delta_best is negative because this lap is ahead.",
+      "record": "monitor_update",
+      "hex": "020003000001e42e000001012c55010002011efbffff",
+      "expect": {
+        "header": {
+          "seq": 2,
+          "count": 3,
+          "reserved": 0
+        },
+        "values": [
+          {
+            "slot": 0,
+            "validity": 1,
+            "value": 12004,
+            "absent": []
+          },
+          {
+            "slot": 1,
+            "validity": 1,
+            "value": 87340,
+            "absent": []
+          },
+          {
+            "slot": 2,
+            "validity": 1,
+            "value": -1250,
+            "absent": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "stale-value-behind-cleared-bit",
+      "desc": "A client that clears the present bit but leaves the previous value in the bytes. A device MUST report the slot absent on the strength of the bit alone, and a conforming encoder normalises these bytes to zero.",
+      "record": "monitor_update",
+      "hex": "0300010001002c550100",
+      "expect": {
+        "header": {
+          "seq": 3,
+          "count": 1,
+          "reserved": 0
+        },
+        "values": [
+          {
+            "slot": 1,
+            "validity": 0,
+            "value": 87340,
+            "absent": [
+              "value"
+            ]
+          }
+        ]
+      },
+      "canonical": false,
+      "expect_roundtrip_hex": "03000100010000000000"
+    },
+    {
+      "name": "empty-update",
+      "desc": "count 0. Legal: nothing changed. A device MUST accept it.",
+      "record": "monitor_update",
+      "hex": "04000000",
+      "expect": {
+        "header": {
+          "seq": 4,
+          "count": 0,
+          "reserved": 0
+        },
+        "values": []
+      }
+    },
+    {
+      "name": "short-payload",
+      "desc": "3 bytes: shorter than the update header. MUST be rejected.",
+      "record": "monitor_update",
+      "hex": "050000",
+      "must_reject": "length"
+    },
+    {
+      "name": "long-payload",
+      "desc": "One value declared, one present, plus a trailing byte. MUST be rejected rather than ignored.",
+      "record": "monitor_update",
+      "hex": "0600010000010100000000",
+      "must_reject": "length"
+    },
+    {
+      "name": "count-exceeds-payload",
+      "desc": "Header claims two values, one is present. MUST be rejected.",
+      "record": "monitor_update",
+      "hex": "07000200000101000000",
+      "must_reject": "truncated-record"
+    },
+    {
+      "name": "short-page",
+      "desc": "5 bytes: shorter than the page header. MUST be rejected.",
+      "record": "monitor_list",
+      "hex": "0000000000",
+      "must_reject": "length"
+    },
+    {
+      "name": "long-page",
+      "desc": "One entry declared, one present, plus a trailing byte. MUST be rejected.",
+      "record": "monitor_list",
+      "hex": "0100000001000001000000",
+      "must_reject": "length"
+    }
+  ]
+}

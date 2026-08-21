@@ -191,7 +191,7 @@ Total: **24 bytes**. All fields little-endian.
 | 0 | `gps` | — |
 | 1 | `can` | — |
 | 2 | `imu` | — |
-| 3 | `monitor` | — |
+| 3 | `monitor` | Device asks the client for values to display (§13) |
 | 4 | `control` | — |
 | 5 | `can_fd` | — |
 | 6 | `masked_subscriptions` | — |
@@ -641,6 +641,7 @@ request.
 | `0x20` | `IMU_SET_RATE` | `hz:u16` | — | — |
 | `0x30` | `TIME_SYNC` | `host_t_utc_ms:i64` | `t_device:u64` | The device clock at the instant the write was received |
 | `0x31` | `GET_LINK_PARAMS` | — | `link_params record` | — |
+| `0x40` | `MONITOR_LIST` | `start:u16` | `monitor_page record` | One page of the channels this device asks the client to supply |
 <!-- END GENERATED: control -->
 
 `status` values:
@@ -897,6 +898,10 @@ all.
 | `can_record` | No — closed for major version 1 | Up to 4000 per second |
 | `imu_header` | No — closed for major version 1 | One per notification |
 | `imu_sample` | No — closed for major version 1 | Up to 833 per second |
+| `monitor_page` | No — closed for major version 1 | — |
+| `monitor_channel` | No — closed for major version 1 | — |
+| `monitor_header` | No — closed for major version 1 | — |
+| `monitor_value` | No — closed for major version 1 | — |
 | `can_list_page` | No — closed for major version 1 | One per CAN_LIST page |
 | `can_subscription` | No — closed for major version 1 | One per table entry |
 | `link_params` | No — closed for major version 1 | On request |
@@ -979,6 +984,157 @@ needs verifying on a bench rather than in CI.
 
 ---
 
+## 13. Monitor characteristic — WRITE
+
+Every other role carries measurement from the device to the client. Monitor runs
+the other way: the client supplies values the device cannot compute, so that a
+device with a display can show them.
+
+Lap time is the example that justifies the role. A logger has no idea where the
+start and finish line is — that is drawn on a map in the client — so a device
+can only ever display a lap time that the client sends it.
+
+A device implementing this role MUST set `capabilities` bit 3 and MUST expose
+the `monitor_values` characteristic (§3.1).
+
+### 13.1 The device asks; the client supplies
+
+The device declares which channels it wants. The client reads that declaration
+with `MONITOR_LIST` (§9), evaluates the channels it can, and writes values to
+`monitor_values`.
+
+The declaration is **fixed for the duration of a connection**. A device that
+needs a different set asks for everything it might display and chooses locally,
+or reconnects. This is the same rule as §9.2's subscription table for the same
+reason: a client that establishes state at connect never inherits state it did
+not install.
+
+A client MUST NOT write to `monitor_values` before reading the declaration. A
+device MUST ignore a value for a slot it did not ask for.
+
+### 13.2 Channels are enumerated, not computed
+
+<!-- BEGIN GENERATED: enum:channel -->
+| Value | Name | Meaning |
+| --- | --- | --- |
+| 1 | `lap_time` | Elapsed time in the current lap, ms |
+| 2 | `last_lap_time` | ms |
+| 3 | `best_lap_time` | ms |
+| 4 | `delta_best` | Time ahead of or behind the best lap, ms, signed |
+| 5 | `predicted_lap_time` | ms |
+| 6 | `lap_number` | Laps completed in this session, from 1 |
+| 7 | `speed` | mm/s |
+| 8 | `session_distance` | m |
+| 9 | `session_time` | ms |
+| *other* | *unknown* | MUST decode as unknown, never as a default |
+<!-- END GENERATED: enum:channel -->
+
+A device names a channel; it does not send an expression to be evaluated. The
+protocol therefore needs no expression language, no shared namespace of variable
+names, and no parser on either side, and a client cannot fail to understand a
+request in any way except not implementing the channel.
+
+Each channel has exactly one unit, fixed by this table. There is no unit
+negotiation and no scale factor: `lap_time` is milliseconds everywhere, forever.
+
+A client that does not implement a requested channel MUST report it absent
+(§13.4) rather than omitting it. Absent is a state the device can render; silence
+is indistinguishable from the client having crashed.
+
+New channels MAY be added in a minor version, so a device MUST treat an
+unrecognised channel value as unknown and MUST NOT substitute another.
+
+### 13.3 The declaration
+
+<!-- BEGIN GENERATED: monitor_page -->
+*One page of the channels a device asks for. Followed by `count` monitor_channel entries.*
+
+Total: **6 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `total` | Channels requested, across all pages |
+| 2 | 2 | `u16` | `index` | Table index of the first entry in this page |
+| 4 | 1 | `u8` | `count` | Entries in this page |
+| 5 | 1 | `u8` | `reserved` | **reserved — MUST be zero** |
+<!-- END GENERATED: monitor_page -->
+
+followed by `count` entries:
+
+<!-- BEGIN GENERATED: monitor_channel -->
+*One channel a device asks the client to supply.*
+
+Total: **4 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `slot` | The device's own name for this value; used in monitor_value |
+| 1 | 2 | `u16` | `channel` | enum `channel` |
+| 3 | 1 | `u8` | `reserved` | **reserved — MUST be zero** |
+<!-- END GENERATED: monitor_channel -->
+
+`slot` is the device's own name for the value; the client quotes it back in
+every update. A device MAY use any slot numbers it likes and MUST NOT repeat
+one. Paging works exactly as §9.5 describes.
+
+### 13.4 Values
+
+The client writes a batch header followed by values:
+
+<!-- BEGIN GENERATED: monitor_header -->
+*Batch header for a client-to-device value update. Followed by `count` monitor_value entries.*
+
+Total: **4 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `seq` | Updates written by the client; +1 each, wraps, restarts at 0 per connection |
+| 2 | 1 | `u8` | `count` | — |
+| 3 | 1 | `u8` | `reserved` | **reserved — MUST be zero** |
+<!-- END GENERATED: monitor_header -->
+
+<!-- BEGIN GENERATED: monitor_value -->
+*One value for a slot the device asked for.*
+
+Total: **6 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `slot` | — |
+| 1 | 1 | `u8` | `validity` | bitmask `monitor_validity` |
+| 2 | 4 | `i32` | `value` | valid when `validity` bit 0 (`present`) is set |
+<!-- END GENERATED: monitor_value -->
+
+<!-- BEGIN GENERATED: bitmask:monitor_validity -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `present` | The client can currently supply this channel |
+| 1+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:monitor_validity -->
+
+The write length MUST equal the header plus exactly `count` values, and a device
+MUST reject any other length. A client MUST NOT write more than the negotiated
+ATT MTU permits.
+
+**A value whose `present` bit is clear MUST be written as zero and MUST be
+rendered as unavailable.** This is §1.1 in the one place the protocol reverses
+direction, and it is the reason the flag exists: before the first lap of a
+session there is no last lap time, and a device that displays 0.000 for it has
+been told something false. The client MUST clear the bit rather than omit the
+slot or send a placeholder.
+
+A client SHOULD write only when a value it has been asked for changes. There is
+no minimum rate; a device MUST NOT infer that an un-updated value has expired,
+because the client sends nothing precisely when nothing has changed.
+
+### 13.5 What Monitor is not
+
+It is not a route for vehicle data. A client MUST NOT use it to send back
+anything it received from the device, and a device MUST NOT rely on it for
+anything it records. Monitor drives a display; the recording is the client's.
+
+---
+
 ## Appendix A — Reserved space
 
 | Location | Reserved | Purpose |
@@ -988,6 +1144,10 @@ needs verifying on a bench rather than in CI.
 | `info.capabilities` | bits 8–31 | Roles and features added in a later minor |
 | `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (§6.9); high byte unassigned |
 | `can_list_page.reserved` | 1 byte | Paging metadata |
+| `monitor_page.reserved` | 1 byte | Paging metadata |
+| `monitor_channel.reserved` | 1 byte | Per-channel metadata |
+| `monitor_header.reserved` | 1 byte | Update metadata |
+| `monitor_value.validity` | bits 1–7 | Validity for values added in a later minor |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
 | `imu_header.flags` | bits 2–7 | Additional sensor groups |
 | Extension types | `0x00`–`0xFF` | `0x80`–`0xFF` are reserved for vendor-private use and MUST NOT be assigned by this specification |

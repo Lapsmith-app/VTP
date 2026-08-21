@@ -324,6 +324,65 @@ def main():
     check(reconnected and reconnected[0]["seq"] == 1,
           "seq MUST restart at 0 on a new connection")
 
+    # ---- Monitor: the client supplies, the device displays (§13) --------
+    mon = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=0, imu_hz=0)
+    info2 = vtp1.decode_info(mon.info())
+    check(info2["capabilities"] & (1 << 3),
+          "a device implementing Monitor MUST declare capability bit 3")
+
+    listing = mon.handle_control(bytes([dev.MONITOR_LIST, 1])
+                                 + struct.pack("<H", 0))
+    check(listing[2] == dev.ST_OK, "MONITOR_LIST was refused")
+    table = vtp1.decode_monitor_list(listing[3:])
+    check(table["page"]["total"] == 4,
+          f"expected 4 requested channels, got {table['page']['total']}")
+    check(all(e["channel_known"] for e in table["entries"]),
+          "the device asked for a channel the reference decoder cannot name")
+
+    # Before anything is supplied, every slot renders unavailable.
+    check(all(line.endswith("--") for line in mon.display_lines()),
+          f"a device MUST NOT display a value nobody supplied: "
+          f"{mon.display_lines()}")
+
+    # Mid first lap: elapsed is known; last lap and delta do not exist yet.
+    import vtp1_encode as menc
+    update = menc.encode_monitor_update(
+        {"seq": 1, "count": 3, "reserved": 0},
+        [{"slot": 0, "validity": dev.MONITOR_PRESENT, "value": 42_318},
+         {"slot": 1, "validity": 0, "value": 0},
+         {"slot": 2, "validity": 0, "value": 0}])
+    check(mon.handle_monitor_write(update) is None,
+          "a well-formed monitor update was rejected")
+    lines = mon.display_lines()
+    check(lines[0] == "LAP: 42318", f"elapsed lap time not displayed: {lines}")
+    check(lines[1].endswith("--") and lines[2].endswith("--"),
+          f"a slot whose present bit is clear MUST render unavailable, not 0: "
+          f"{lines}")
+
+    # A cleared present bit with a stale value in the bytes: the bit governs.
+    stale = menc.encode_monitor_update(
+        {"seq": 2, "count": 1, "reserved": 0},
+        [{"slot": 1, "validity": 0, "value": 87_340}])
+    mon.handle_monitor_write(stale)
+    check(mon.display_lines()[1].endswith("--"),
+          "a stale value behind a cleared present bit MUST NOT be displayed")
+
+    # A slot the device never asked for is ignored, not an error.
+    stray = menc.encode_monitor_update(
+        {"seq": 3, "count": 1, "reserved": 0},
+        [{"slot": 200, "validity": dev.MONITOR_PRESENT, "value": 5}])
+    check(mon.handle_monitor_write(stray) is None,
+          "a value for an unrequested slot MUST be ignored, not rejected")
+
+    check(mon.handle_monitor_write(update[:-1]) is not None,
+          "a truncated monitor update MUST be rejected, not partly applied")
+
+    # A reconnection starts blank rather than showing the last session.
+    mon.on_connect()
+    check(all(line.endswith("--") for line in mon.display_lines()),
+          "a reconnection MUST clear the display, not inherit the previous "
+          "connection's values")
+
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)
     ticks = [live.now_us() for _ in range(200)]

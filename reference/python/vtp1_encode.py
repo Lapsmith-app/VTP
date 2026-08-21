@@ -166,6 +166,30 @@ def encode_can_list(page, entries):
     return bytes(out)
 
 
+def encode_monitor_list(page, entries):
+    """SPEC.md §13.3."""
+    if len(entries) != page.get("count", 0):
+        raise EncodeError(
+            f"monitor_page.count is {page.get('count', 0)} but "
+            f"{len(entries)} entr(ies) were supplied")
+    out = bytearray(_pack("monitor_page", page))
+    for e in entries:
+        out += _pack("monitor_channel", e)
+    return bytes(out)
+
+
+def encode_monitor_update(header, values):
+    """SPEC.md §13.4. A value whose present bit is clear is written as zero."""
+    if len(values) != header.get("count", 0):
+        raise EncodeError(
+            f"monitor_header.count is {header.get('count', 0)} but "
+            f"{len(values)} value(s) were supplied")
+    out = bytearray(_pack("monitor_header", header))
+    for v in values:
+        out += _pack("monitor_value", _gate("monitor_value", v))
+    return bytes(out)
+
+
 def encode_link_params(link_params):
     """SPEC.md §9.1. The detail of a GET_LINK_PARAMS response."""
     return _pack("link_params", _gate("link_params", link_params))
@@ -180,4 +204,6 @@ ENCODERS = {
     "info": encode_info,
     "link_params": encode_link_params,
     "can_list": lambda d: encode_can_list(d["page"], d["entries"]),
+    "monitor_list": lambda d: encode_monitor_list(d["page"], d["entries"]),
+    "monitor_update": lambda d: encode_monitor_update(d["header"], d["values"]),
 }

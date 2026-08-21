@@ -232,6 +232,70 @@ void vtp_can_subscription_at(const uint8_t *b, uint8_t index,
     o->arg    = rd16(e + VTP_CAN_SUBSCRIPTION_OFF_ARG);
 }
 
+int vtp_channel_known(uint16_t c) {
+    switch (c) {
+        case VTP_CHANNEL_LAP_TIME:
+        case VTP_CHANNEL_LAST_LAP_TIME:
+        case VTP_CHANNEL_BEST_LAP_TIME:
+        case VTP_CHANNEL_DELTA_BEST:
+        case VTP_CHANNEL_PREDICTED_LAP_TIME:
+        case VTP_CHANNEL_LAP_NUMBER:
+        case VTP_CHANNEL_SPEED:
+        case VTP_CHANNEL_SESSION_DISTANCE:
+        case VTP_CHANNEL_SESSION_TIME:
+            return 1;
+        default:
+            return 0;   /* A later minor's channel. Stays unknown. SPEC.md §13.2 */
+    }
+}
+
+int vtp_decode_monitor_list(const uint8_t *b, size_t len,
+                            vtp_monitor_page_t *p, const char **err) {
+    if (len < VTP_MONITOR_PAGE_SIZE) { *err = "length"; return -1; }
+    p->total    = rd16(b + VTP_MONITOR_PAGE_OFF_TOTAL);
+    p->index    = rd16(b + VTP_MONITOR_PAGE_OFF_INDEX);
+    p->count    = b[VTP_MONITOR_PAGE_OFF_COUNT];
+    p->reserved = b[VTP_MONITOR_PAGE_OFF_RESERVED];
+
+    const size_t needed = (size_t)VTP_MONITOR_PAGE_SIZE
+                        + (size_t)p->count * VTP_MONITOR_CHANNEL_SIZE;
+    if (len < needed) { *err = "truncated-record"; return -1; }
+    if (len != needed) { *err = "length"; return -1; }
+    return 0;
+}
+
+void vtp_monitor_channel_at(const uint8_t *b, uint8_t index,
+                            vtp_monitor_channel_t *o) {
+    const uint8_t *e = b + VTP_MONITOR_PAGE_SIZE
+                     + (size_t)index * VTP_MONITOR_CHANNEL_SIZE;
+    o->slot     = e[VTP_MONITOR_CHANNEL_OFF_SLOT];
+    o->channel  = rd16(e + VTP_MONITOR_CHANNEL_OFF_CHANNEL);
+    o->reserved = e[VTP_MONITOR_CHANNEL_OFF_RESERVED];
+}
+
+int vtp_decode_monitor_update(const uint8_t *b, size_t len,
+                              vtp_monitor_header_t *h, const char **err) {
+    if (len < VTP_MONITOR_HEADER_SIZE) { *err = "length"; return -1; }
+    h->seq      = rd16(b + VTP_MONITOR_HEADER_OFF_SEQ);
+    h->count    = b[VTP_MONITOR_HEADER_OFF_COUNT];
+    h->reserved = b[VTP_MONITOR_HEADER_OFF_RESERVED];
+
+    const size_t needed = (size_t)VTP_MONITOR_HEADER_SIZE
+                        + (size_t)h->count * VTP_MONITOR_VALUE_SIZE;
+    if (len < needed) { *err = "truncated-record"; return -1; }
+    if (len != needed) { *err = "length"; return -1; }
+    return 0;
+}
+
+void vtp_monitor_value_at(const uint8_t *b, uint8_t index,
+                          vtp_monitor_value_t *o) {
+    const uint8_t *e = b + VTP_MONITOR_HEADER_SIZE
+                     + (size_t)index * VTP_MONITOR_VALUE_SIZE;
+    o->slot     = e[VTP_MONITOR_VALUE_OFF_SLOT];
+    o->validity = e[VTP_MONITOR_VALUE_OFF_VALIDITY];
+    o->value    = (int32_t)rd32(e + VTP_MONITOR_VALUE_OFF_VALUE);
+}
+
 int vtp_phy_known(uint8_t p) {
     switch (p) {
         case VTP_PHY_LE_1M:

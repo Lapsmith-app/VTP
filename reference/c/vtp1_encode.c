@@ -187,6 +187,58 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     return VTP_INFO_SIZE;
 }
 
+int vtp_encode_monitor_list(const vtp_monitor_page_t *p,
+                            const vtp_monitor_channel_t *entries,
+                            uint8_t *out, size_t cap) {
+    const size_t needed = (size_t)VTP_MONITOR_PAGE_SIZE
+                        + (size_t)p->count * VTP_MONITOR_CHANNEL_SIZE;
+    if (cap < needed) return -1;
+    if (p->count && !entries) return -1;
+    memset(out, 0, needed);
+
+    wr16(out + VTP_MONITOR_PAGE_OFF_TOTAL, p->total);
+    wr16(out + VTP_MONITOR_PAGE_OFF_INDEX, p->index);
+    out[VTP_MONITOR_PAGE_OFF_COUNT] = p->count;
+    out[VTP_MONITOR_PAGE_OFF_RESERVED] = p->reserved;
+
+    for (uint8_t i = 0; i < p->count; i++) {
+        uint8_t *e = out + VTP_MONITOR_PAGE_SIZE
+                   + (size_t)i * VTP_MONITOR_CHANNEL_SIZE;
+        e[VTP_MONITOR_CHANNEL_OFF_SLOT] = entries[i].slot;
+        wr16(e + VTP_MONITOR_CHANNEL_OFF_CHANNEL, entries[i].channel);
+        e[VTP_MONITOR_CHANNEL_OFF_RESERVED] = entries[i].reserved;
+    }
+    return (int)needed;
+}
+
+int vtp_encode_monitor_update(const vtp_monitor_header_t *h,
+                              const vtp_monitor_value_t *values,
+                              uint8_t *out, size_t cap) {
+    const size_t needed = (size_t)VTP_MONITOR_HEADER_SIZE
+                        + (size_t)h->count * VTP_MONITOR_VALUE_SIZE;
+    if (cap < needed) return -1;
+    if (h->count && !values) return -1;
+    memset(out, 0, needed);
+
+    wr16(out + VTP_MONITOR_HEADER_OFF_SEQ, h->seq);
+    out[VTP_MONITOR_HEADER_OFF_COUNT] = h->count;
+    out[VTP_MONITOR_HEADER_OFF_RESERVED] = h->reserved;
+
+    for (uint8_t i = 0; i < h->count; i++) {
+        uint8_t *e = out + VTP_MONITOR_HEADER_SIZE
+                   + (size_t)i * VTP_MONITOR_VALUE_SIZE;
+        e[VTP_MONITOR_VALUE_OFF_SLOT] = values[i].slot;
+        e[VTP_MONITOR_VALUE_OFF_VALIDITY] = values[i].validity;
+        /* A client that clears the present bit cannot also ship the value it
+         * was hiding -- the same rule as everywhere else, in the one place the
+         * protocol reverses direction. */
+        wr32(e + VTP_MONITOR_VALUE_OFF_VALUE,
+             gate32((uint32_t)values[i].value, values[i].validity,
+                    VTP_MONITOR_VALIDITY_PRESENT));
+    }
+    return (int)needed;
+}
+
 int vtp_encode_can_list(const vtp_can_list_page_t *p,
                         const vtp_can_subscription_t *entries,
                         uint8_t *out, size_t cap) {

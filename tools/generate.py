@@ -962,6 +962,140 @@ def vectors(schema):
          "must_reject": "truncated-record"},
     ]
 
+    # ---- Monitor ---------------------------------------------------------
+    def monitor_list(name, desc, page, entries, **kw):
+        raw = encode(schema, "monitor_page", page) + b"".join(
+            encode(schema, "monitor_channel", e) for e in entries)
+        known = {m["value"] for m in SCHEMA_ENUMS["channel"]}
+        exp = []
+        for e in entries:
+            row = {f["name"]: e.get(f["name"], 0)
+                   for f in schema["records"]["monitor_channel"]["fields"]}
+            row["channel_known"] = row["channel"] in known
+            exp.append(row)
+        c = {"name": name, "desc": desc, "record": "monitor_list", "hex": raw.hex(),
+             "expect": {"page": {f["name"]: page.get(f["name"], 0)
+                                 for f in schema["records"]["monitor_page"]["fields"]},
+                        "entries": exp}}
+        c.update(kw)
+        return c
+
+    def monitor_update(name, desc, hdr, values, *, canonical=True, **kw):
+        rec = schema["records"]["monitor_value"]
+        bit = {b["name"]: b["bit"]
+               for b in schema["bitmasks"]["monitor_validity"]["bits"]}
+
+        def gate(v):
+            present = v.get("validity", 0) & (1 << bit["present"])
+            return {**v, "value": v.get("value", 0) if present else 0}
+
+        gated = [gate(v) for v in values]
+        wire = gated if canonical else [dict(v) for v in values]
+        raw = encode(schema, "monitor_header", hdr) + b"".join(
+            encode(schema, "monitor_value", v) for v in wire)
+        exp = []
+        for v in wire:
+            row = {f["name"]: v.get(f["name"], 0) for f in rec["fields"]}
+            row["absent"] = ([] if v.get("validity", 0) & (1 << bit["present"])
+                             else ["value"])
+            exp.append(row)
+        c = {"name": name, "desc": desc, "record": "monitor_update", "hex": raw.hex(),
+             "expect": {"header": {f["name"]: hdr.get(f["name"], 0)
+                                   for f in schema["records"]["monitor_header"]["fields"]},
+                        "values": exp}}
+        if not canonical:
+            c["canonical"] = False
+            c["expect_roundtrip_hex"] = (
+                encode(schema, "monitor_header", hdr) + b"".join(
+                    encode(schema, "monitor_value", v) for v in gated)).hex()
+        c.update(kw)
+        return c
+
+    CH = {m["name"]: m["value"] for m in SCHEMA_ENUMS["channel"]}
+    PRESENT = 1
+
+    files["monitor.json"] = [
+        monitor_list("dash-asks-for-four",
+                     "A display device asking for the four values a lap timer shows. "
+                     "It names channels; it does not send an expression to evaluate.",
+                     dict(total=4, index=0, count=4),
+                     [dict(slot=0, channel=CH["lap_time"]),
+                      dict(slot=1, channel=CH["last_lap_time"]),
+                      dict(slot=2, channel=CH["delta_best"]),
+                      dict(slot=3, channel=CH["lap_number"])]),
+        monitor_list("no-channels-requested",
+                     "A device that implements the role but currently wants nothing. "
+                     "Legal, and the state before it has configured itself.",
+                     dict(total=0, index=0, count=0), []),
+        monitor_list("unknown-channel-requested",
+                     "A device asking for a channel from a later minor. A client MUST "
+                     "report it unknown, MUST NOT substitute another, and MUST answer "
+                     "the slot as absent rather than omitting it.",
+                     dict(total=1, index=0, count=1),
+                     [dict(slot=9, channel=4242)]),
+        monitor_update("first-lap-nothing-to-report",
+                       "Mid first lap: elapsed time is known, but there is no last lap "
+                       "and no delta yet. Those slots are present-bit clear and zero -- "
+                       "a device that renders 0.000 for a last lap that has not "
+                       "happened has been told something false.",
+                       dict(seq=1, count=3),
+                       [dict(slot=0, validity=PRESENT, value=42_318),
+                        dict(slot=1, validity=0),
+                        dict(slot=2, validity=0)]),
+        monitor_update("second-lap-all-known",
+                       "A lap later: every slot carries a measurement, and delta_best "
+                       "is negative because this lap is ahead.",
+                       dict(seq=2, count=3),
+                       [dict(slot=0, validity=PRESENT, value=12_004),
+                        dict(slot=1, validity=PRESENT, value=87_340),
+                        dict(slot=2, validity=PRESENT, value=-1_250)]),
+        monitor_update("stale-value-behind-cleared-bit",
+                       "A client that clears the present bit but leaves the previous "
+                       "value in the bytes. A device MUST report the slot absent on the "
+                       "strength of the bit alone, and a conforming encoder normalises "
+                       "these bytes to zero.",
+                       dict(seq=3, count=1),
+                       [dict(slot=1, validity=0, value=87_340)],
+                       canonical=False),
+        monitor_update("empty-update",
+                       "count 0. Legal: nothing changed. A device MUST accept it.",
+                       dict(seq=4, count=0), []),
+        {"name": "short-payload",
+         "desc": "3 bytes: shorter than the update header. MUST be rejected.",
+         "record": "monitor_update",
+         "hex": encode(schema, "monitor_header", dict(seq=5, count=0))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "long-payload",
+         "desc": "One value declared, one present, plus a trailing byte. MUST be "
+                 "rejected rather than ignored.",
+         "record": "monitor_update",
+         "hex": (encode(schema, "monitor_header", dict(seq=6, count=1))
+                 + encode(schema, "monitor_value",
+                          dict(slot=0, validity=PRESENT, value=1))
+                 + b"\x00").hex(),
+         "must_reject": "length"},
+        {"name": "count-exceeds-payload",
+         "desc": "Header claims two values, one is present. MUST be rejected.",
+         "record": "monitor_update",
+         "hex": (encode(schema, "monitor_header", dict(seq=7, count=2))
+                 + encode(schema, "monitor_value",
+                          dict(slot=0, validity=PRESENT, value=1))).hex(),
+         "must_reject": "truncated-record"},
+        {"name": "short-page",
+         "desc": "5 bytes: shorter than the page header. MUST be rejected.",
+         "record": "monitor_list",
+         "hex": encode(schema, "monitor_page", dict(total=0, index=0, count=0))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "long-page",
+         "desc": "One entry declared, one present, plus a trailing byte. MUST be "
+                 "rejected.",
+         "record": "monitor_list",
+         "hex": (encode(schema, "monitor_page", dict(total=1, index=0, count=1))
+                 + encode(schema, "monitor_channel", dict(slot=0, channel=1))
+                 + b"\x00").hex(),
+         "must_reject": "length"},
+    ]
+
     # ---- Link params -----------------------------------------------------
     L = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["link_validity"]["bits"]}
     all_valid = L["att_mtu"] | L["ll_data_length"] | L["conn_params"] | L["phy"]

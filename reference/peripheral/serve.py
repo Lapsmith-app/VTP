@@ -78,7 +78,16 @@ class Peripheral:
         return characteristic.value or b""
 
     def write_request(self, characteristic, value, **kwargs):
-        if characteristic.uuid.lower() != CHAR["control"].lower():
+        uuid = characteristic.uuid.lower()
+        if uuid == CHAR["monitor_values"].lower():
+            # SPEC.md §13.4 — the one direction that runs client-to-device.
+            problem = self.device.handle_monitor_write(bytes(value))
+            if problem:
+                log.warning("rejected a monitor update: %s", problem)
+            else:
+                log.info("display: %s", " | ".join(self.device.display_lines()))
+            return
+        if uuid != CHAR["control"].lower():
             return
         response = self.device.handle_control(bytes(value))
         if response is None:
@@ -134,6 +143,9 @@ class Peripheral:
         await self.server.add_new_characteristic(
             SERVICE, CHAR["control"], write | indicate, None,
             readable | writeable)
+        # The client writes values here; the device only ever reads them.
+        await self.server.add_new_characteristic(
+            SERVICE, CHAR["monitor_values"], write, None, writeable)
 
         await self.server.start()
         log.info("advertising %s as %r", SERVICE, self.name)

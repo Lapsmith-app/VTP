@@ -8,6 +8,41 @@ conformance vector.
 
 ## [Unreleased]
 
+### Added
+- **The Monitor role (SPEC.md §13).** The one part of VTP/1 that runs
+  client-to-device: the client supplies values the device cannot compute, so a
+  device with a display can show them. Lap time is the case that justifies it —
+  a logger has no idea where the start and finish line is, because that is drawn
+  on a map in the client, so a device can only ever display a lap time the
+  client sends it.
+
+  **Channels are enumerated, not computed.** The prior art sends an expression
+  string the client must parse and evaluate against its own namespace of
+  variable names. VTP/1 defines a `channel` enum instead: the device names a
+  thing, not a computation. There is therefore no expression language, no shared
+  variable namespace and no parser on either side, and a client can fail to
+  satisfy a request in exactly one way — not implementing the channel. New
+  channels are enum members, which §11.4 already permits a minor version to add.
+
+  Each channel has exactly one unit, fixed by the table. No unit negotiation and
+  no scale factor: `lap_time` is milliseconds everywhere, forever.
+
+  **A value carries a `present` bit** (`monitor_validity`), and a value whose bit
+  is clear MUST be written as zero and rendered as unavailable. This is §1.1 in
+  the one place the protocol reverses direction, and it is the gap the prior art
+  cannot express: before the first lap of a session there is no last lap time,
+  and a device displaying 0.000 for it has been told something false. A client
+  that cannot supply a channel MUST say so rather than fall silent — absence is
+  a state a display can render, silence is indistinguishable from a crash.
+
+  The device's declaration is read with the new `MONITOR_LIST` opcode, paged
+  exactly as `CAN_LIST` is, and is fixed for the duration of a connection — the
+  same rule as §9.2's subscription table, so a client never inherits state it
+  did not establish.
+- `capabilities` bit 3 now means what it says; the software peripheral
+  implements the role, declares four channels and renders absent slots as
+  unavailable rather than as zero.
+
 ### Changed
 - **Records other than `gps_fix` are declared closed for the life of major
   version 1**, and SPEC.md §11.3 now describes the extension mechanisms that
@@ -270,7 +305,7 @@ rely on it.
   prefix that lets a client recognise an unsupported major version.
 - Machine-readable schema (`schema/vtp1.yaml`) as the source of truth, with
   generation of the spec tables, the C header and the conformance vectors.
-- Conformance corpus: 67 vectors across 6 record types, including must-reject
+- Conformance corpus: 79 vectors across 7 record types, including must-reject
   cases for truncated and over-long payloads.
 - C99 reference decoder and encoder, no dependencies, separate translation
   units so a client links only the decoder and a device only the encoder.

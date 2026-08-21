@@ -30,6 +30,7 @@ import vtp1_encode as enc  # noqa: E402
 # ---------------------------------------------------------------------------
 
 CAP_GPS, CAP_CAN, CAP_IMU = 1 << 0, 1 << 1, 1 << 2
+CAP_MONITOR = 1 << 3
 CAP_CONTROL, CAP_CAN_FD = 1 << 4, 1 << 5
 CAP_MASKED_SUBS, CAP_ONCHANGE_SUBS = 1 << 6, 1 << 7
 
@@ -45,7 +46,14 @@ FIX_3D = 3
 CAN_RESET, CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK = 0x01, 0x02, 0x03
 CAN_UNSUBSCRIBE, CAN_LIST = 0x04, 0x05
 GPS_SET_RATE, IMU_SET_RATE, TIME_SYNC = 0x10, 0x20, 0x30
-GET_LINK_PARAMS = 0x31
+GET_LINK_PARAMS, MONITOR_LIST = 0x31, 0x40
+
+# SPEC.md §13.2 — channels a Monitor device may ask the client for.
+CH_LAP_TIME, CH_LAST_LAP_TIME, CH_BEST_LAP_TIME = 1, 2, 3
+CH_DELTA_BEST, CH_PREDICTED_LAP_TIME, CH_LAP_NUMBER = 4, 5, 6
+CH_SPEED, CH_SESSION_DISTANCE, CH_SESSION_TIME = 7, 8, 9
+
+MONITOR_PRESENT = 0x01
 
 ST_OK, ST_UNSUPPORTED, ST_BAD_PARAMS = 0, 1, 2
 ST_TABLE_FULL, ST_RATE_EXCEEDED = 3, 4
@@ -147,6 +155,17 @@ class VtpDevice:
         # inventing consent.
         self._subscriptions = {}
         self._next_handle = 1
+
+        # SPEC.md §13 — this device has a display, so it asks the client for
+        # what it cannot compute. The declaration is fixed for the connection.
+        self._monitor_channels = [
+            (0, CH_LAP_TIME), (1, CH_LAST_LAP_TIME),
+            (2, CH_DELTA_BEST), (3, CH_LAP_NUMBER),
+        ]
+        # slot -> (value, present). Absent is a state the display renders, not
+        # a value it substitutes.
+        self._monitor_values = {}
+        self._monitor_seq = None
         self._link = None
 
     # -- clock ------------------------------------------------------------
@@ -167,6 +186,10 @@ class VtpDevice:
         self._can_pending, self._can_batch_t0 = [], None
         self._imu_pending, self._imu_batch_t0 = [], None
         self._deferred = []
+        # A new connection starts with nothing supplied, so the display shows
+        # every slot as unavailable rather than the last connection's numbers.
+        self._monitor_values.clear()
+        self._monitor_seq = None
 
     def simulate_loss(self, stream, count):
         """Pretend the device accepted `count` items and had to discard them.
@@ -202,7 +225,8 @@ class VtpDevice:
             "protocol_major": 1,
             "protocol_minor": 0,
             "capabilities": (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
-                             | CAP_MASKED_SUBS | CAP_ONCHANGE_SUBS),
+                             | CAP_MONITOR | CAP_MASKED_SUBS
+                             | CAP_ONCHANGE_SUBS),
             "gps_rate_hz": self.gps_hz,
             "gps_max_rate_hz": 25,
             "can_subscription_slots": CAN_SUBSCRIPTION_SLOTS,
@@ -497,6 +521,12 @@ class VtpDevice:
         if opcode == GET_LINK_PARAMS:
             return reply(ST_OK, self._link_params())
 
+        if opcode == MONITOR_LIST:
+            if len(params) != 2:
+                return reply(ST_BAD_PARAMS)
+            (start,) = struct.unpack("<H", params)
+            return reply(ST_OK, self._monitor_page(start))
+
         return reply(ST_UNSUPPORTED)
 
     def _predicted_rate(self, mode, arg):
@@ -524,6 +554,59 @@ class VtpDevice:
         entries = [{"handle": h, "id": s["id"], "mask": s["mask"],
                     "mode": s["mode"], "arg": s["arg"]} for h, s in page]
         return enc.encode_can_list(header, entries)
+
+    # -- Monitor (SPEC.md §13) --------------------------------------------
+
+    def _monitor_page(self, start):
+        room = (self.notify_bytes - 3 - 6) // 4
+        page = self._monitor_channels[start:start + max(0, room)]
+        return enc.encode_monitor_list(
+            {"total": len(self._monitor_channels), "index": start,
+             "count": len(page), "reserved": 0},
+            [{"slot": s, "channel": c, "reserved": 0} for s, c in page])
+
+    def handle_monitor_write(self, payload):
+        """SPEC.md §13.4 — a client-to-device batch of values.
+
+        Returns None on success, or a reason string. A device rejects a
+        malformed write for the same reason a client rejects a malformed
+        notification: a partly-applied update is a display showing a mixture of
+        two moments.
+        """
+        hsize, vsize = 4, 6
+        if len(payload) < hsize:
+            return "length"
+        seq, count = struct.unpack_from("<HB", payload, 0)
+        if len(payload) != hsize + count * vsize:
+            return "length"
+
+        known = {slot for slot, _ in self._monitor_channels}
+        staged = {}
+        for i in range(count):
+            slot, validity, value = struct.unpack_from(
+                "<BBi", payload, hsize + i * vsize)
+            # SPEC.md §13.1 — a slot this device never asked for is ignored,
+            # not an error: the client may be a version ahead.
+            if slot not in known:
+                continue
+            present = bool(validity & MONITOR_PRESENT)
+            staged[slot] = (value if present else 0, present)
+
+        self._monitor_values.update(staged)
+        self._monitor_seq = seq
+        return None
+
+    def display_lines(self):
+        """What the device's screen would show. Absent renders as '--', never
+        as a number nobody supplied."""
+        names = {CH_LAP_TIME: "LAP", CH_LAST_LAP_TIME: "LAST",
+                 CH_DELTA_BEST: "DELTA", CH_LAP_NUMBER: "NO."}
+        out = []
+        for slot, channel in self._monitor_channels:
+            value, present = self._monitor_values.get(slot, (0, False))
+            label = names.get(channel, f"CH{channel}")
+            out.append(f"{label}: {value if present else '--'}")
+        return out
 
     def _link_params(self):
         link = self._link or {}
