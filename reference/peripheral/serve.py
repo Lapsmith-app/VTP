@@ -160,6 +160,8 @@ def check_advertisement_fits(name):
 
 
 class Peripheral:
+    STREAM_ORDER = ("gps", "can", "imu")
+
     def __init__(self, device, name="VTP Logger", screen=None):
         self.device = device
         self.name = name
@@ -175,6 +177,21 @@ class Peripheral:
         self.rate = {"gps": 0.0, "can": 0.0, "imu": 0.0}
         self.control_log = collections.deque(maxlen=8)
         self.started = time.monotonic()
+        self._turn = 0
+        # Backpressure. The host stack refuses when its transmit queue is full
+        # and calls back when it has drained; firing regardless just converts
+        # the overflow into loss. At most one notification per stream is held,
+        # so a slow link delays data rather than queueing it without bound.
+        self._ready = True
+        self._blocked_since = None
+        self._pending = {}
+        self._paint_ms = self._pump_ms = 0.0
+        self._paints = 0
+        # If the stack never calls back, every refusal costs the 250 ms safety
+        # timeout instead, which would throttle far harder than the refusal
+        # itself. Counted rather than assumed.
+        self._ready_callbacks = 0
+        self._timeouts = 0
         self._notify = {"gps": CHAR["gps"], "can": CHAR["can"],
                         "imu": CHAR["imu"]}
 
@@ -255,6 +272,45 @@ class Peripheral:
 
     # -- lifecycle --------------------------------------------------------
 
+    def _install_ready_hook(self):
+        """Learn when the transmit queue has drained.
+
+        CoreBluetooth calls peripheralManagerIsReadyToUpdateSubscribers: after
+        refusing, and that callback is the documented way to pace a peripheral.
+        bless only logs it, so the delegate method is wrapped here. Patched on
+        the class because PyObjC dispatches through the class rather than the
+        instance; harmless with one peripheral per process, which is the only
+        shape this file supports.
+        """
+        from bless.backends.corebluetooth.peripheral_manager_delegate import (
+            PeripheralManagerDelegate as Delegate)
+        name = "peripheralManagerIsReadyToUpdateSubscribers_"
+        if getattr(Delegate, "_vtp_ready_hook", False):
+            return
+        original = getattr(Delegate, name)
+        peripheral = self
+
+        def patched(delegate_self, manager):
+            peripheral._ready = True
+            peripheral._blocked_since = None
+            peripheral._ready_callbacks += 1
+            return original(delegate_self, manager)
+
+        setattr(Delegate, name, patched)
+        Delegate._vtp_ready_hook = True
+
+    def _deliver(self, characteristic, payload, sent, refused):
+        """One attempt. Returns True when the stack took it."""
+        uuid = self._notify[characteristic]
+        self.server.get_characteristic(uuid).value = payload
+        if self.server.update_value(SERVICE, uuid):
+            sent[characteristic] += 1
+            return True
+        self._ready = False
+        self._blocked_since = time.monotonic()
+        refused[characteristic] += 1
+        return False
+
     async def start(self):
         _load_bless()
         CHAR_NAMES.update({v.lower(): k for k, v in CHAR.items()})
@@ -303,6 +359,12 @@ class Peripheral:
         await add("monitor_values", write, None, readable | writeable)
 
         await self.server.start()
+        try:
+            self._install_ready_hook()
+        except Exception:
+            log.warning("could not hook the ready-to-send callback; the "
+                        "peripheral will pace on a timer instead",
+                        exc_info=True)
         log.info("advertising %s as %r", SERVICE, self.name)
         log.info("a client matching on the service UUID needs that UUID in the "
                  "advertisement; name is %d of %d permitted characters",
@@ -310,7 +372,7 @@ class Peripheral:
         log.info("Service Data (SPEC.md 3.3) is not advertised: the host "
                  "peripheral API does not expose it on every platform")
 
-    async def run(self, poll_hz=200, screen_hz=20):
+    async def run(self, poll_hz=200, screen_hz=10):
         interval = 1.0 / poll_hz
         ticks = 0
         every = max(1, poll_hz // screen_hz)
@@ -322,31 +384,46 @@ class Peripheral:
         last_counts = dict(sent)
         while True:
             subscribed = self._subscribed()
+
+            # New work. At most one notification per stream is held: a second
+            # supersedes the first, and the superseded one is loss and is
+            # counted as such. Holding more would deliver a backlog, which
+            # SPEC.md §8.3 is explicit is the wrong answer.
             for characteristic, payload in self.device.poll():
-                # Nobody listening is not loss. A notification for a
-                # characteristic no central has subscribed to was never due,
-                # and counting it into `dropped` would report data missing that
-                # no client ever asked for -- which is how this counter first
-                # read 1500 CAN frames lost to a client that had gone home.
                 if subscribed is not None and characteristic not in subscribed:
                     unwanted[characteristic] += 1
                     continue
-                uuid = self._notify[characteristic]
-                self.server.get_characteristic(uuid).value = payload
-                # With a subscriber present, a false return IS loss: the host
-                # stack refused it and the notification is never sent. SPEC.md
-                # §8.3 says discard and report, so it goes into `dropped`.
-                if self.server.update_value(SERVICE, uuid):
-                    sent[characteristic] += 1
-                else:
-                    lost = self.device.record_refused(characteristic, payload)
+                stale = self._pending.get(characteristic)
+                if stale is not None:
+                    self.device.record_refused(characteristic, stale)
                     refused[characteristic] += 1
-                    if refused[characteristic] == 1:
-                        log.warning(
-                            "%s: subscribed, but the transport refused a "
-                            "notification; %d item(s) counted into dropped. "
-                            "Further refusals are summarised.",
-                            characteristic, lost)
+                self._pending[characteristic] = payload
+
+            # A refusal we never got a callback for must not wedge the device.
+            if (not self._ready and self._blocked_since
+                    and time.monotonic() - self._blocked_since > 0.25):
+                self._ready = True
+                self._blocked_since = None
+                self._timeouts += 1
+
+            # Rotate which stream is offered first. The queue is finite, and a
+            # fixed order means the LAST stream absorbs every refusal: with
+            # GPS, IMU and CAN all subscribed, CAN was refused almost in full
+            # while the other two flowed, purely because it was sent last.
+            if self._ready and self._pending:
+                self._turn = (self._turn + 1) % len(self.STREAM_ORDER)
+                order = (self.STREAM_ORDER[self._turn:]
+                         + self.STREAM_ORDER[:self._turn])
+                for characteristic in order:
+                    payload = self._pending.get(characteristic)
+                    if payload is None:
+                        continue
+                    if self._deliver(characteristic, payload, sent, refused):
+                        del self._pending[characteristic]
+                    else:
+                        self.device.record_refused(characteristic, payload)
+                        del self._pending[characteristic]
+                        break
 
             # A rate is what tells a stalled stream from a slow one, and a
             # total never does.
@@ -369,7 +446,12 @@ class Peripheral:
                     log.info("CLIENT CONNECTED — sequence numbers restarted, "
                              "subscription table cleared")
                 elif event == "disconnected":
-                    log.info("CLIENT DISCONNECTED")
+                    # SPEC.md §9.2 clears the table when the LINK DROPS, not
+                    # when the next one starts. Clearing only on connect left
+                    # a disconnected device reporting three installed ids with
+                    # nobody subscribed, which reads as a client fault.
+                    self.device.on_disconnect()
+                    log.info("CLIENT DISCONNECTED — subscription table cleared")
 
             now = self.device.now_us() / 1e6
             if now >= next_report:
@@ -384,6 +466,11 @@ class Peripheral:
                          unwanted["gps"], unwanted["can"], unwanted["imu"],
                          subs,
                          ", ".join(sorted(subscribed)) if subscribed else "none")
+                if self._paints:
+                    log.info("  display: paint %.1f ms, pump %.1f ms, %d paints"
+                             "  |  ready-callbacks %d, safety-timeouts %d",
+                             self._paint_ms, self._pump_ms, self._paints,
+                             self._ready_callbacks, self._timeouts)
                 if subs and subscribed is not None and "can" not in subscribed:
                     log.warning(
                         "  %d CAN id(s) are installed but no central has "
@@ -398,9 +485,29 @@ class Peripheral:
 
             ticks += 1
             if self.screen and ticks % every == 0:
-                self.screen.update(self.device.monitor_state(),
-                                   self.telemetry(subscribed))
-                if not self.screen.pump():
+                # A fault in the panel must not take the device down with it.
+                # Serving the client is the job; drawing is a convenience, and
+                # an IndexError in a grid once killed a running peripheral
+                # mid-session.
+                try:
+                    t0 = time.perf_counter()
+                    self.screen.update(self.device.monitor_state(),
+                                       self.telemetry(subscribed))
+                    t1 = time.perf_counter()
+                    alive = self.screen.pump()
+                    t2 = time.perf_counter()
+                    # Timed rather than reasoned about: the panel turned out to
+                    # cost this peripheral a third of its BLE throughput, and
+                    # two guesses at why were both wrong.
+                    self._paint_ms = (t1 - t0) * 1000
+                    self._pump_ms = (t2 - t1) * 1000
+                    self._paints += 1
+                except Exception:
+                    log.exception("the display failed; continuing headless")
+                    self.screen.close()
+                    self.screen = None
+                    alive = True
+                if not alive:
                     log.info("display closed; stopping")
                     return
             await asyncio.sleep(interval)

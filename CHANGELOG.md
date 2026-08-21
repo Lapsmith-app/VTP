@@ -27,6 +27,22 @@ conformance vector.
   which a wrongly decoded channel does not.
 
 ### Fixed
+- **Notification sending is paced to the transport and fairly ordered.** Two
+  faults compounded: the send order was fixed, so whichever stream went last
+  absorbed every refusal — with GPS, IMU and CAN all subscribed, CAN was
+  refused almost in full while the other two flowed, purely by position — and
+  the device fired regardless of whether the stack could take it. The order now
+  rotates, and CoreBluetooth's ready-to-send callback is hooked (bless only
+  logged it) so at most one notification per stream is held rather than
+  produced into a queue known to be full. Measured in use: 195 callbacks, zero
+  safety timeouts.
+- **The debug panel was throttling the transport it exists to measure.**
+  `root.update()` blocks the loop for 15–30 ms per call, costing 20–35% of
+  notification throughput — every earlier throughput figure in this branch was
+  an artefact of the window rather than a property of the link. Repainting is
+  not the cost (0.6 ms); the writes are now cached anyway, and the panel
+  reports its own overhead so the trade is visible. `--no-display` is
+  documented as the mode for throughput-sensitive testing.
 - **The peripheral ignored the return value of its notify call.** The host
   stack returns false when it will not carry a notification, and the
   notification is then never sent. Ignoring that lost data silently *and*

@@ -259,6 +259,18 @@ class VtpDevice:
         self._dropped[stream] += items
         return items
 
+    def on_disconnect(self):
+        """SPEC.md §9.2 — the table is cleared when the link drops.
+
+        Not when the next connection starts. The difference is only visible
+        from the device's own side, but it is the difference between a
+        disconnected device holding a stale table and one holding none.
+        """
+        self._subscriptions.clear()
+        self._can_pending, self._can_batch_t0 = [], None
+        self._monitor_values.clear()
+        self._monitor_seq = None
+
     def simulate_loss(self, stream, count):
         """Pretend the device accepted `count` items and had to discard them.
 

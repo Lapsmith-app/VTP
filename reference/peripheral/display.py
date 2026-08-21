@@ -138,6 +138,12 @@ class MonitorDisplay:
 
         self._cells = {}
         self._built_for = None
+        # Tk redraws on every configure() whether or not anything changed, and
+        # root.update() blocks the caller's loop while it does. Reconfiguring
+        # forty labels twenty times a second cost this peripheral 40% of its
+        # BLE throughput -- the window describing the transport was starving
+        # it. Nothing is written that is already on screen.
+        self._painted = {}
 
         self._build_scroller()
         self._build_header()
@@ -171,10 +177,20 @@ class MonitorDisplay:
         self._content_id = self.canvas.create_window(
             (0, 0), window=self.content, anchor="nw")
 
-        self.content.bind(
-            "<Configure>",
-            lambda _e: self.canvas.configure(
-                scrollregion=self.canvas.bbox("all")))
+        # bbox("all") walks every item on the canvas, and rebinding it to every
+        # Configure event ran that walk inside the caller's loop on each
+        # repaint. The scroll region only changes when the content changes
+        # HEIGHT, which after the first layout it almost never does.
+        self._scroll_height = None
+
+        def resized(_event):
+            height = self.content.winfo_reqheight()
+            if height != self._scroll_height:
+                self._scroll_height = height
+                self.canvas.configure(
+                    scrollregion=(0, 0, self.content.winfo_reqwidth(), height))
+
+        self.content.bind("<Configure>", resized)
         # Keep the content as wide as the viewport so the grids still stretch.
         self.canvas.bind(
             "<Configure>",
@@ -209,6 +225,20 @@ class MonitorDisplay:
         label.grid(row=row, column=column, sticky="ew",
                    padx=pad[0], pady=pad[1])
         return label
+
+    def _set(self, widget, text=None, fg=None, **rest):
+        """configure() only what actually changed."""
+        key = id(widget)
+        now = (text, fg, tuple(sorted(rest.items())))
+        if self._painted.get(key) == now:
+            return
+        self._painted[key] = now
+        options = dict(rest)
+        if text is not None:
+            options["text"] = text
+        if fg is not None:
+            options["fg"] = fg
+        widget.configure(**options)
 
     def _build_header(self):
         tk = self._tk
@@ -266,6 +296,12 @@ class MonitorDisplay:
         for i, width in enumerate((80, 150, 120, 90)):
             self.can_body.grid_columnconfigure(i, minsize=width, weight=1)
         self._can_rows = []
+        # The empty-state label is its own widget, NOT a short row in the row
+        # list. Keeping it there made a one-widget row that a later three-column
+        # update indexed into, and the IndexError killed the peripheral.
+        self._can_empty = self._cell(self.can_body, "none installed", 0, 0,
+                                     colour=self.DIM, size=12, anchor="w")
+        self._can_empty.grid(columnspan=4)
 
     def _build_control(self):
         self.ctrl_body = self._panel("CONTROL")
@@ -273,20 +309,37 @@ class MonitorDisplay:
         self.ctrl_body.grid_columnconfigure(1, minsize=380, weight=1)
         self.ctrl_body.grid_columnconfigure(2, minsize=140, weight=0)
         self._ctrl_rows = []
+        self._ctrl_empty = self._cell(self.ctrl_body, "no control requests yet",
+                                      0, 0, colour=self.DIM, size=11,
+                                      anchor="w")
+        self._ctrl_empty.grid(columnspan=3)
 
     def _build_monitor(self):
         self.monitor_body = self._panel("MONITOR")
 
     # -- per-update rendering ---------------------------------------------
 
-    def _rebuild(self, parent, rows, keep):
-        """Grow or shrink a variable-length grid, reusing existing widgets."""
-        while len(keep) < rows:
-            keep.append(None)
-        while len(keep) > rows:
-            for widget in keep.pop() or []:
+    def _fit_rows(self, parent, wanted, rows, columns, empty, start_row=1):
+        """Grow or shrink a grid to `wanted` rows of exactly `columns` cells.
+
+        Every row is built to the full width here, so no caller can index past
+        the end of a short one. The empty-state label is hidden or shown rather
+        than stored as a row, which is what went wrong before: a placeholder
+        row of one widget lived in the same list as three-column rows, and the
+        first real update indexed into it and took the process down.
+        """
+        while len(rows) < wanted:
+            r = len(rows) + start_row
+            rows.append([self._cell(parent, "", r, c, size=11)
+                         for c in range(columns)])
+        while len(rows) > wanted:
+            for widget in rows.pop():
                 widget.destroy()
-        return keep
+        if wanted:
+            empty.grid_remove()
+        else:
+            empty.grid()
+        return rows
 
     def _build_cells(self, state):
         for child in self.monitor_body.winfo_children():
@@ -328,30 +381,29 @@ class MonitorDisplay:
         for slot, channel, value, present in state:
             cell = self._cells.get(slot)
             if cell is not None:
-                cell.configure(text=format_value(channel, value, present),
-                               fg=self.FG if present else self.DIM)
+                self._set(cell, format_value(channel, value, present),
+                          self.FG if present else self.DIM)
 
     def _update_header(self, tele):
         connected = tele["connected"]
         mins, secs = divmod(int(tele["uptime"]), 60)
-        self.dot.configure(fg=self.OK if connected else self.DIM)
-        self.state_label.configure(
-            text="CLIENT CONNECTED" if connected else "ADVERTISING",
-            fg=self.FG if connected else self.MUTED)
-        self.meta_label.configure(
-            text=f"up {mins}m{secs:02d}s     MTU {tele['mtu']}     "
+        self._set(self.dot, fg=self.OK if connected else self.DIM)
+        self._set(self.state_label, "CLIENT CONNECTED" if connected else "ADVERTISING",
+                  self.FG if connected else self.MUTED)
+        self._set(self.meta_label,
+                  f"up {mins}m{secs:02d}s     MTU {tele['mtu']}     "
                  f"gps {tele['configured']['gps']} Hz   "
                  f"imu {tele['configured']['imu']} Hz")
 
         subscribed = tele["subscribed"]
         for name, chip in self.chips.items():
             on = subscribed is not None and name in subscribed
-            chip.configure(fg=self.OK if on else self.DIM,
-                           bg=self.RULE if on else self.PANEL)
+            self._set(chip, fg=self.OK if on else self.DIM,
+                      bg=self.RULE if on else self.PANEL)
         silent = (subscribed is not None and tele["can_table"]
                   and "can" not in subscribed)
-        self.chip_note.configure(
-            text="CAN ids installed, nothing subscribed to CAN" if silent else "")
+        self._set(self.chip_note,
+                  "CAN ids installed, nothing subscribed to CAN" if silent else "")
 
     def _update_streams(self, tele):
         stalled = []
@@ -362,69 +414,44 @@ class MonitorDisplay:
             nosub = tele["unwanted"][stream]
             dropped = tele["pending_dropped"][stream]
 
-            cells[0].configure(text=f"{sent:,}",
-                               fg=self.FG if sent else self.DIM)
-            cells[1].configure(text=f"{rate:.1f}/s" if rate else "—",
-                               fg=self.OK if rate else self.DIM)
-            cells[2].configure(text=f"{refused:,}" if refused else "—",
-                               fg=self.BAD if refused else self.DIM)
-            cells[3].configure(text=f"{nosub:,}" if nosub else "—",
-                               fg=self.WARN if nosub else self.DIM)
-            cells[4].configure(text=f"{dropped:,}" if dropped else "—",
-                               fg=self.BAD if dropped else self.DIM)
+            self._set(cells[0], f"{sent:,}",
+                      self.FG if sent else self.DIM)
+            self._set(cells[1], f"{rate:.1f}/s" if rate else "—",
+                      self.OK if rate else self.DIM)
+            self._set(cells[2], f"{refused:,}" if refused else "—",
+                      self.BAD if refused else self.DIM)
+            self._set(cells[3], f"{nosub:,}" if nosub else "—",
+                      self.WARN if nosub else self.DIM)
+            self._set(cells[4], f"{dropped:,}" if dropped else "—",
+                      self.BAD if dropped else self.DIM)
             if nosub and not sent:
                 stalled.append(stream)
-        self.stream_note.configure(
-            text=("no-sub counts notifications produced for a characteristic "
+        self._set(self.stream_note,
+                  ("no-sub counts notifications produced for a characteristic "
                   "nobody subscribed to — not loss: "
                   + ", ".join(stalled) + " going nowhere")
             if stalled else
             "no-sub is not loss; refused and dropped are")
 
     def _update_can(self, table):
-        self._can_rows = self._rebuild(self.can_body, len(table), self._can_rows)
-        for i, (handle, can_id, mask, mode, arg) in enumerate(table):
+        self._can_rows = self._fit_rows(self.can_body, len(table),
+                                        self._can_rows, 4, self._can_empty)
+        for row, (handle, can_id, mask, mode, arg) in zip(self._can_rows, table):
             values = (str(handle), format_can_id(can_id, mask),
                       SUB_MODES.get(mode, f"mode {mode}"),
                       str(arg) if mode in (1, 2, 3) else "—")
-            if self._can_rows[i] is None:
-                self._can_rows[i] = [
-                    self._cell(self.can_body, v, i, c, size=12,
-                               anchor="w" if c < 2 else "e")
-                    for c, v in enumerate(values)]
-            else:
-                for widget, v in zip(self._can_rows[i], values):
-                    widget.configure(text=v)
-        if not table:
-            if not self._can_rows:
-                self._can_rows.append([
-                    self._cell(self.can_body, "none installed", 0, 0,
-                               colour=self.DIM, size=12, anchor="w")])
+            for i, (widget, value) in enumerate(zip(row, values)):
+                self._set(widget, value, self.FG, anchor="w" if i < 2 else "e")
 
     def _update_control(self, control):
         entries = list(reversed(control))
-        self._ctrl_rows = self._rebuild(self.ctrl_body, len(entries),
-                                        self._ctrl_rows)
-        for i, (ts, what, status) in enumerate(entries):
-            colour = self.OK if status == "ok" else self.WARN
-            if self._ctrl_rows[i] is None:
-                self._ctrl_rows[i] = [
-                    self._cell(self.ctrl_body, ts, i, 0, colour=self.DIM,
-                               size=11, anchor="w"),
-                    self._cell(self.ctrl_body, what, i, 1, colour=self.FG,
-                               size=11, anchor="w"),
-                    self._cell(self.ctrl_body, status, i, 2, colour=colour,
-                               size=11, anchor="e"),
-                ]
-            else:
-                row = self._ctrl_rows[i]
-                row[0].configure(text=ts)
-                row[1].configure(text=what)
-                row[2].configure(text=status, fg=colour)
-        if not entries and not self._ctrl_rows:
-            self._ctrl_rows.append([
-                self._cell(self.ctrl_body, "no control requests yet", 0, 0,
-                           colour=self.DIM, size=11, anchor="w")])
+        self._ctrl_rows = self._fit_rows(self.ctrl_body, len(entries),
+                                         self._ctrl_rows, 3, self._ctrl_empty)
+        for row, (ts, what, status) in zip(self._ctrl_rows, entries):
+            self._set(row[0], ts, self.DIM, anchor="w")
+            self._set(row[1], what, self.FG, anchor="w")
+            self._set(row[2], status, self.OK if status == "ok" else self.WARN,
+                      anchor="e")
 
     def pump(self):
         try:

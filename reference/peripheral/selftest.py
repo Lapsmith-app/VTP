@@ -471,6 +471,19 @@ def main():
           "items lost to a refused notification MUST appear in dropped on a "
           "later notification, or the loss is invisible to the client")
 
+    # ---- A dropped link clears the table (§9.2) -------------------------
+    dropped_link = dev.VtpDevice(now_us=lambda: clock[0], mtu=247,
+                                 gps_hz=0, imu_hz=0)
+    dropped_link.handle_control(bytes([dev.CAN_SUBSCRIBE, 1])
+                                + struct.pack("<IBH", 0x0C0,
+                                              dev.SUB_EVERY_FRAME, 0))
+    check(len(dropped_link.can_table()) == 1, "the subscription did not install")
+    dropped_link.on_disconnect()
+    check(dropped_link.can_table() == [],
+          "SPEC.md §9.2 clears the table when the LINK DROPS, not when the "
+          "next connection starts; a disconnected device holding a stale table "
+          "reports ids nobody subscribed to")
+
     # ---- Connection edges drive the per-connection reset ----------------
     # The transport must tell the device when a link starts, or §8.2's sequence
     # restart and §9.2's table clear never happen. They did not, for a while,

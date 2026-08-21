@@ -186,6 +186,29 @@ LAP          LAST         BEST
 42.318       1:27.340     —·—
 ```
 
+### The panel is not free
+
+Measured, because it was guessed at wrongly three times first:
+
+| | loop blocked | notifications accepted |
+| --- | --- | --- |
+| `--no-display` | 0 | **~23.5/s** |
+| panel open | 140–320 ms/s | **~15–18/s** |
+
+`root.update()` costs 15–30 ms per call and the peripheral cannot send while it
+runs, so the panel costs roughly what it blocks — **20–35% of throughput**. The
+drawing itself is not the problem: repainting every value measures 0.6 ms, and
+lowering the refresh rate makes it *worse*, because Tk's work is per unit time
+rather than per paint and a slower rate merely batches it into fewer, longer
+stalls.
+
+Fixing it properly means Tk and asyncio on separate threads, and on macOS both
+Tk and CoreBluetooth want the main one. Not worth it for a debug tool, so the
+cost is stated instead: **use `--no-display` when measuring throughput**, and
+keep the panel for everything else, where 15/s is ample to watch a client
+work. The status line reports its own cost every ten seconds so the trade is
+visible rather than folklore.
+
 The row that mattered most in practice is **notify subscriptions**. A VTP
 device can have CAN ids installed *and* no subscriber on the CAN
 characteristic, and it then produces batches that go nowhere — which from the
