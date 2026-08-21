@@ -400,16 +400,17 @@ frames. A client SHOULD surface a non-zero `dropped` to the user.
 <!-- BEGIN GENERATED: imu_header -->
 *Batch header. Followed by `count` evenly spaced imu_sample entries.*
 
-Total: **16 bytes**. All fields little-endian.
+Total: **20 bytes**. All fields little-endian.
 
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
 | 0 | 2 | `u16` | `seq` | — |
 | 2 | 2 | `u16` | `dropped` | Samples discarded since the previous notification |
 | 4 | 8 | `u64` | `t_base` | `us`; Timestamp of sample 0 |
-| 12 | 2 | `u16` | `period` | `us`; Interval between samples; exact for any ODR |
-| 14 | 1 | `u8` | `count` | — |
-| 15 | 1 | `u8` | `flags` | bit0 accel present, bit1 gyro present, bit2 mag present |
+| 12 | 4 | `u32` | `period` | `us`; Interval between samples |
+| 16 | 1 | `u8` | `count` | — |
+| 17 | 1 | `u8` | `flags` | bit0 accel present, bit1 gyro present |
+| 18 | 2 | `u16` | `reserved` | **reserved — MUST be zero** |
 <!-- END GENERATED: imu_header -->
 
 <!-- BEGIN GENERATED: imu_sample -->
@@ -429,17 +430,33 @@ Total: **12 bytes**. All fields little-endian.
 
 Samples are evenly spaced: sample *i* is at `t_base + i × period` microseconds.
 
-`period` is expressed in microseconds rather than as a rate because real sensor
+`period` is expressed as an interval rather than a rate because real sensor
 output data rates are not integer hertz. A device MUST report its actual sample
-interval.
+interval, rounded to the nearest microsecond.
+
+That rounding is the one place in VTP/1 where a value is approximate, so its
+bound is stated rather than left to be discovered. An output data rate whose
+true interval is not a whole number of microseconds is misrepresented by up to
+0.5 µs per sample, and the error accumulates only *within* a batch: sample
+timing is derived from that batch's own `t_base`, which the device measures, so
+each notification re-anchors and nothing accumulates across a stream. At 833 Hz
+in a batch of nineteen samples the worst case is about 9 µs, which is below the
+10 µs resolution of a CAN frame timestamp (§6.1) and therefore cannot be the
+limiting term in any cross-channel alignment.
+
+`period` is a `u32`, so representable intervals run from 1 µs to about 4295
+seconds. A device MUST NOT report a period of zero.
 
 `flags` declares which sensor groups are populated. If a group's flag is clear,
 its fields MUST be zero and the receiver MUST report them absent — not as a
 measurement of zero.
 
 Samples are in the **sensor frame**. A device MUST NOT attempt to rotate them
-into a vehicle frame; it cannot know its mounting. A device MAY declare a
-sensor-to-case rotation in an extension record.
+into a vehicle frame; it cannot know its mounting. Mounting orientation is
+outside the scope of major version 1: there is no extension mechanism on this
+characteristic to carry it, and inventing one for a single field would be worse
+than leaving the question to the client, which has to solve it for every other
+sensor anyway.
 
 ---
 
@@ -456,6 +473,15 @@ frequency adjustment, not as a step.
 
 `t_utc` in a GPS fix and `TIME_SYNC` (§9) are the two ways a client maps this
 clock to wall time.
+
+Timestamps derived from the clock — `t_base + dt × 10` for a CAN frame (§6.1)
+and `t_base + i × period` for an IMU sample (§7) — are computed modulo 2^64,
+the width of the field they derive from. A device will not reach that wrap: at
+one microsecond per tick it is over half a million years away. The arithmetic is
+specified so that two conforming implementations agree bit for bit rather than
+by accident, which they otherwise do not — a decoder in a language with
+arbitrary-precision integers produces a different answer from one in C for the
+same bytes.
 
 ---
 
@@ -683,4 +709,6 @@ needs verifying on a bench rather than in CI.
 | `gps_fix.fix_flags` | bits 4–7 | Additional solution-quality flags |
 | `info.capabilities` | bits 8–31 | Roles and features added in a later minor |
 | `can_header.reserved` | 2 bytes | In-band CAN metadata |
+| `imu_header.reserved` | 2 bytes | In-band IMU metadata |
+| `imu_header.flags` | bits 2–7 | Additional sensor groups |
 | Extension types | `0x00`–`0xFF` | `0x80`–`0xFF` are reserved for vendor-private use and MUST NOT be assigned by this specification |

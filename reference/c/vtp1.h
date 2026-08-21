@@ -87,13 +87,13 @@ int vtp_can_iter_next(vtp_can_iter_t *it, vtp_can_frame_t *out);
 typedef struct {
     uint16_t seq, dropped;
     uint64_t t_base;
-    uint16_t period;
+    uint32_t period;      /* microseconds; u32 so sub-15.26 Hz rates fit */
     uint8_t  count, flags;
+    uint16_t reserved;
 } vtp_imu_header_t;
 
 #define VTP_IMU_HAS_ACCEL 0x01
 #define VTP_IMU_HAS_GYRO  0x02
-#define VTP_IMU_HAS_MAG   0x04
 
 typedef struct {
     int16_t ax, ay, az;   /* milli-g; absent unless flags & VTP_IMU_HAS_ACCEL */

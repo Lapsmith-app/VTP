@@ -626,7 +626,7 @@
     },
     "imu_header": {
       "characteristic": "imu",
-      "size": 16,
+      "size": 20,
       "access": "notify",
       "desc": "Batch header. Followed by `count` evenly spaced imu_sample entries.",
       "fields": [
@@ -654,23 +654,30 @@
         {
           "name": "period",
           "offset": 12,
-          "size": 2,
-          "type": "u16",
+          "size": 4,
+          "type": "u32",
           "units": "us",
-          "desc": "Interval between samples; exact for any ODR"
+          "desc": "Interval between samples"
         },
         {
           "name": "count",
-          "offset": 14,
+          "offset": 16,
           "size": 1,
           "type": "u8"
         },
         {
           "name": "flags",
-          "offset": 15,
+          "offset": 17,
           "size": 1,
           "type": "u8",
-          "desc": "bit0 accel present, bit1 gyro present, bit2 mag present"
+          "desc": "bit0 accel present, bit1 gyro present"
+        },
+        {
+          "name": "reserved",
+          "offset": 18,
+          "size": 2,
+          "type": "u16",
+          "reserved": true
         }
       ]
     },

@@ -572,6 +572,19 @@ def vectors(schema):
                   [{"dt": 1, "id": 0x2F0, "extended": False, "fd": True, "rtr": False,
                     "len": 64, "payload": bytes(range(64)).hex(),
                     "t_device_us": 9_000_010}]),
+        can_batch("t-base-near-wrap",
+                  "t_base within 100 us of the u64 ceiling, so t_base + dt*10 wraps. "
+                  "SPEC.md 8 defines the arithmetic as modulo 2^64; a decoder using "
+                  "arbitrary-precision integers MUST still report the wrapped value.",
+                  dict(seq=11, dropped=0, t_base=(1 << 64) - 100, count=1, flags=0),
+                  [can_rec(20, 0x1A0, bytes.fromhex("00"))],
+                  [{"dt": 20, "id": 0x1A0, "extended": False, "fd": False, "rtr": False,
+                    "len": 1, "payload": "00",
+                    "t_device_us": ((1 << 64) - 100 + 200) & ((1 << 64) - 1)}],
+                  note="Unreachable on real hardware -- a microsecond clock takes over "
+                       "half a million years to get here -- but the two reference "
+                       "decoders disagreed on it, which is a specification gap rather "
+                       "than a hardware one."),
         can_batch("empty-batch",
                   "count 0. Legal, and means the bus is quiet — NOT an error and NOT a "
                   "disconnect. A decoder MUST accept it.",
@@ -648,7 +661,7 @@ def vectors(schema):
         exp = []
         for i, s in enumerate(wire):
             e = {f["name"]: s.get(f["name"], 0) for f in rec["fields"]}
-            e["t_device_us"] = hdr["t_base"] + i * hdr["period"]
+            e["t_device_us"] = (hdr["t_base"] + i * hdr["period"]) & ((1 << 64) - 1)
             e["absent"] = absent
             exp.append(e)
         c = {"name": name, "desc": desc, "record": "imu_batch", "hex": raw.hex(),
@@ -683,6 +696,14 @@ def vectors(schema):
                   "Extremes on every axis; catches signed 16-bit handling.",
                   dict(seq=3, dropped=0, t_base=6_000_000, period=5000, count=1, flags=0b011),
                   [dict(ax=-32768, ay=32767, az=-32768, gx=32767, gy=-32768, gz=32767)]),
+        imu_batch("low-rate-10hz",
+                  "A 10 Hz IMU: period 100000 us. This rate was unrepresentable while "
+                  "period was a u16, whose ceiling of 65535 us put a floor of 15.26 Hz "
+                  "on every conforming device.",
+                  dict(seq=8, dropped=0, t_base=20_000_000, period=100_000, count=2,
+                       flags=0b011),
+                  [dict(ax=0, ay=0, az=1000, gx=0, gy=0, gz=0),
+                   dict(ax=5, ay=-5, az=1002, gx=1, gy=-1, gz=2)]),
         imu_batch("stale-values-behind-cleared-flags",
                   "flags clears both accel and gyro, but every sample byte still "
                   "carries the previous reading. A decoder MUST report all six "
@@ -731,13 +752,14 @@ def vectors(schema):
              "A typical dual-role module."),
         case(schema, "info", "gps-only-no-control",
              dict(protocol_major=1, protocol_minor=0, capabilities=C["gps"],
-                  gps_rate_hz=10, gps_max_rate_hz=10, can_max_payload=8,
+                  gps_rate_hz=10, gps_max_rate_hz=10, can_max_payload=0,
                   max_notify_bytes=185),
              "A GPS-only board with no control channel. Every CAN capacity figure is zero "
-             "and a client MUST NOT infer a default."),
+             "-- including can_max_payload, which is a capacity like any other -- and a "
+             "client MUST NOT infer a default."),
         case(schema, "info", "future-minor-unknown-capability",
              dict(protocol_major=1, protocol_minor=7,
-                  capabilities=C["gps"] | C["can"] | C["imu"] | (1 << 19),
+                  capabilities=C["gps"] | C["can"] | C["imu"] | C["can_fd"] | (1 << 19),
                   gps_rate_hz=25, gps_max_rate_hz=25, can_subscription_slots=32,
                   can_max_frames_per_s=4000, imu_rate_hz=833, imu_max_rate_hz=833,
                   can_max_payload=64, clock_flags=0b11, max_notify_bytes=498),

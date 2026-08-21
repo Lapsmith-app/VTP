@@ -134,9 +134,10 @@ int vtp_decode_imu_batch(const uint8_t *b, size_t len,
     h->seq     = rd16(b + VTP_IMU_HEADER_OFF_SEQ);
     h->dropped = rd16(b + VTP_IMU_HEADER_OFF_DROPPED);
     h->t_base  = rd64(b + VTP_IMU_HEADER_OFF_T_BASE);
-    h->period  = rd16(b + VTP_IMU_HEADER_OFF_PERIOD);
+    h->period  = rd32(b + VTP_IMU_HEADER_OFF_PERIOD);
     h->count   = b[VTP_IMU_HEADER_OFF_COUNT];
     h->flags   = b[VTP_IMU_HEADER_OFF_FLAGS];
+    h->reserved = rd16(b + VTP_IMU_HEADER_OFF_RESERVED);
 
     if (len != (size_t)VTP_IMU_HEADER_SIZE +
                (size_t)h->count * VTP_IMU_SAMPLE_SIZE) {

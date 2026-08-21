@@ -69,13 +69,14 @@
 #define VTP_CAN_RECORD_OFF_LEN 6
 
 /* Batch header. Followed by `count` evenly spaced imu_sample entries. */
-#define VTP_IMU_HEADER_SIZE 16
+#define VTP_IMU_HEADER_SIZE 20
 #define VTP_IMU_HEADER_OFF_SEQ 0
 #define VTP_IMU_HEADER_OFF_DROPPED 2
 #define VTP_IMU_HEADER_OFF_T_BASE 4
 #define VTP_IMU_HEADER_OFF_PERIOD 12
-#define VTP_IMU_HEADER_OFF_COUNT 14
-#define VTP_IMU_HEADER_OFF_FLAGS 15
+#define VTP_IMU_HEADER_OFF_COUNT 16
+#define VTP_IMU_HEADER_OFF_FLAGS 17
+#define VTP_IMU_HEADER_OFF_RESERVED 18
 
 /* Sensor-frame acceleration and rotation. Vehicle alignment is the client's job. */
 #define VTP_IMU_SAMPLE_SIZE 12
