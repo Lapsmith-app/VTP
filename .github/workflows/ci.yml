@@ -77,6 +77,15 @@ jobs:
           make -C reference/c
           echo "Seeded encoder fault correctly detected."
 
+      # The synthetic device decoded by the reference decoder. Needs no
+      # Bluetooth adapter, because everything worth testing in a peripheral is
+      # in the device model rather than the transport -- and it asserts what no
+      # single-payload vector can: one shared clock across three roles,
+      # timestamps that advance across batches, and a control plane that
+      # changes behaviour rather than merely answering.
+      - name: Software peripheral conforms
+        run: python3 reference/peripheral/selftest.py
+
       # The two steps above are handcrafted regression guards for specific
       # bugs. This sweeps whole CLASSES of fault -- every encoder validity
       # gate, every decoder field offset, every exact-length check -- and

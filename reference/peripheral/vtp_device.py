@@ -1,0 +1,434 @@
+#!/usr/bin/env python3
+"""A synthetic VTP/1 device: everything a peripheral does except the radio.
+
+Deliberately free of any Bluetooth dependency. The BLE transport lives in
+serve.py, and this holds the parts worth testing: one monotonic clock, the
+three roles timestamped against it, batching that respects the negotiated MTU,
+and the control plane. That split is what lets CI check the device against the
+reference decoder on a machine with no Bluetooth adapter at all — see
+selftest.py, which decodes every notification this produces.
+
+The vehicle is a car lapping a circular circuit at constant speed. A circle is
+not much of a track, but it exercises what matters: position advances, heading
+rotates, lateral acceleration is non-zero and constant, yaw rate is non-zero,
+and the CAN signals derive from the same motion as the GPS fix and the IMU
+sample. A client that aligns the three channels sees them agree.
+"""
+import math
+import pathlib
+import struct
+import sys
+import time
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "reference" / "python"))
+
+import vtp1_encode as enc  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Capability and layout constants
+# ---------------------------------------------------------------------------
+
+CAP_GPS, CAP_CAN, CAP_IMU = 1 << 0, 1 << 1, 1 << 2
+CAP_CONTROL, CAP_CAN_FD = 1 << 4, 1 << 5
+CAP_MASKED_SUBS, CAP_ONCHANGE_SUBS = 1 << 6, 1 << 7
+
+V_T_UTC, V_T_UTC_RESOLVED, V_POSITION = 1 << 0, 1 << 1, 1 << 2
+V_ALT_MSL, V_ALT_ELLIPSOID, V_VELOCITY = 1 << 3, 1 << 4, 1 << 5
+V_HEAD_MOT, V_H_ACC, V_V_ACC = 1 << 6, 1 << 7, 1 << 8
+V_S_ACC, V_P_DOP, V_NUM_SV = 1 << 9, 1 << 10, 1 << 11
+
+IMU_ACCEL, IMU_GYRO = 0x01, 0x02
+FIX_3D = 3
+
+# Control opcodes (SPEC.md §9).
+CAN_RESET, CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK = 0x01, 0x02, 0x03
+CAN_UNSUBSCRIBE, CAN_LIST = 0x04, 0x05
+GPS_SET_RATE, IMU_SET_RATE, TIME_SYNC = 0x10, 0x20, 0x30
+GET_LINK_PARAMS, LIST_CHANNELS = 0x31, 0x40
+
+ST_OK, ST_UNSUPPORTED, ST_BAD_PARAMS = 0, 1, 2
+ST_TABLE_FULL, ST_RATE_EXCEEDED = 3, 4
+
+SUB_EVERY_FRAME, SUB_PERIODIC, SUB_ON_CHANGE, SUB_EVERY_NTH = 0, 1, 2, 3
+
+CAN_SUBSCRIPTION_SLOTS = 32
+CAN_MAX_FRAMES_PER_S = 4000
+
+METRES_PER_DEG_LAT = 111_320.0
+
+
+# ---------------------------------------------------------------------------
+# Motion
+# ---------------------------------------------------------------------------
+
+class Circuit:
+    """A constant-speed circular lap, in metres and seconds."""
+
+    def __init__(self, lat_deg=51.5074, lon_deg=-1.3970,
+                 radius_m=180.0, speed_mps=38.0):
+        self.lat0, self.lon0 = lat_deg, lon_deg
+        self.radius, self.speed = radius_m, speed_mps
+        self._m_per_deg_lon = METRES_PER_DEG_LAT * math.cos(math.radians(lat_deg))
+
+    def at(self, t_s):
+        """Position, velocity and body-frame motion at `t_s` seconds."""
+        omega = self.speed / self.radius          # rad/s around the circle
+        theta = omega * t_s
+        north = self.radius * math.cos(theta)
+        east = self.radius * math.sin(theta)
+
+        # Heading of motion is the tangent, 90 degrees ahead of the radius.
+        heading = (math.degrees(theta) + 90.0) % 360.0
+        hrad = math.radians(heading)
+
+        return {
+            "lat": self.lat0 + north / METRES_PER_DEG_LAT,
+            "lon": self.lon0 + east / self._m_per_deg_lon,
+            "vel_n": self.speed * math.cos(hrad),
+            "vel_e": self.speed * math.sin(hrad),
+            "heading": heading,
+            # Centripetal acceleration is constant on a circle and points at
+            # the centre, i.e. along the body Y axis.
+            "lat_g": (self.speed ** 2 / self.radius) / 9.80665,
+            "yaw_rate": math.degrees(omega),
+            "speed": self.speed,
+        }
+
+
+# ---------------------------------------------------------------------------
+# The device
+# ---------------------------------------------------------------------------
+
+class VtpDevice:
+    """A conforming VTP/1 peripheral over a synthetic vehicle.
+
+    `now_us` is injectable so a test can drive the device deterministically
+    rather than sleeping; the default is a real monotonic clock.
+    """
+
+    def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
+                 circuit=None):
+        self._clock = now_us or self._monotonic_us
+        self._origin_ns = time.monotonic_ns()
+        self._wall_origin_ms = int(time.time() * 1000)
+
+        self.mtu = mtu
+        self.gps_hz = gps_hz
+        self.imu_hz = imu_hz
+        self.circuit = circuit or Circuit()
+
+        self._gps_seq = self._can_seq = self._imu_seq = 0
+        self._next_gps_us = 0
+        self._next_imu_us = 0
+        self._imu_pending = []
+        self._imu_batch_t0 = None
+        self._can_pending = []
+        self._can_batch_t0 = None
+        self._next_can_flush_us = 0
+        # Notifications produced outside poll() -- a rate change flushes the
+        # batch it invalidates -- wait here for the next poll to drain them.
+        self._deferred = []
+
+        # id -> (mode, arg, last_emit_us, counter). Empty until a client
+        # subscribes: SPEC.md §9's CAN_RESET state is the starting state, and a
+        # device that streamed before being asked would be inventing consent.
+        self._subscriptions = {}
+        self._link = None
+
+    # -- clock ------------------------------------------------------------
+
+    def _monotonic_us(self):
+        return (time.monotonic_ns() - self._origin_ns) // 1000
+
+    def now_us(self):
+        """SPEC.md §8 — one monotonic microsecond clock for every role."""
+        return self._clock()
+
+    @property
+    def notify_bytes(self):
+        """ATT payload available for one notification: MTU minus the 3-byte
+        ATT notification header."""
+        return self.mtu - 3
+
+    # -- Info -------------------------------------------------------------
+
+    def info(self):
+        return enc.encode_info({
+            "protocol_major": 1,
+            "protocol_minor": 0,
+            "capabilities": (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
+                             | CAP_MASKED_SUBS | CAP_ONCHANGE_SUBS),
+            "gps_rate_hz": self.gps_hz,
+            "gps_max_rate_hz": 25,
+            "can_subscription_slots": CAN_SUBSCRIPTION_SLOTS,
+            "can_max_frames_per_s": CAN_MAX_FRAMES_PER_S,
+            "imu_rate_hz": self.imu_hz,
+            "imu_max_rate_hz": 833,
+            "can_max_payload": 8,
+            "clock_flags": 0b10,      # survives reconnect; not GNSS-disciplined
+            "max_notify_bytes": self.notify_bytes,
+        })
+
+    # -- GPS --------------------------------------------------------------
+
+    def _gps_fix(self, now):
+        st = self.circuit.at(now / 1e6)
+        self._gps_seq = (self._gps_seq + 1) & 0xFFFF
+        validity = (V_T_UTC | V_T_UTC_RESOLVED | V_POSITION | V_ALT_MSL
+                    | V_VELOCITY | V_HEAD_MOT | V_H_ACC | V_V_ACC | V_S_ACC
+                    | V_P_DOP | V_NUM_SV)
+        return enc.encode_gps_fix({
+            "seq": self._gps_seq,
+            "dropped": 0,
+            "validity": validity,
+            "t_device": now,
+            "t_utc": self._wall_origin_ms + now // 1000,
+            "lat": round(st["lat"] * 1e7),
+            "lon": round(st["lon"] * 1e7),
+            "alt_msl": 120_000,
+            # alt_ellipsoid's bit is deliberately clear: this device does not
+            # compute it, and SPEC.md §5.1 requires the field to read absent
+            # rather than as a plausible zero.
+            "alt_ellipsoid": 0,
+            "vel_n": round(st["vel_n"] * 1000),
+            "vel_e": round(st["vel_e"] * 1000),
+            "vel_d": 0,
+            "head_mot": round(st["heading"] * 1e5),
+            "h_acc": 850, "v_acc": 1400, "s_acc": 90,
+            "p_dop": 130,
+            "fix_type": FIX_3D,
+            "num_sv": 14,
+            "fix_flags": 0,
+            "ext_count": 0,
+        })
+
+    # -- IMU --------------------------------------------------------------
+
+    @property
+    def _imu_period_us(self):
+        return round(1_000_000 / self.imu_hz)
+
+    def _imu_capacity(self):
+        header = 20      # imu_header
+        return max(1, (self.notify_bytes - header) // 12)
+
+    def _imu_sample(self, now):
+        st = self.circuit.at(now / 1e6)
+        return {
+            "ax": 0,
+            "ay": round(st["lat_g"] * 1000),
+            "az": 1000,                       # 1 g down, level car
+            "gx": 0, "gy": 0,
+            "gz": round(st["yaw_rate"] / 0.05),
+        }
+
+    def _flush_imu(self):
+        if not self._imu_pending:
+            return None
+        self._imu_seq = (self._imu_seq + 1) & 0xFFFF
+        payload = enc.encode_imu_batch({
+            "seq": self._imu_seq,
+            "dropped": 0,
+            "t_base": self._imu_batch_t0,
+            "period": self._imu_period_us,
+            "count": len(self._imu_pending),
+            "flags": IMU_ACCEL | IMU_GYRO,
+            "reserved": 0,
+        }, self._imu_pending)
+        self._imu_pending, self._imu_batch_t0 = [], None
+        return payload
+
+    # -- CAN --------------------------------------------------------------
+
+    # The synthetic bus. Each signal has an id, a natural bus rate and an
+    # encoder over the motion state.
+    def _bus_frames(self, now):
+        st = self.circuit.at(now / 1e6)
+        rpm = int(1500 + st["speed"] * 120)
+        kph = int(st["speed"] * 3.6)
+        yield 0x0C0, 50, struct.pack("<HH4x", rpm, kph)
+        yield 0x1A0, 20, struct.pack("<BB6x", 62, 0)          # throttle, brake
+        yield 0x2E0, 10, struct.pack("<h6x", round(st["lat_g"] * 100))
+
+    def _can_capacity(self):
+        header = 16
+        return max(1, (self.notify_bytes - header) // (7 + 8))
+
+    def _flush_can(self, now):
+        self._can_seq = (self._can_seq + 1) & 0xFFFF
+        header = {
+            "seq": self._can_seq,
+            "dropped": 0,
+            "t_base": self._can_batch_t0 if self._can_pending else now,
+            "count": len(self._can_pending),
+            "flags": 0,
+            "reserved": 0,
+        }
+        payload = enc.encode_can_batch(header, self._can_pending)
+        self._can_pending, self._can_batch_t0 = [], None
+        return payload
+
+    # -- polling ----------------------------------------------------------
+
+    def poll(self):
+        """Notifications due now, as (characteristic, payload) pairs."""
+        now = self.now_us()
+        out, self._deferred = self._deferred, []
+
+        if self.gps_hz and now >= self._next_gps_us:
+            out.append(("gps", self._gps_fix(now)))
+            self._next_gps_us = now + round(1_000_000 / self.gps_hz)
+
+        if self.imu_hz:
+            while now >= self._next_imu_us:
+                t = self._next_imu_us
+                if self._imu_batch_t0 is None:
+                    self._imu_batch_t0 = t
+                self._imu_pending.append(self._imu_sample(t))
+                self._next_imu_us = t + self._imu_period_us
+                if len(self._imu_pending) >= self._imu_capacity():
+                    out.append(("imu", self._flush_imu()))
+
+        for frame in self._due_can_frames(now):
+            if self._can_batch_t0 is None:
+                self._can_batch_t0 = frame["_t"]
+            # SPEC.md §6.1 — dt is 10 us ticks from t_base and spans 655.35 ms,
+            # so a batch MUST be flushed before it would overflow.
+            dt = (frame["_t"] - self._can_batch_t0) // 10
+            if dt > 0xFFFF or len(self._can_pending) >= self._can_capacity():
+                out.append(("can", self._flush_can(now)))
+                self._can_batch_t0 = frame["_t"]
+                dt = 0
+            self._can_pending.append({
+                "dt": dt, "id": frame["id"], "extended": False,
+                "fd": False, "rtr": False,
+                "len": len(frame["payload"]), "payload": frame["payload"],
+            })
+
+        # Flush partial batches on a timer so a quiet bus or a slow ODR still
+        # delivers, rather than waiting for a batch that may never fill.
+        if self._subscriptions and now >= self._next_can_flush_us:
+            out.append(("can", self._flush_can(now)))
+            self._next_can_flush_us = now + 100_000
+        return [(c, p) for c, p in out if p is not None]
+
+    def _due_can_frames(self, now):
+        for cid, rate_hz, payload in self._bus_frames(now):
+            sub = self._subscriptions.get(cid)
+            if sub is None:
+                continue
+            mode, arg, last, count = sub
+            interval = round(1_000_000 / rate_hz)
+            if now - last < interval:
+                continue
+            count += 1
+            emit = True
+            if mode == SUB_PERIODIC and arg:
+                emit = (now - sub[2]) >= arg * 1000
+            elif mode == SUB_EVERY_NTH and arg:
+                emit = (count % arg) == 0
+            self._subscriptions[cid] = (mode, arg, now, count)
+            if emit:
+                yield {"id": cid, "payload": payload, "_t": now}
+
+    # -- Control ----------------------------------------------------------
+
+    def set_link_params(self, **kwargs):
+        """Called by the transport once it knows the negotiated link."""
+        self._link = kwargs
+
+    def handle_control(self, request):
+        """SPEC.md §9. `[opcode][tag][params]` in, `[opcode][tag][status]
+        [detail]` out. A device MUST respond to every request."""
+        if len(request) < 2:
+            return None                      # not addressable: no tag to echo
+        opcode, tag, params = request[0], request[1], request[2:]
+
+        def reply(status, detail=b""):
+            return bytes([opcode, tag, status]) + detail
+
+        if opcode == CAN_RESET:
+            self._subscriptions.clear()
+            self._can_pending, self._can_batch_t0 = [], None
+            return reply(ST_OK)
+
+        if opcode == CAN_SUBSCRIBE:
+            if len(params) != 7:
+                return reply(ST_BAD_PARAMS)
+            cid, mode, arg = struct.unpack("<IBH", params)
+            if mode > SUB_EVERY_NTH:
+                return reply(ST_BAD_PARAMS)
+            if (cid not in self._subscriptions
+                    and len(self._subscriptions) >= CAN_SUBSCRIPTION_SLOTS):
+                return reply(ST_TABLE_FULL)
+            self._subscriptions[cid & 0x1FFFFFFF] = (mode, arg, 0, 0)
+            return reply(ST_OK)
+
+        if opcode == CAN_UNSUBSCRIBE:
+            if len(params) != 4:
+                return reply(ST_BAD_PARAMS)
+            (cid,) = struct.unpack("<I", params)
+            self._subscriptions.pop(cid & 0x1FFFFFFF, None)
+            return reply(ST_OK)
+
+        if opcode == GPS_SET_RATE or opcode == IMU_SET_RATE:
+            if len(params) != 2:
+                return reply(ST_BAD_PARAMS)
+            (hz,) = struct.unpack("<H", params)
+            ceiling = 25 if opcode == GPS_SET_RATE else 833
+            if hz > ceiling:
+                return reply(ST_RATE_EXCEEDED)
+            if opcode == GPS_SET_RATE:
+                self.gps_hz = hz
+            else:
+                flushed = self._flush_imu()   # the old period no longer applies
+                self.imu_hz = hz
+                self._next_imu_us = self.now_us()
+                if flushed:
+                    self._deferred.append(("imu", flushed))
+            return reply(ST_OK)
+
+        if opcode == TIME_SYNC:
+            if len(params) != 8:
+                return reply(ST_BAD_PARAMS)
+            # SPEC.md §9: "Response echoes the device t_device at receipt".
+            return reply(ST_OK, struct.pack("<Q", self.now_us()))
+
+        if opcode == GET_LINK_PARAMS:
+            return reply(ST_OK, self._link_params())
+
+        # CAN_SUBSCRIBE_MASK, CAN_LIST and LIST_CHANNELS are declined rather
+        # than guessed at. See README.md: SPEC.md names them but defines no
+        # response payload, and inventing one here would create a de facto
+        # format that no decoder in this repository can check.
+        return reply(ST_UNSUPPORTED)
+
+    def _link_params(self):
+        link = self._link or {}
+        validity, fields = 0, {
+            "att_mtu": 0, "ll_max_tx_octets": 0, "ll_max_rx_octets": 0,
+            "conn_interval": 0, "peripheral_latency": 0,
+            "supervision_timeout": 0, "phy_tx": 0, "phy_rx": 0,
+        }
+        if link.get("att_mtu"):
+            validity |= 1 << 0
+            fields["att_mtu"] = link["att_mtu"]
+        if link.get("ll_max_tx_octets"):
+            validity |= 1 << 1
+            fields["ll_max_tx_octets"] = link["ll_max_tx_octets"]
+            fields["ll_max_rx_octets"] = link.get("ll_max_rx_octets", 0)
+        if link.get("conn_interval"):
+            validity |= 1 << 2
+            fields["conn_interval"] = link["conn_interval"]
+            fields["peripheral_latency"] = link.get("peripheral_latency", 0)
+            fields["supervision_timeout"] = link.get("supervision_timeout", 0)
+        if link.get("phy_tx"):
+            validity |= 1 << 3
+            fields["phy_tx"] = link["phy_tx"]
+            fields["phy_rx"] = link.get("phy_rx", link["phy_tx"])
+        # Everything a host stack does not expose stays absent rather than
+        # being guessed — SPEC.md §9.1 is explicit that a cleared bit is the
+        # only honest answer, and a desktop CoreBluetooth or BlueZ peripheral
+        # genuinely cannot see most of this.
+        return enc.encode_link_params({"validity": validity, **fields})

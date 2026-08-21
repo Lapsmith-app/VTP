@@ -8,6 +8,26 @@ conformance vector.
 
 ## [Unreleased]
 
+### Added
+- `reference/peripheral/`: a synthetic VTP/1 device. `vtp_device.py` holds one
+  monotonic clock, the three roles derived from a common motion model,
+  MTU-aware batching and the control plane, with **no Bluetooth dependency**;
+  `serve.py` is a thin [bless](https://github.com/kevincar/bless) transport on
+  top. The split lets `selftest.py` verify the device in CI on machines with no
+  adapter, decoding every notification with the reference decoder — so the
+  peripheral is checked by the same decoder that checks the corpus.
+
+  It asserts what no single-payload vector can express: that the three roles
+  share one clock and their timestamps interleave, that `seq` advances by one
+  per fix, that a field with no validity bit reads absent rather than zero,
+  that batches respect the negotiated MTU and the 655.35 ms `dt` window, and
+  that control commands change behaviour rather than merely answering. Seven
+  seeded device faults are all caught.
+
+  This makes a client developable. It does not make VTP/1 proven on hardware:
+  §8's clock discipline, §6.1's timing bounds and §2.1-§2.3 are properties of
+  an MCU and a radio, not of a host scheduler.
+
 ### Changed — wire format
 - `imu_header` grows from 16 to 20 bytes and `period` from `u16` to `u32`
   microseconds. A `u16` microsecond period cannot express any interval longer
