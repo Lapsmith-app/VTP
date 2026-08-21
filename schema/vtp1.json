@@ -677,6 +677,14 @@
     "imu_sample": {
       "size": 12,
       "desc": "Sensor-frame acceleration and rotation. Vehicle alignment is the client's job.",
+      "presence": {
+        "record": "imu_header",
+        "field": "flags",
+        "bits": {
+          "accel": 0,
+          "gyro": 1
+        }
+      },
       "fields": [
         {
           "name": "ax",
@@ -684,21 +692,24 @@
           "size": 2,
           "type": "i16",
           "units": "mg",
-          "desc": "milli-g"
+          "desc": "milli-g",
+          "presence_bit": "accel"
         },
         {
           "name": "ay",
           "offset": 2,
           "size": 2,
           "type": "i16",
-          "units": "mg"
+          "units": "mg",
+          "presence_bit": "accel"
         },
         {
           "name": "az",
           "offset": 4,
           "size": 2,
           "type": "i16",
-          "units": "mg"
+          "units": "mg",
+          "presence_bit": "accel"
         },
         {
           "name": "gx",
@@ -706,7 +717,8 @@
           "size": 2,
           "type": "i16",
           "units": "deg/s",
-          "scale": 0.05
+          "scale": 0.05,
+          "presence_bit": "gyro"
         },
         {
           "name": "gy",
@@ -714,7 +726,8 @@
           "size": 2,
           "type": "i16",
           "units": "deg/s",
-          "scale": 0.05
+          "scale": 0.05,
+          "presence_bit": "gyro"
         },
         {
           "name": "gz",
@@ -722,7 +735,8 @@
           "size": 2,
           "type": "i16",
           "units": "deg/s",
-          "scale": 0.05
+          "scale": 0.05,
+          "presence_bit": "gyro"
         }
       ]
     },

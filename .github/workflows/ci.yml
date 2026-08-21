@@ -31,6 +31,13 @@ jobs:
       - name: Documentation claims match the artefacts
         run: python3 tools/check_docs.py
 
+      # Asks from the SCHEMA what a vector would have to look like to exercise
+      # each rule, and fails if the corpus has none. Complements the mutation
+      # sweep below rather than duplicating it: this catches rules no vector
+      # exercises, that one catches code no rule reaches.
+      - name: Corpus can detect a violation of every rule
+        run: python3 tools/check_corpus.py
+
       - name: Build C reference decoder
         run: make -C reference/c
 
