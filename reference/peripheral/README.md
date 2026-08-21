@@ -101,7 +101,107 @@ adapter is a better rig than a Pi and considerably cheaper.
 **Windows.** WinRT's `GattServiceProvider` is workable but the least tested of
 the three here.
 
+## The synthetic CAN bus
+
+Three identifiers, little-endian throughout, and **nothing else exists** — a
+subscription to any other id is accepted and yields no frames, because no such
+frame is on this bus.
+
+The device streams **no CAN at all until a client subscribes** (SPEC.md §9.2:
+the table is empty on every connection). Configuring a channel in a client
+should install a `CAN_SUBSCRIBE` for its id; if nothing arrives, check that
+first.
+
+### `0x0C0` — engine, 50 Hz
+
+| Bytes | Field | Range |
+| --- | --- | --- |
+| 0–1 | Engine speed, rpm, `u16` | 1200 – 7000, sawtooths on each gear change |
+| 2–3 | Road speed, km/h, `u16` | 67 – 149 |
+| 4 | Gear, `u8` | 2 – 4 |
+| 5 | Coolant, °C, `u8` | 90, constant |
+| 6–7 | padding | zero |
+
+### `0x1A0` — driver inputs, 20 Hz
+
+| Bytes | Field | Range |
+| --- | --- | --- |
+| 0 | Throttle, %, `u8` | 0 – 100 |
+| 1 | Brake, %, `u8` | 0 – 100 |
+| 2–3 | Heading, deg × 10, `i16` | 0 – 3600 |
+| 4–7 | padding | zero |
+
+### `0x2E0` — chassis, 10 Hz
+
+| Bytes | Field | Range |
+| --- | --- | --- |
+| 0–1 | Lateral acceleration, g × 100, `i16` | 20 – 97 |
+| 2–3 | Longitudinal acceleration, g × 100, `i16` | −38 – +38 |
+| 4–5 | Yaw rate, deg/s × 10, `i16` | 59 – 132 |
+| 6–7 | padding | zero |
+
+### The values are consistent across channels, deliberately
+
+Speed is `v(t) = 30 + 12·sin(2πt/20)` m/s. Position is its exact integral and
+longitudinal acceleration its exact derivative, so the road speed on the CAN
+bus is the derivative of the GPS track and the IMU's X axis is the derivative
+of that. Lateral acceleration is `v²/r`, so it rises and falls with speed.
+
+A client that cross-checks the three channels finds them agreeing. That is the
+property VTP/1 exists to provide, so a test device that faked it would be
+testing the wrong thing.
+
+The first version of this circuit ran at constant speed, which made every CAN
+value a constant — and a client decoding a channel correctly looked exactly
+like one reading a fixed byte offset wrongly. Nothing moving is nothing tested.
+
 ## The screen
+
+The window is a debug panel as well as the device's display, laid out around
+the questions that actually came up bringing a client onto this protocol:
+
+```
+CLIENT CONNECTED        up 4m12s     MTU 247
+notify subscriptions:  -gps  +can  -imu  +control
+
+STREAMS
+              sent      /s  refused   no-sub  pending drop
+gps              0     0.0        0     1126             0
+can            634    27.0        0        4             0
+imu              0     0.0        0      668             0
+configured: gps 10 Hz   imu 100 Hz
+
+CAN SUBSCRIPTIONS
+handle  id              mode           arg
+1       0x0C0           periodic        40
+2       0x1A0           periodic        40
+3       0x2E0           periodic        40
+
+CONTROL
+19:14:19  CAN_SUBSCRIBE tag=10 id=0x2E0      ok
+19:14:19  CAN_SUBSCRIBE tag=9 id=0x1A0       ok
+
+MONITOR
+LAP          LAST         BEST
+42.318       1:27.340     —·—
+```
+
+The row that mattered most in practice is **notify subscriptions**. A VTP
+device can have CAN ids installed *and* no subscriber on the CAN
+characteristic, and it then produces batches that go nowhere — which from the
+client side looks exactly like a decode bug. The panel turns that red and says
+so. Those are two different subscriptions: the `CAN_SUBSCRIBE` control opcode
+says which arbitration ids to forward, and a GATT subscribe says whether the
+notifications are carried at all.
+
+**`no-sub`** counts notifications produced for a characteristic nobody has
+subscribed to. That is not loss and is not reported in `dropped` — nobody asked
+for it. **`refused`** is loss: a subscriber exists and the host stack still
+rejected the notification, so the items go into `dropped` per §8.3.
+
+Rates matter more than totals: a total cannot tell a stalled stream from a slow
+one, and every stall in this repository's history looked like a large number
+that had stopped growing.
 
 A Monitor device exists to display values it cannot compute, so the only way to
 tell whether the role works end to end is to look at one. `serve.py` opens a

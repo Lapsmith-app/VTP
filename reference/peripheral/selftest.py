@@ -35,6 +35,7 @@ sys.path.insert(0, str(HERE))
 import vtp1  # noqa: E402
 import vtp_device as dev  # noqa: E402
 import display as disp  # noqa: E402  (pure formatting; no GUI import at module level)
+import serve  # noqa: E402  (bless is imported lazily inside it)
 
 FAILURES = []
 
@@ -436,6 +437,63 @@ def main():
     check((disp.LAP_TIME, disp.DELTA_BEST, disp.SESSION_TIME)
           == (dev.CH_LAP_TIME, dev.CH_DELTA_BEST, dev.CH_SESSION_TIME),
           "display.py's channel constants have drifted from the device's")
+
+    # ---- A refused notification is loss, and must be reported (§8.3) ----
+    # The host stack refuses when its transmit queue is full and returns false.
+    # Ignoring that return loses data silently and misreports it, because the
+    # device's own counter never learns the notification was never sent.
+    refused = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=10,
+                            imu_hz=100)
+    refused.handle_control(bytes([dev.CAN_SUBSCRIBE, 1])
+                           + struct.pack("<IBH", 0x0C0, dev.SUB_EVERY_FRAME, 0))
+    produced = run(refused, clock, 1.0)
+    by_stream = {}
+    for characteristic, payload in produced:
+        by_stream.setdefault(characteristic, []).append(payload)
+
+    for characteristic, payloads in by_stream.items():
+        lost = refused.record_refused(characteristic, payloads[0])
+        check(lost > 0,
+              f"{characteristic}: a refused notification must count at least "
+              f"one lost item, got {lost}")
+        if characteristic in ("can", "imu"):
+            decoded = decode(characteristic, payloads[0])
+            expected = decoded["header"]["count"] if decoded else None
+            check(lost == expected,
+                  f"{characteristic}: a refused batch must count its "
+                  f"{expected} records, not {lost} — dropped is defined in "
+                  f"source items, not notifications")
+
+    after = [decode(c, p) for c, p in run(refused, clock, 0.5)]
+    reported = [d for d in after if d and (
+        d.get("dropped") or d.get("header", {}).get("dropped"))]
+    check(reported,
+          "items lost to a refused notification MUST appear in dropped on a "
+          "later notification, or the loss is invisible to the client")
+
+    # ---- Connection edges drive the per-connection reset ----------------
+    # The transport must tell the device when a link starts, or §8.2's sequence
+    # restart and §9.2's table clear never happen. They did not, for a while,
+    # because nothing called on_connect() outside this file.
+    tracker = serve.ConnectionTracker()
+    check(tracker.update(False) is None, "no edge from disconnected to disconnected")
+    check(tracker.update(True) == "connected", "a first connection is a rising edge")
+    check(tracker.update(True) is None, "a steady connection is not an edge")
+    check(tracker.update(False) == "disconnected", "a drop is a falling edge")
+    check(tracker.update(True) == "connected", "a reconnection is a rising edge")
+
+    # ---- The advertisement has to carry the service UUID ----------------
+    # A client that matches on the service UUID never sees a device whose
+    # advertisement overflowed and dropped it, and nothing in the peripheral's
+    # log says so. This is a pure size calculation, so it is checkable here.
+    check(serve.check_advertisement_fits("VTP") is None,
+          "the default advertised name must fit beside the service UUID")
+    check(serve.check_advertisement_fits("VTP Logger") is not None,
+          "a 10-character name does NOT fit beside a 128-bit service UUID in "
+          "31 bytes, and must be reported rather than silently overflowing")
+    check(serve.MAX_NAME_CHARS == 8,
+          f"31 - 3 flags - 18 UUID - 2 header leaves 8 characters, not "
+          f"{serve.MAX_NAME_CHARS}")
 
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)

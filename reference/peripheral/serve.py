@@ -28,10 +28,13 @@ developable. It does not make the protocol proven on hardware.
 """
 import argparse
 import asyncio
+import collections
 import json
 import logging
 import pathlib
+import struct
 import sys
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -61,13 +64,99 @@ def _in_app_bundle():
     return "/Contents/MacOS/" in sys.executable
 
 
+# Names for the log. A control write that arrives as eleven hex bytes tells a
+# reader nothing; the same write named as CAN_SUBSCRIBE with its parameters is
+# the difference between diagnosing a client and guessing at one.
+OPCODES = {
+    0x01: "CAN_RESET", 0x02: "CAN_SUBSCRIBE", 0x03: "CAN_SUBSCRIBE_MASK",
+    0x04: "CAN_UNSUBSCRIBE", 0x05: "CAN_LIST", 0x10: "GPS_SET_RATE",
+    0x20: "IMU_SET_RATE", 0x30: "TIME_SYNC", 0x31: "GET_LINK_PARAMS",
+    0x40: "MONITOR_LIST",
+}
+STATUSES = {
+    0: "ok", 1: "unsupported_opcode", 2: "bad_params", 3: "table_full",
+    4: "rate_exceeded", 5: "busy", 6: "needs_encryption", 7: "unknown_handle",
+}
+CHAR_NAMES = {}
+
+
+class ConnectionTracker:
+    """Edge detection over a connection flag.
+
+    Separated out and kept pure because the two things that hang off an edge
+    are not cosmetic: a rising edge is where SPEC.md §8.2 restarts sequence
+    numbers and §9.2 clears the subscription table, and a device that never
+    sees an edge never does either. This peripheral did not, for its whole
+    life, because the transport never told it.
+    """
+
+    def __init__(self):
+        self.connected = False
+
+    def update(self, is_connected):
+        """Return 'connected', 'disconnected', or None when nothing changed."""
+        if is_connected == self.connected:
+            return None
+        self.connected = is_connected
+        return "connected" if is_connected else "disconnected"
+
+
+def _describe_request(value):
+    if len(value) < 2:
+        return f"<{len(value)} bytes, not a request>"
+    opcode, tag, params = value[0], value[1], value[2:]
+    name = OPCODES.get(opcode, f"0x{opcode:02X}")
+    detail = ""
+    if opcode in (0x02, 0x03) and len(params) >= 7:
+        cid, mode, arg = struct.unpack("<IBH", params[:7] if opcode == 0x02
+                                       else params[:4] + params[8:11])
+        detail = f" id=0x{cid & 0x1FFFFFFF:03X} mode={mode} arg={arg}"
+    elif opcode == 0x05 and len(params) == 2:
+        detail = f" start={struct.unpack('<H', params)[0]}"
+    return f"{name} tag={tag}{detail} params={params.hex() or '-'}"
+
+
+# A BLE advertisement is 31 bytes: 3 for flags, 18 for one 128-bit service UUID
+# (2 header + 16), leaving 10 for everything else — and a local name costs 2
+# bytes of header on top of its characters.
+ADVERTISEMENT_BYTES = 31
+_FLAGS_BYTES, _UUID128_BYTES, _AD_HEADER = 3, 18, 2
+MAX_NAME_CHARS = ADVERTISEMENT_BYTES - _FLAGS_BYTES - _UUID128_BYTES - _AD_HEADER
+
+
+def check_advertisement_fits(name):
+    """Return a complaint if `name` will not fit beside the service UUID.
+
+    An over-long name does not truncate: the packet overflows and the host
+    stack drops a whole element. If what it drops is the service UUID, a client
+    scanning for that UUID never sees the device at all, and nothing in the log
+    says so — the peripheral reports itself as advertising perfectly happily.
+    """
+    if len(name) <= MAX_NAME_CHARS:
+        return None
+    return (f"local name {name!r} is {len(name)} characters; only "
+            f"{MAX_NAME_CHARS} fit beside the 128-bit service UUID in a "
+            f"{ADVERTISEMENT_BYTES}-byte advertisement. The packet overflows "
+            f"and the service UUID may be dropped, which makes this device "
+            f"invisible to any client scanning for it.")
+
+
 class Peripheral:
     def __init__(self, device, name="VTP Logger", screen=None):
         self.device = device
         self.name = name
         self.server = None
         self.screen = screen
-        self._connected = False
+        self._link = ConnectionTracker()
+        # Everything the debug panel shows. Kept here rather than in the device
+        # because it is transport truth, not device truth: how many
+        # notifications the stack accepted is not something the device knows.
+        self.sent = {"gps": 0, "can": 0, "imu": 0}
+        self.refused = {"gps": 0, "can": 0, "imu": 0}
+        self.unwanted = {"gps": 0, "can": 0, "imu": 0}
+        self.rate = {"gps": 0.0, "can": 0.0, "imu": 0.0}
+        self.control_log = collections.deque(maxlen=8)
+        self.started = time.monotonic()
         self._notify = {"gps": CHAR["gps"], "can": CHAR["can"],
                         "imu": CHAR["imu"]}
 
@@ -76,6 +165,8 @@ class Peripheral:
     def read_request(self, characteristic, **kwargs):
         """Info is regenerated per read: SPEC.md §4 forbids a client caching it
         across connections precisely because it can change."""
+        name = CHAR_NAMES.get(characteristic.uuid.lower(), characteristic.uuid)
+        log.info("READ  %s", name)
         if characteristic.uuid.lower() == CHAR["info"].lower():
             return self.device.info()
         return characteristic.value or b""
@@ -91,11 +182,19 @@ class Peripheral:
                 # The screen is refreshed from the poll loop, not from here:
                 # this callback does not run on the loop that owns the window,
                 # and Tk is not thread-safe.
-                self._connected = True
+                pass
             return
         if uuid != CHAR["control"].lower():
             return
-        response = self.device.handle_control(bytes(value))
+        request = bytes(value)
+        response = self.device.handle_control(request)
+        if response is not None:
+            described = _describe_request(request)
+            status = STATUSES.get(response[2], f"0x{response[2]:02X}")
+            log.info("CTRL  %s -> %s", described, status)
+            self.control_log.append(
+                (time.strftime("%H:%M:%S"), described.split(" params=")[0],
+                 status))
         if response is None:
             # Too short to carry a tag, so there is nothing to correlate a
             # reply with. SPEC.md §9 requires a response to every *request*;
@@ -105,11 +204,41 @@ class Peripheral:
             return
         control = self.server.get_characteristic(CHAR["control"])
         control.value = response
-        self.server.update_value(SERVICE, CHAR["control"])
+        if not self.server.update_value(SERVICE, CHAR["control"]):
+            # SPEC.md §9 requires a response to every request, and a refused
+            # indication is a response the client never receives. Nothing here
+            # can retry it usefully, but a client left waiting on a tag should
+            # at least be diagnosable from this side.
+            log.error("control response for tag %d was REFUSED by the "
+                      "transport; the client will see no answer", response[1])
+
+    def _subscribed(self):
+        """Characteristic names a central has enabled notifications on.
+
+        A GATT subscription and a VTP CAN_SUBSCRIBE are different things and it
+        is easy to have one without the other: the control opcode tells the
+        device which arbitration ids to forward, while this is the client's
+        stack agreeing to carry the notifications at all. A device with three
+        CAN ids installed and no subscriber on the CAN characteristic produces
+        batches that go nowhere, and the only visible symptom is that
+        update_value keeps returning false.
+
+        Reaches into bless's delegate because nothing public exposes it.
+        """
+        try:
+            subs = self.server.peripheral_manager_delegate._central_subscriptions
+        except AttributeError:
+            return None
+        names = set()
+        for chars in subs.values():
+            for uuid in chars:
+                names.add(CHAR_NAMES.get(uuid.lower(), uuid))
+        return names
 
     # -- lifecycle --------------------------------------------------------
 
     async def start(self):
+        CHAR_NAMES.update({v.lower(): k for k, v in CHAR.items()})
         # macOS TERMINATES any process that creates a CBPeripheralManager
         # without an NSBluetoothAlwaysUsageDescription in its Info.plist --
         # killed outright, no exception to catch, nothing on stderr. It is not
@@ -158,32 +287,125 @@ class Peripheral:
 
         await self.server.start()
         log.info("advertising %s as %r", SERVICE, self.name)
+        log.info("a client matching on the service UUID needs that UUID in the "
+                 "advertisement; name is %d of %d permitted characters",
+                 len(self.name), MAX_NAME_CHARS)
         log.info("Service Data (SPEC.md 3.3) is not advertised: the host "
                  "peripheral API does not expose it on every platform")
 
     async def run(self, poll_hz=200, screen_hz=20):
         interval = 1.0 / poll_hz
-        sent, ticks = 0, 0
+        ticks = 0
         every = max(1, poll_hz // screen_hz)
+        # Counted per characteristic. A single total hides the one question a
+        # reader of this log actually has, which is which stream is silent.
+        sent, refused, unwanted = self.sent, self.refused, self.unwanted
+        next_report = 0.0
+        next_rate = time.monotonic() + 1.0
+        last_counts = dict(sent)
         while True:
+            subscribed = self._subscribed()
             for characteristic, payload in self.device.poll():
-                char = self.server.get_characteristic(self._notify[characteristic])
-                char.value = payload
-                self.server.update_value(SERVICE, self._notify[characteristic])
-                sent += 1
-                if sent % 200 == 0:
-                    log.info("%d notifications sent", sent)
+                # Nobody listening is not loss. A notification for a
+                # characteristic no central has subscribed to was never due,
+                # and counting it into `dropped` would report data missing that
+                # no client ever asked for -- which is how this counter first
+                # read 1500 CAN frames lost to a client that had gone home.
+                if subscribed is not None and characteristic not in subscribed:
+                    unwanted[characteristic] += 1
+                    continue
+                uuid = self._notify[characteristic]
+                self.server.get_characteristic(uuid).value = payload
+                # With a subscriber present, a false return IS loss: the host
+                # stack refused it and the notification is never sent. SPEC.md
+                # §8.3 says discard and report, so it goes into `dropped`.
+                if self.server.update_value(SERVICE, uuid):
+                    sent[characteristic] += 1
+                else:
+                    lost = self.device.record_refused(characteristic, payload)
+                    refused[characteristic] += 1
+                    if refused[characteristic] == 1:
+                        log.warning(
+                            "%s: subscribed, but the transport refused a "
+                            "notification; %d item(s) counted into dropped. "
+                            "Further refusals are summarised.",
+                            characteristic, lost)
+
+            # A rate is what tells a stalled stream from a slow one, and a
+            # total never does.
+            now_wall = time.monotonic()
+            if now_wall >= next_rate:
+                span = 1.0
+                for name in self.rate:
+                    self.rate[name] = (sent[name] - last_counts[name]) / span
+                last_counts = dict(sent)
+                next_rate = now_wall + span
+
+            if ticks % every == 0:
+                event = self._link.update(await self.server.is_connected())
+                if event == "connected":
+                    # SPEC.md §8.2 and §9.2: a connection starts from a known
+                    # state. Without this the device carries the previous
+                    # client's subscriptions and sequence numbers into the next
+                    # connection, which is exactly what §9.2 forbids.
+                    self.device.on_connect()
+                    log.info("CLIENT CONNECTED — sequence numbers restarted, "
+                             "subscription table cleared")
+                elif event == "disconnected":
+                    log.info("CLIENT DISCONNECTED")
+
+            now = self.device.now_us() / 1e6
+            if now >= next_report:
+                next_report = now + 10.0
+                subs = len(self.device._subscriptions)
+                subscribed = self._subscribed()
+                log.info("sent gps=%d can=%d imu=%d | refused gps=%d can=%d "
+                         "imu=%d | no-subscriber gps=%d can=%d imu=%d | "
+                         "CAN ids=%d | notify-subscribed: %s",
+                         sent["gps"], sent["can"], sent["imu"],
+                         refused["gps"], refused["can"], refused["imu"],
+                         unwanted["gps"], unwanted["can"], unwanted["imu"],
+                         subs,
+                         ", ".join(sorted(subscribed)) if subscribed else "none")
+                if subs and subscribed is not None and "can" not in subscribed:
+                    log.warning(
+                        "  %d CAN id(s) are installed but no central has "
+                        "subscribed to the CAN characteristic: the device is "
+                        "producing batches that go nowhere. A client must "
+                        "enable notifications on %s as well as sending "
+                        "CAN_SUBSCRIBE.", subs, CHAR["can"])
+                if subs == 0:
+                    log.info("  no CAN subscription installed, so no CAN "
+                             "frames are due: a client must CAN_SUBSCRIBE "
+                             "before this device sends any (SPEC.md 9.2)")
 
             ticks += 1
             if self.screen and ticks % every == 0:
                 self.screen.update(self.device.monitor_state(),
-                                   connected=self._connected,
-                                   seq=self.device.monitor_seq,
-                                   updates=self.device.monitor_updates)
+                                   self.telemetry(subscribed))
                 if not self.screen.pump():
                     log.info("display closed; stopping")
                     return
             await asyncio.sleep(interval)
+
+    def telemetry(self, subscribed):
+        """Everything the debug panel draws, gathered in one place."""
+        return {
+            "connected": self._link.connected,
+            "uptime": time.monotonic() - self.started,
+            "subscribed": subscribed,
+            "sent": dict(self.sent),
+            "refused": dict(self.refused),
+            "unwanted": dict(self.unwanted),
+            "rate": dict(self.rate),
+            "pending_dropped": self.device.pending_dropped(),
+            "can_table": self.device.can_table(),
+            "control": list(self.control_log),
+            "mtu": self.device.mtu,
+            "configured": self.device.rates(),
+            "monitor_seq": self.device.monitor_seq,
+            "monitor_updates": self.device.monitor_updates,
+        }
 
     async def stop(self):
         if self.server:
@@ -200,6 +422,13 @@ async def main_async(args):
         handlers=handlers)
     if not sys.stdout.isatty():
         log.info("logging to %s", LOG_FILE)
+
+    complaint = check_advertisement_fits(args.name)
+    if complaint:
+        log.error("%s", complaint)
+        log.error("refusing to advertise a packet that may omit the service "
+                  "UUID; pass a shorter --name")
+        return
 
     device = dev.VtpDevice(mtu=args.mtu, gps_hz=args.gps_hz,
                            imu_hz=args.imu_hz)
@@ -241,8 +470,9 @@ async def main_async(args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--name", default="VTP Logger",
-                    help="advertised local name")
+    ap.add_argument("--name", default="VTP",
+                    help=f"advertised local name, at most {MAX_NAME_CHARS} "
+                         f"characters beside the service UUID")
     ap.add_argument("--mtu", type=int, default=247,
                     help="assumed ATT MTU for batch sizing")
     ap.add_argument("--gps-hz", type=int, default=10)

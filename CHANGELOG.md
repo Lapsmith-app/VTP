@@ -8,7 +8,62 @@ conformance vector.
 
 ## [Unreleased]
 
+### Changed
+- **The peripheral's synthetic vehicle now varies.** It ran at constant speed on
+  a circle, which made every CAN value a constant: engine speed, road speed,
+  throttle and lateral g never moved. A client decoding a channel correctly and
+  one reading a fixed byte offset wrongly produced identical screens, so the
+  bus tested nothing.
+
+  Speed is now `v(t) = 30 + 12·sin(2πt/20)` m/s, position is its exact integral
+  and longitudinal acceleration its exact derivative — so the road speed on the
+  CAN bus is the derivative of the GPS track and the IMU's X axis is the
+  derivative of that. Cross-channel agreement is the property VTP/1 exists to
+  provide, so a test device that faked it would be testing the wrong thing.
+
+  The bus carries three identifiers with documented layouts
+  (`reference/peripheral/README.md`): `0x0C0` engine at 50 Hz, `0x1A0` driver
+  inputs at 20 Hz, `0x2E0` chassis at 10 Hz. RPM sawtooths across four gears,
+  which a wrongly decoded channel does not.
+
+### Fixed
+- **The peripheral ignored the return value of its notify call.** The host
+  stack returns false when it will not carry a notification, and the
+  notification is then never sent. Ignoring that lost data silently *and*
+  misreported it, because the device's own `dropped` counter never learned. It
+  is checked now, and refused items are counted into `dropped` in source items
+  — eighteen samples for an IMU batch, not "one notification", because
+  `dropped` is defined in items.
+
+  A refusal because **nobody has subscribed** to that characteristic is not
+  loss and is counted separately: those notifications were never due, and
+  reporting them as discarded claimed data was missing that no client had asked
+  for.
+- **`VtpDevice.on_connect()` was never called by the transport.** Only the
+  selftest called it, so the live device had never performed its per-connection
+  reset: sequence numbers never restarted (§8.2) and the CAN subscription table
+  was never cleared (§9.2). A conformance violation in the reference device,
+  which is the worst place for one. A connection edge now drives it, and both
+  transitions are logged.
+- The display reported "client connected" forever. It latched true on the first
+  read or write and nothing ever cleared it, because there was no disconnect
+  detection at all.
+
 ### Added
+- **The peripheral's window is now a scrollable debug panel.** Notify subscriptions per
+  characteristic, per-stream sent/refused/no-subscriber counts and rates, the
+  installed CAN subscription table with modes and arguments, and a rolling log
+  of control requests with their status — alongside the Monitor values.
+
+  Every value is a widget rather than preformatted text, so each carries its
+  own colour: dim is idle, bright is active, amber wants attention, red is
+  loss. The body scrolls, because the panel is taller than the window and the
+  Monitor section otherwise sat below the bottom edge with no way to reach it.
+
+  It calls out the combination that produces silent failure: CAN ids installed
+  with no subscriber on the CAN characteristic. Those are two different
+  subscriptions and having one without the other looks, from the client side,
+  exactly like a decode bug.
 - **A screen on the software peripheral** (`reference/peripheral/display.py`).
   A Monitor device exists to display values it cannot compute, so the only way
   to tell whether the role works end to end is to look at one. The window shows
