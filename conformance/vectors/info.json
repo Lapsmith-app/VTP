@@ -1,0 +1,66 @@
+{
+  "protocol": "VTP/1",
+  "generated_by": "tools/generate.py",
+  "cases": [
+    {
+      "name": "gps-and-can-device",
+      "desc": "A typical dual-role module.",
+      "record": "info",
+      "hex": "010093000000190019004000a00f0000000000000801f400",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 147,
+        "gps_rate_hz": 25,
+        "gps_max_rate_hz": 25,
+        "can_subscription_slots": 64,
+        "can_max_frames_per_s": 4000,
+        "imu_rate_hz": 0,
+        "imu_max_rate_hz": 0,
+        "can_max_payload": 8,
+        "clock_flags": 1,
+        "max_notify_bytes": 244
+      }
+    },
+    {
+      "name": "gps-only-no-control",
+      "desc": "A GPS-only board with no control channel. Every CAN capacity figure is zero and a client MUST NOT infer a default.",
+      "record": "info",
+      "hex": "0100010000000a000a00000000000000000000000800b900",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 1,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_subscription_slots": 0,
+        "can_max_frames_per_s": 0,
+        "imu_rate_hz": 0,
+        "imu_max_rate_hz": 0,
+        "can_max_payload": 8,
+        "clock_flags": 0,
+        "max_notify_bytes": 185
+      }
+    },
+    {
+      "name": "future-minor-unknown-capability",
+      "desc": "Minor 7 with a capability bit this client has never heard of. A client MUST ignore the unknown bit and use everything it does understand.",
+      "record": "info",
+      "hex": "010707000800190019002000a00f0000410341034003f201",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 7,
+        "capabilities": 524295,
+        "gps_rate_hz": 25,
+        "gps_max_rate_hz": 25,
+        "can_subscription_slots": 32,
+        "can_max_frames_per_s": 4000,
+        "imu_rate_hz": 833,
+        "imu_max_rate_hz": 833,
+        "can_max_payload": 64,
+        "clock_flags": 3,
+        "max_notify_bytes": 498
+      }
+    }
+  ]
+}

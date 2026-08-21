@@ -1,0 +1,208 @@
+{
+  "protocol": "VTP/1",
+  "generated_by": "tools/generate.py",
+  "cases": [
+    {
+      "name": "single-classic-frame",
+      "desc": "One 8-byte classic frame.",
+      "record": "can_batch",
+      "hex": "0100000040420f0000000000010000000000a0010000080011223344556677",
+      "expect": {
+        "header": {
+          "seq": 1,
+          "dropped": 0,
+          "t_base": 1000000,
+          "count": 1,
+          "flags": 0,
+          "reserved": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 8,
+            "payload": "0011223344556677",
+            "t_device_us": 1000000
+          }
+        ]
+      }
+    },
+    {
+      "name": "three-frames-timestamped",
+      "desc": "Three frames at distinct bus-arrival times. dt is in 10 us ticks, so t_device = t_base + dt*10.",
+      "record": "can_batch",
+      "hex": "02000000404b4c0000000000030000000000000100000101170001010000020203ffff0201000003040506",
+      "expect": {
+        "header": {
+          "seq": 2,
+          "dropped": 0,
+          "t_base": 5000000,
+          "count": 3,
+          "flags": 0,
+          "reserved": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 256,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "01",
+            "t_device_us": 5000000
+          },
+          {
+            "dt": 23,
+            "id": 257,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 2,
+            "payload": "0203",
+            "t_device_us": 5000230
+          },
+          {
+            "dt": 65535,
+            "id": 258,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 3,
+            "payload": "040506",
+            "t_device_us": 5655350
+          }
+        ]
+      },
+      "note": "dt 65535 is the end of the batch window. A device MUST flush before this wraps, which is what bounds batch latency at 655.35 ms."
+    },
+    {
+      "name": "extended-id",
+      "desc": "A 29-bit extended identifier. The extended flag lives in bit 29 of `id`, and the arbitration id is bits 0-28 only.",
+      "record": "can_batch",
+      "hex": "03000000c0cf6a000000000001000000050010f1da3802aabb",
+      "expect": {
+        "header": {
+          "seq": 3,
+          "dropped": 0,
+          "t_base": 7000000,
+          "count": 1,
+          "flags": 0,
+          "reserved": 0
+        },
+        "records": [
+          {
+            "dt": 5,
+            "id": 417001744,
+            "extended": true,
+            "fd": false,
+            "rtr": false,
+            "len": 2,
+            "payload": "aabb",
+            "t_device_us": 7000050
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-fd-64-byte",
+      "desc": "A CAN FD frame carrying the maximum 64-byte payload.",
+      "record": "can_batch",
+      "hex": "040000004054890000000000010000000100f002004040000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "expect": {
+        "header": {
+          "seq": 4,
+          "dropped": 0,
+          "t_base": 9000000,
+          "count": 1,
+          "flags": 0,
+          "reserved": 0
+        },
+        "records": [
+          {
+            "dt": 1,
+            "id": 752,
+            "extended": false,
+            "fd": true,
+            "rtr": false,
+            "len": 64,
+            "payload": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+            "t_device_us": 9000010
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty-batch",
+      "desc": "count 0. Legal, and means the bus is quiet \u2014 NOT an error and NOT a disconnect. A decoder MUST accept it.",
+      "record": "can_batch",
+      "hex": "05000000c0d8a7000000000000000000",
+      "expect": {
+        "header": {
+          "seq": 5,
+          "dropped": 0,
+          "t_base": 11000000,
+          "count": 0,
+          "flags": 0,
+          "reserved": 0
+        },
+        "records": []
+      }
+    },
+    {
+      "name": "shedding-load",
+      "desc": "The device dropped 400 frames and is signalling overload in flags bit 0. A decoder MUST surface both.",
+      "record": "can_batch",
+      "hex": "06009001405dc60000000000010100000000a00100000100",
+      "expect": {
+        "header": {
+          "seq": 6,
+          "dropped": 400,
+          "t_base": 13000000,
+          "count": 1,
+          "flags": 1,
+          "reserved": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00",
+            "t_device_us": 13000000
+          }
+        ]
+      }
+    },
+    {
+      "name": "count-exceeds-payload",
+      "desc": "Header claims 4 records but only one is present. MUST be rejected.",
+      "record": "can_batch",
+      "hex": "070000000100000000000000040000000000a00100000100",
+      "must_reject": "truncated-record"
+    },
+    {
+      "name": "reserved-nonzero",
+      "desc": "Header reserved bytes carry a value assigned by a future minor. A decoder MUST ignore them, not reject.",
+      "record": "can_batch",
+      "hex": "0800000001000000000000000000efbe",
+      "expect": {
+        "header": {
+          "seq": 8,
+          "dropped": 0,
+          "t_base": 1,
+          "count": 0,
+          "flags": 0,
+          "reserved": 48879
+        },
+        "records": []
+      }
+    }
+  ]
+}

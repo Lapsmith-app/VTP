@@ -1,0 +1,548 @@
+# VTP/1 — Vehicle Telemetry Protocol over Bluetooth LE
+
+**Version 1.0 · Normative specification**
+
+The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
+RECOMMENDED, MAY and OPTIONAL are to be interpreted as described in
+[RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and
+[RFC 8174](https://www.rfc-editor.org/rfc/rfc8174), and only when they appear in
+all capitals.
+
+Rationale, trade-offs and comparisons belong in [RATIONALE.md](RATIONALE.md).
+This document is normative and deliberately terse.
+
+---
+
+## 1. Scope and conformance
+
+VTP/1 carries GNSS position, CAN-bus frames and inertial samples from a
+purpose-built device to a host application over Bluetooth LE GATT.
+
+An implementation is **conforming** if it:
+
+1. Implements at least one of the GPS, CAN or IMU roles.
+2. Declares exactly what it implements in the Info characteristic (§4).
+3. Passes the conformance vectors in `conformance/vectors/` for every role it
+   declares (§12).
+
+A device MAY implement any subset of roles. A client MUST NOT assume a role is
+present because the service is.
+
+### 1.1 The governing principle
+
+**No VTP/1 receiver may ever produce a plausible wrong value.** Where a
+specification choice trades bytes against ambiguity, this specification spends
+the bytes. Three consequences run through every section below and a conforming
+implementation MUST honour all three:
+
+- Absence is signalled **only** by a validity bit or a presence flag, never by a
+  reserved value of the field itself.
+- Anything unrecognised — an enum value, a bitmask bit, an extension type — is
+  reported as unrecognised. It MUST NOT be coerced to a default.
+- Anything malformed — a short payload, a truncated record — is rejected whole.
+  A receiver MUST NOT decode the prefix of a malformed payload.
+
+---
+
+## 2. Transport
+
+| Requirement | Value |
+| --- | --- |
+| GATT role | Device is peripheral, host application is central |
+| Byte order | **Little-endian, every field, no exceptions** |
+| Minimum ATT MTU | 100 |
+| Connection interval | Device SHOULD request 15 ms, peripheral latency 0, while streaming |
+
+A device MUST function correctly at an ATT MTU of 100 and MUST use up to the
+negotiated maximum when batching (§6, §7).
+
+A device MUST implement the Bluetooth SIG Device Information Service
+(`0x180A`) and MUST populate Manufacturer Name, Model Number and Firmware
+Revision.
+
+Signed integers are two's complement. Reserved fields MUST be written as zero
+and MUST be ignored on receive.
+
+---
+
+## 3. Discovery
+
+### 3.1 UUID allocation
+
+<!-- BEGIN GENERATED: uuids -->
+| Role | UUID |
+| --- | --- |
+| Service (VTP/1) | `56545001-5f05-5b56-af87-dcab2baf2522` |
+| Characteristic `info` | `56544301-5f05-5b56-af87-dcab2baf2522` |
+| Characteristic `gps` | `56544302-5f05-5b56-af87-dcab2baf2522` |
+| Characteristic `can` | `56544303-5f05-5b56-af87-dcab2baf2522` |
+| Characteristic `imu` | `56544304-5f05-5b56-af87-dcab2baf2522` |
+| Characteristic `control` | `56544305-5f05-5b56-af87-dcab2baf2522` |
+| Characteristic `monitor_values` | `56544306-5f05-5b56-af87-dcab2baf2522` |
+<!-- END GENERATED: uuids -->
+
+These values are **frozen** for the life of major version 1.
+
+### 3.2 The family prefix
+
+<!-- BEGIN GENERATED: family_prefix -->
+Every VTP service UUID begins with the four bytes `56 54 50 MM`, where `56 54 50` is ASCII `"VTP"` and `MM` is the major version. Characteristic UUIDs begin `56 54 43 NN` (ASCII `"VTC"` and an index) and share the service's remaining twelve bytes.
+<!-- END GENERATED: family_prefix -->
+
+A client MAY use this structure to recognise a VTP device whose major version it
+does not implement, and SHOULD report that condition to the user rather than
+letting the device appear absent. A client MUST NOT attempt to parse any
+characteristic of a major version it does not implement.
+
+### 3.3 Advertisement
+
+A device MUST advertise its VTP service UUID. It SHOULD additionally include
+Service Data for that UUID, three bytes:
+
+| Off | Size | Field |
+| --- | --- | --- |
+| 0 | 1 | `protocol_minor` |
+| 1 | 1 | `capabilities` bits 0–7 (§4) |
+| 2 | 1 | Device class — a display hint only; carries no protocol meaning |
+
+Service Data is advisory. A client MUST NOT rely on it in place of reading the
+Info characteristic, and MUST re-read Info on every connection regardless of
+what the advertisement said.
+
+---
+
+## 4. Info characteristic — READ
+
+<!-- BEGIN GENERATED: info -->
+*Device self-description. Read once per connection; never cached across connections.*
+
+Total: **24 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `protocol_major` | MUST equal 1; cross-check against the discovered service UUID |
+| 1 | 1 | `u8` | `protocol_minor` | — |
+| 2 | 4 | `u32` | `capabilities` | bitmask `capabilities` |
+| 6 | 2 | `u16` | `gps_rate_hz` | `Hz`; Current rate; 0 if no GPS |
+| 8 | 2 | `u16` | `gps_max_rate_hz` | `Hz` |
+| 10 | 2 | `u16` | `can_subscription_slots` | — |
+| 12 | 4 | `u32` | `can_max_frames_per_s` | `frames/s` |
+| 16 | 2 | `u16` | `imu_rate_hz` | `Hz` |
+| 18 | 2 | `u16` | `imu_max_rate_hz` | `Hz` |
+| 20 | 1 | `u8` | `can_max_payload` | 8 for classic CAN, 64 for CAN FD |
+| 21 | 1 | `u8` | `clock_flags` | bit0 GNSS-disciplined, bit1 clock survives reconnect |
+| 22 | 2 | `u16` | `max_notify_bytes` | `bytes` |
+<!-- END GENERATED: info -->
+
+`capabilities` bits:
+
+<!-- BEGIN GENERATED: bitmask:capabilities -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `gps` | — |
+| 1 | `can` | — |
+| 2 | `imu` | — |
+| 3 | `monitor` | — |
+| 4 | `control` | — |
+| 5 | `can_fd` | — |
+| 6 | `masked_subscriptions` | — |
+| 7 | `on_change_subscriptions` | — |
+| 8+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:capabilities -->
+
+A client MUST read this characteristic on every connection and MUST NOT cache it
+across connections. A DIY device is reflashed by its owner: its minor version,
+capability set and rate ceilings can all change while its Bluetooth address does
+not.
+
+If `protocol_major` does not match the major version implied by the discovered
+service UUID, the client MUST treat the device as non-conforming and disconnect.
+
+A capacity field of zero means "none", not "unspecified". A client MUST NOT
+substitute a default for any capacity it did not read.
+
+---
+
+## 5. GPS characteristic — NOTIFY
+
+One notification carries exactly one position solution. There is no pairing
+between characteristics and no reassembly.
+
+<!-- BEGIN GENERATED: gps_fix -->
+*One complete position solution. Never split, never paired, never packed.*
+
+Total: **74 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `seq` | Increments per fix produced, including dropped ones. Wraps. |
+| 2 | 2 | `u16` | `dropped` | Fixes discarded since the previous notification |
+| 4 | 4 | `u32` | `validity` | bitmask `gps_validity` |
+| 8 | 8 | `u64` | `t_device` | `us`; Monotonic device clock |
+| 16 | 8 | `i64` | `t_utc` | `ms`; valid when `validity` bit 0 (`t_utc`) is set; Unix epoch |
+| 24 | 4 | `i32` | `lat` | `deg`; scale 1e-07; valid when `validity` bit 2 (`position`) is set |
+| 28 | 4 | `i32` | `lon` | `deg`; scale 1e-07; valid when `validity` bit 2 (`position`) is set |
+| 32 | 4 | `i32` | `alt_msl` | `mm`; valid when `validity` bit 3 (`alt_msl`) is set |
+| 36 | 4 | `i32` | `alt_ellipsoid` | `mm`; valid when `validity` bit 4 (`alt_ellipsoid`) is set |
+| 40 | 4 | `i32` | `vel_n` | `mm/s`; valid when `validity` bit 5 (`velocity`) is set |
+| 44 | 4 | `i32` | `vel_e` | `mm/s`; valid when `validity` bit 5 (`velocity`) is set |
+| 48 | 4 | `i32` | `vel_d` | `mm/s`; valid when `validity` bit 5 (`velocity`) is set |
+| 52 | 4 | `i32` | `head_mot` | `deg`; scale 1e-05; valid when `validity` bit 6 (`head_mot`) is set |
+| 56 | 4 | `u32` | `h_acc` | `mm`; valid when `validity` bit 7 (`h_acc`) is set; 1 sigma |
+| 60 | 4 | `u32` | `v_acc` | `mm`; valid when `validity` bit 8 (`v_acc`) is set; 1 sigma |
+| 64 | 4 | `u32` | `s_acc` | `mm/s`; valid when `validity` bit 9 (`s_acc`) is set; 1 sigma |
+| 68 | 2 | `u16` | `p_dop` | scale 0.01; valid when `validity` bit 10 (`p_dop`) is set |
+| 70 | 1 | `u8` | `fix_type` | enum `fix_type` |
+| 71 | 1 | `u8` | `num_sv` | valid when `validity` bit 11 (`num_sv`) is set |
+| 72 | 1 | `u8` | `fix_flags` | bitmask `fix_flags` |
+| 73 | 1 | `u8` | `ext_count` | Extension records following the base record |
+<!-- END GENERATED: gps_fix -->
+
+### 5.1 Validity
+
+<!-- BEGIN GENERATED: bitmask:gps_validity -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `t_utc` | t_utc carries a GNSS time solution |
+| 1 | `t_utc_resolved` | Leap seconds fully resolved |
+| 2 | `position` | lat and lon are valid |
+| 3 | `alt_msl` | — |
+| 4 | `alt_ellipsoid` | — |
+| 5 | `velocity` | vel_n, vel_e and vel_d are all valid |
+| 6 | `head_mot` | — |
+| 7 | `h_acc` | — |
+| 8 | `v_acc` | — |
+| 9 | `s_acc` | — |
+| 10 | `p_dop` | — |
+| 11 | `num_sv` | — |
+| 12+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:gps_validity -->
+
+For every field governed by a validity bit:
+
+- If the bit is **set**, the field carries a measurement.
+- If the bit is **clear**, the device MUST write the field as zero, and the
+  receiver MUST report the field as absent.
+
+A receiver MUST NOT treat a zeroed field with a clear validity bit as a
+measurement of zero. No field value anywhere in VTP/1 signals absence.
+
+### 5.2 Fix type
+
+<!-- BEGIN GENERATED: enum:fix_type -->
+| Value | Name | Meaning |
+| --- | --- | --- |
+| 0 | `none` | No position solution |
+| 1 | `dead_reckon` | Dead-reckoning solution only |
+| 2 | `fix_2d` | 2D position solution |
+| 3 | `fix_3d` | 3D position solution |
+| 4 | `gnss_dr` | Combined GNSS and dead-reckoning |
+| 5 | `time_only` | Time solution only, no position |
+| *other* | *unknown* | MUST decode as unknown, never as a default |
+<!-- END GENERATED: enum:fix_type -->
+
+### 5.3 Fix flags
+
+<!-- BEGIN GENERATED: bitmask:fix_flags -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `differential` | Differential corrections applied |
+| 1 | `rtk_float` | — |
+| 2 | `rtk_fixed` | — |
+| 3 | `clock_disciplined` | t_device was GNSS-disciplined at this sample |
+| 4+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:fix_flags -->
+
+### 5.4 Derived quantities
+
+Ground speed is `hypot(vel_n, vel_e)` and is exact. A device MUST NOT report a
+separately computed scalar ground speed; the velocity vector is the only
+representation.
+
+`head_mot` is the receiver's filtered heading of motion and MAY differ from
+`atan2(vel_e, vel_n)`. A client SHOULD prefer `head_mot` when its validity bit
+is set.
+
+### 5.5 Extension records
+
+`ext_count` extension records MAY follow the base record. Each is:
+
+| Off | Size | Type | Field |
+| --- | --- | --- | --- |
+| 0 | 1 | `u8` | Extension type |
+| 1 | 1 | `u8` | Payload length in bytes |
+| 2 | *len* | — | Payload |
+
+A receiver MUST skip an extension whose type it does not recognise, advancing by
+its length. For a recognised type whose length exceeds what the receiver
+understands, the receiver MUST parse the prefix it understands and skip the
+remainder. A receiver MUST NOT reject an extension because its length differs
+from the expected value.
+
+The notification length MUST equal the base record plus exactly the bytes
+accounted for by `ext_count` extension records. Any other length MUST be
+rejected.
+
+---
+
+## 6. CAN characteristic — NOTIFY
+
+A notification is one batch header followed by `count` frame records.
+
+<!-- BEGIN GENERATED: can_header -->
+*Batch header. Followed by `count` can_record entries.*
+
+Total: **16 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `seq` | — |
+| 2 | 2 | `u16` | `dropped` | Frames the device discarded since the previous notification |
+| 4 | 8 | `u64` | `t_base` | `us`; Bus-arrival time of record 0 |
+| 12 | 1 | `u8` | `count` | — |
+| 13 | 1 | `u8` | `flags` | bit0 device is shedding load |
+| 14 | 2 | `u16` | `reserved` | **reserved — MUST be zero** |
+<!-- END GENERATED: can_header -->
+
+<!-- BEGIN GENERATED: can_record -->
+*One CAN frame with a device-measured bus-arrival time.*
+
+Total: **7 bytes + `payload`**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `dt` | `10us`; Ticks since t_base; window is 0..655.35 ms |
+| 2 | 4 | `u32` | `id` | bits 0-28 arbitration id; b29 extended; b30 CAN FD; b31 RTR |
+| 6 | 1 | `u8` | `len` | Payload length, 0..64 |
+<!-- END GENERATED: can_record -->
+
+### 6.1 Timestamps
+
+`dt` counts 10 µs ticks from `t_base`, so a frame's bus-arrival time is
+`t_base + dt × 10` microseconds on the device clock (§8).
+
+`dt` spans 0 … 655 350 µs. A device MUST emit a batch before `dt` would exceed
+that range, which bounds worst-case batch latency at 655.35 ms. A device SHOULD
+flush far more frequently — once per connection interval is RECOMMENDED.
+
+`t_base` MUST be the bus-arrival time of record 0, measured by the device, not
+the time the notification was queued or sent.
+
+### 6.2 Batches
+
+`count` MAY be zero. An empty batch means the bus is quiet; it is not an error
+and a receiver MUST accept it.
+
+A receiver MUST reject a notification whose length does not exactly match the
+header plus `count` complete records.
+
+### 6.3 Loss
+
+`dropped` counts frames the device discarded since the previous notification,
+for any reason. A device MUST report discards here rather than silently omitting
+frames. A client SHOULD surface a non-zero `dropped` to the user.
+
+`flags` bit 0 indicates the device is actively shedding load.
+
+---
+
+## 7. IMU characteristic — NOTIFY
+
+<!-- BEGIN GENERATED: imu_header -->
+*Batch header. Followed by `count` evenly spaced imu_sample entries.*
+
+Total: **16 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `seq` | — |
+| 2 | 2 | `u16` | `dropped` | Samples discarded since the previous notification |
+| 4 | 8 | `u64` | `t_base` | `us`; Timestamp of sample 0 |
+| 12 | 2 | `u16` | `period` | `us`; Interval between samples; exact for any ODR |
+| 14 | 1 | `u8` | `count` | — |
+| 15 | 1 | `u8` | `flags` | bit0 accel present, bit1 gyro present, bit2 mag present |
+<!-- END GENERATED: imu_header -->
+
+<!-- BEGIN GENERATED: imu_sample -->
+*Sensor-frame acceleration and rotation. Vehicle alignment is the client's job.*
+
+Total: **12 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `i16` | `ax` | `mg`; milli-g |
+| 2 | 2 | `i16` | `ay` | `mg` |
+| 4 | 2 | `i16` | `az` | `mg` |
+| 6 | 2 | `i16` | `gx` | `deg/s`; scale 0.05 |
+| 8 | 2 | `i16` | `gy` | `deg/s`; scale 0.05 |
+| 10 | 2 | `i16` | `gz` | `deg/s`; scale 0.05 |
+<!-- END GENERATED: imu_sample -->
+
+Samples are evenly spaced: sample *i* is at `t_base + i × period` microseconds.
+
+`period` is expressed in microseconds rather than as a rate because real sensor
+output data rates are not integer hertz. A device MUST report its actual sample
+interval.
+
+`flags` declares which sensor groups are populated. If a group's flag is clear,
+its fields MUST be zero and the receiver MUST report them absent — not as a
+measurement of zero.
+
+Samples are in the **sensor frame**. A device MUST NOT attempt to rotate them
+into a vehicle frame; it cannot know its mounting. A device MAY declare a
+sensor-to-case rotation in an extension record.
+
+---
+
+## 8. Device clock
+
+A device MUST maintain one monotonic microsecond clock and MUST timestamp GPS
+fixes, CAN frames and IMU samples against it. This single shared time base is
+what makes cross-channel alignment possible and is REQUIRED even when only one
+role is implemented.
+
+The clock MUST NOT jump backwards while connected. A device that disciplines its
+clock to GNSS MUST set `clock_flags` bit 0 and MUST apply corrections as a
+frequency adjustment, not as a step.
+
+`t_utc` in a GPS fix and `TIME_SYNC` (§9) are the two ways a client maps this
+clock to wall time.
+
+---
+
+## 9. Control characteristic — WRITE, response by INDICATE
+
+Requests are `[opcode:u8][tag:u8][params…]`. Responses are
+`[opcode:u8][tag:u8][status:u8][detail…]`.
+
+`tag` is chosen by the client and MUST be echoed in the response so that
+requests and responses can be correlated. A device MUST respond to every
+request.
+
+<!-- BEGIN GENERATED: control -->
+| Opcode | Command | Params | Notes |
+| --- | --- | --- | --- |
+| `0x01` | `CAN_RESET` | — | Clear all subscriptions and stop the CAN stream |
+| `0x02` | `CAN_SUBSCRIBE` | `id:u32, mode:u8, arg:u16` | — |
+| `0x03` | `CAN_SUBSCRIBE_MASK` | `id:u32, mask:u32, mode:u8, arg:u16` | — |
+| `0x04` | `CAN_UNSUBSCRIBE` | `id:u32` | — |
+| `0x05` | `CAN_LIST` | — | Response carries the installed subscription table |
+| `0x10` | `GPS_SET_RATE` | `hz:u16` | — |
+| `0x20` | `IMU_SET_RATE` | `hz:u16` | — |
+| `0x30` | `TIME_SYNC` | `host_t_utc_ms:i64` | Response echoes the device t_device at receipt |
+| `0x40` | `LIST_CHANNELS` | — | Monitor role: channels the client can provide |
+<!-- END GENERATED: control -->
+
+`status` values:
+
+<!-- BEGIN GENERATED: enum:status -->
+| Value | Name | Meaning |
+| --- | --- | --- |
+| 0 | `ok` | Request accepted |
+| 1 | `unsupported_opcode` | Opcode not implemented |
+| 2 | `bad_params` | Parameters malformed or out of range |
+| 3 | `table_full` | No free subscription slot |
+| 4 | `rate_exceeded` | Would exceed can_max_frames_per_s |
+| 5 | `busy` | Retry later |
+| 6 | `needs_encryption` | Link is not encrypted |
+| *other* | *unknown* | MUST decode as unknown, never as a default |
+<!-- END GENERATED: enum:status -->
+
+Subscription modes:
+
+<!-- BEGIN GENERATED: enum:sub_mode -->
+| Value | Name | Meaning |
+| --- | --- | --- |
+| 0 | `every_frame` | Forward every frame |
+| 1 | `periodic` | arg = minimum interval, ms |
+| 2 | `on_change` | arg = debounce interval, ms |
+| 3 | `every_nth` | arg = N |
+| *other* | *unknown* | MUST decode as unknown, never as a default |
+<!-- END GENERATED: enum:sub_mode -->
+
+A device MUST reject a subscription that would exceed `can_subscription_slots`
+or `can_max_frames_per_s` with the corresponding status, rather than accepting it
+and silently discarding frames.
+
+`CAN_LIST` returns the installed subscription table so a client can verify
+device state rather than assume it.
+
+---
+
+## 10. Security
+
+The Control characteristic MUST require an encrypted link. A device MUST reject
+writes on an unencrypted link with status `needs_encryption`.
+
+Stream characteristics MAY be readable on an unencrypted link. A device
+SHOULD require encryption for them and MUST do so if it is fitted to a vehicle
+bus carrying anything beyond powertrain telemetry.
+
+LE Secure Connections is REQUIRED. Just Works pairing is acceptable.
+
+---
+
+## 11. Versioning and compatibility
+
+### 11.1 Major versions
+
+A major version has its own service UUID (§3). A client scans for the majors it
+implements; an unimplemented major is a discovery outcome, never a parsing one.
+
+A device MAY expose several major versions simultaneously as separate services.
+
+### 11.2 Minor versions
+
+A client conforming to minor *N* MUST correctly parse minor *N + k* for all *k*.
+Three rules make this structural rather than aspirational:
+
+1. A record's size MUST NOT change within a major version.
+2. New fields MUST be added as extension records, never appended to a base
+   record.
+3. Reserved bits and reserved bytes MAY be assigned in a minor version. They
+   read as zero from older firmware and are ignored by older clients.
+
+### 11.3 Prohibited changes
+
+Within major version 1, an implementation MUST NOT:
+
+- Change the meaning, units or scale of an existing field.
+- Change the size, offset or type of an existing field.
+- Remove or repurpose a field. Deprecation is expressed by ceasing to set the
+  field's validity bit.
+- Change the value or meaning of an existing enum member.
+- Change any UUID.
+
+New enum members MAY be added. A receiver encountering an unknown enum value
+MUST report it as unknown and MUST NOT substitute a default.
+
+### 11.4 No negotiation
+
+The device declares one version; the client adapts. There is no version
+negotiation exchange, and a client MUST NOT expect one.
+
+---
+
+## 12. Conformance vectors
+
+`conformance/vectors/` contains byte vectors with their expected decodes. Every
+implementation MUST pass those for the roles it declares.
+
+Each case carries `hex` and either `expect` or `must_reject`. A case with
+`must_reject` MUST fail to decode; a runner that decodes it has not passed.
+
+The corpus is generated from `schema/vtp1.yaml`. A minor version MAY add cases
+and MUST NOT modify or remove an existing case. A change that alters the expected
+decode of an existing vector is by definition not a minor version.
+
+---
+
+## Appendix A — Reserved space
+
+| Location | Reserved | Purpose |
+| --- | --- | --- |
+| `gps_fix.validity` | bits 12–31 | Validity for fields added in a later minor |
+| `gps_fix.fix_flags` | bits 4–7 | Additional solution-quality flags |
+| `info.capabilities` | bits 8–31 | Roles and features added in a later minor |
+| `can_header.reserved` | 2 bytes | In-band CAN metadata |
+| Extension types | `0x00`–`0xFF` | `0x80`–`0xFF` are reserved for vendor-private use and MUST NOT be assigned by this specification |

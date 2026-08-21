@@ -1,0 +1,134 @@
+{
+  "protocol": "VTP/1",
+  "generated_by": "tools/generate.py",
+  "cases": [
+    {
+      "name": "stationary-1g-down",
+      "desc": "A level, stationary device: 1 g on Z, no rotation.",
+      "record": "imu_batch",
+      "hex": "0100000080841e00000000008813020300000000e8030000000000000200ffffe70301000000ffff",
+      "expect": {
+        "header": {
+          "seq": 1,
+          "dropped": 0,
+          "t_base": 2000000,
+          "period": 5000,
+          "count": 2,
+          "flags": 3
+        },
+        "samples": [
+          {
+            "ax": 0,
+            "ay": 0,
+            "az": 1000,
+            "gx": 0,
+            "gy": 0,
+            "gz": 0,
+            "t_device_us": 2000000
+          },
+          {
+            "ax": 2,
+            "ay": -1,
+            "az": 999,
+            "gx": 1,
+            "gy": 0,
+            "gz": -1,
+            "t_device_us": 2005000
+          }
+        ]
+      },
+      "note": "period 5000 us is 200 Hz. Samples are evenly spaced, so only the batch carries a timestamp."
+    },
+    {
+      "name": "cornering-and-yaw",
+      "desc": "Lateral acceleration with yaw rate. gx/gy/gz scale by 0.05 deg/s, so gz 1200 is 60 deg/s.",
+      "record": "imu_batch",
+      "hex": "0200000000093d0000000000b00402036affd403f203ecff0f00b0044cfffc03ed03e7ff12001e05",
+      "expect": {
+        "header": {
+          "seq": 2,
+          "dropped": 0,
+          "t_base": 4000000,
+          "period": 1200,
+          "count": 2,
+          "flags": 3
+        },
+        "samples": [
+          {
+            "ax": -150,
+            "ay": 980,
+            "az": 1010,
+            "gx": -20,
+            "gy": 15,
+            "gz": 1200,
+            "t_device_us": 4000000
+          },
+          {
+            "ax": -180,
+            "ay": 1020,
+            "az": 1005,
+            "gx": -25,
+            "gy": 18,
+            "gz": 1310,
+            "t_device_us": 4001200
+          }
+        ]
+      },
+      "note": "period 1200 us is 833 Hz \u2014 an ODR that is not an integer number of hertz, which is why period is microseconds and not a rate."
+    },
+    {
+      "name": "negative-full-scale",
+      "desc": "Extremes on every axis; catches signed 16-bit handling.",
+      "record": "imu_batch",
+      "hex": "03000000808d5b0000000000881301030080ff7f0080ff7f0080ff7f",
+      "expect": {
+        "header": {
+          "seq": 3,
+          "dropped": 0,
+          "t_base": 6000000,
+          "period": 5000,
+          "count": 1,
+          "flags": 3
+        },
+        "samples": [
+          {
+            "ax": -32768,
+            "ay": 32767,
+            "az": -32768,
+            "gx": 32767,
+            "gy": -32768,
+            "gz": 32767,
+            "t_device_us": 6000000
+          }
+        ]
+      }
+    },
+    {
+      "name": "accel-only",
+      "desc": "flags bit1 clear: the device has no gyro. Gyro fields are zero and MUST be reported absent, not as zero rotation.",
+      "record": "imu_batch",
+      "hex": "0400000000127a0000000000102701010a001400e803000000000000",
+      "expect": {
+        "header": {
+          "seq": 4,
+          "dropped": 0,
+          "t_base": 8000000,
+          "period": 10000,
+          "count": 1,
+          "flags": 1
+        },
+        "samples": [
+          {
+            "ax": 10,
+            "ay": 20,
+            "az": 1000,
+            "gx": 0,
+            "gy": 0,
+            "gz": 0,
+            "t_device_us": 8000000
+          }
+        ]
+      }
+    }
+  ]
+}

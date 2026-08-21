@@ -1,0 +1,14 @@
+{
+  "family_tail": "5f05-5b56-af87-dcab2baf2522",
+  "service": {
+    "vtp1": "56545001-5f05-5b56-af87-dcab2baf2522"
+  },
+  "characteristics": {
+    "info": "56544301-5f05-5b56-af87-dcab2baf2522",
+    "gps": "56544302-5f05-5b56-af87-dcab2baf2522",
+    "can": "56544303-5f05-5b56-af87-dcab2baf2522",
+    "imu": "56544304-5f05-5b56-af87-dcab2baf2522",
+    "control": "56544305-5f05-5b56-af87-dcab2baf2522",
+    "monitor_values": "56544306-5f05-5b56-af87-dcab2baf2522"
+  }
+}

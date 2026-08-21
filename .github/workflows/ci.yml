@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      # The schema is the source of truth. If any generated artefact has
+      # drifted from it, the spec tables, the vectors and the reference header
+      # can disagree — which is the failure this repository exists to prevent.
+      - name: Generated artefacts are up to date
+        run: python3 tools/generate.py --check
+
+      - name: Build C reference decoder
+        run: make -C reference/c
+
+      - name: Conformance — C reference
+        run: python3 conformance/run.py --impl "reference/c/vtp1_cli"
+
+      - name: Conformance — Python reference
+        run: python3 conformance/run.py --impl "python3 reference/python/vtp1.py"
+
+      # A suite that cannot fail proves nothing. Break the decoder on purpose
+      # and require the corpus to notice.
+      - name: Conformance suite detects a seeded fault
+        run: |
+          cp reference/c/vtp1.c /tmp/vtp1.c.orig
+          sed -i 's|(uint64_t)o->dt \* 10u|(uint64_t)o->dt * 1u|' reference/c/vtp1.c
+          make -C reference/c
+          if python3 conformance/run.py --impl "reference/c/vtp1_cli"; then
+            echo "::error::Seeded CAN timestamp fault was not detected by the corpus"
+            exit 1
+          fi
+          cp /tmp/vtp1.c.orig reference/c/vtp1.c
+          make -C reference/c
+          echo "Seeded decoder fault correctly detected."
+
+      # The encoder's gating rule (SPEC.md 5.1) is covered by exactly one
+      # non-canonical vector. Removing that vector, or the gate, must fail.
+      - name: Conformance suite detects a seeded encoder fault
+        run: |
+          cp reference/c/vtp1_encode.c /tmp/vtp1_encode.c.orig
+          perl -pi -e 's/gate32\(\(uint32_t\)f->alt_msl, v, VTP_GPS_VALIDITY_ALT_MSL\)/(uint32_t)f->alt_msl/' reference/c/vtp1_encode.c
+          make -C reference/c
+          if python3 conformance/run.py --impl "reference/c/vtp1_cli"; then
+            echo "::error::Seeded encoder gating fault was not detected by the corpus"
+            exit 1
+          fi
+          cp /tmp/vtp1_encode.c.orig reference/c/vtp1_encode.c
+          make -C reference/c
+          echo "Seeded encoder fault correctly detected."
