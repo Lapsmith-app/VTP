@@ -34,6 +34,8 @@ sys.path.insert(0, str(HERE))
 
 import vtp1  # noqa: E402
 import vtp_device as dev  # noqa: E402
+import display as disp  # noqa: E402  (pure formatting; no GUI import at module level)
+import serve  # noqa: E402  (bless is loaded lazily, so this needs no radio)
 
 FAILURES = []
 
@@ -324,6 +326,23 @@ def main():
     check(reconnected and reconnected[0]["seq"] == 1,
           "seq MUST restart at 0 on a new connection")
 
+    # ---- A stall must lose samples, not replay them (§8.3) --------------
+    stalled = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=0,
+                            imu_hz=100)
+    clock[0] += 60_000_000          # a minute with nobody polling
+    burst = stalled.poll()
+    check(len(burst) <= 2,
+          f"a minute of backlog produced {len(burst)} notifications in one "
+          f"poll; a device MUST discard what it cannot deliver, not replay it")
+    decoded = [decode(c, p) for c, p in burst if c == "imu"]
+    check(decoded and decoded[0]["header"]["dropped"] > 0,
+          "samples discarded during a stall MUST be reported in dropped, not "
+          "dropped silently")
+    ts = [s["t_device_us"] for b in decoded for s in b["samples"]]
+    check(all(t > 59_000_000 for t in ts),
+          f"the samples delivered after a stall MUST be recent ones, not the "
+          f"start of the backlog: {ts[:3]}")
+
     # ---- Monitor: the client supplies, the device displays (§13) --------
     mon = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=0, imu_hz=0)
     info2 = vtp1.decode_info(mon.info())
@@ -334,13 +353,15 @@ def main():
                                  + struct.pack("<H", 0))
     check(listing[2] == dev.ST_OK, "MONITOR_LIST was refused")
     table = vtp1.decode_monitor_list(listing[3:])
-    check(table["page"]["total"] == 4,
-          f"expected 4 requested channels, got {table['page']['total']}")
+    check(table["page"]["total"] == 6,
+          f"expected 6 requested channels, got {table['page']['total']}")
     check(all(e["channel_known"] for e in table["entries"]),
           "the device asked for a channel the reference decoder cannot name")
 
-    # Before anything is supplied, every slot renders unavailable.
-    check(all(line.endswith("--") for line in mon.display_lines()),
+    # Before anything is supplied, every slot is absent and renders as such.
+    check(all(not present for _, _, _, present in mon.monitor_state()),
+          "nothing has been supplied, so no slot may be present")
+    check(all(disp.ABSENT in line for line in mon.display_lines()),
           f"a device MUST NOT display a value nobody supplied: "
           f"{mon.display_lines()}")
 
@@ -353,18 +374,26 @@ def main():
          {"slot": 2, "validity": 0, "value": 0}])
     check(mon.handle_monitor_write(update) is None,
           "a well-formed monitor update was rejected")
+    state = {slot: (value, present) for slot, _, value, present
+             in mon.monitor_state()}
+    check(state[0] == (42_318, True), f"elapsed lap time not stored: {state}")
+    check(state[1] == (0, False) and state[2] == (0, False),
+          f"a slot whose present bit is clear MUST be absent and zero: {state}")
+    check(all(state[s] == (0, False) for s in (3, 4, 5)),
+          "a slot the client has not written about at all MUST stay absent, "
+          "never default to a value")
     lines = mon.display_lines()
-    check(lines[0] == "LAP: 42318", f"elapsed lap time not displayed: {lines}")
-    check(lines[1].endswith("--") and lines[2].endswith("--"),
-          f"a slot whose present bit is clear MUST render unavailable, not 0: "
-          f"{lines}")
+    check(lines[0] == "LAP: 42.318",
+          f"lap time should render as a clock, got {lines[0]!r}")
+    check(disp.ABSENT in lines[1] and disp.ABSENT in lines[2],
+          f"an absent slot MUST render as absence, not as 0: {lines}")
 
     # A cleared present bit with a stale value in the bytes: the bit governs.
     stale = menc.encode_monitor_update(
         {"seq": 2, "count": 1, "reserved": 0},
         [{"slot": 1, "validity": 0, "value": 87_340}])
     mon.handle_monitor_write(stale)
-    check(mon.display_lines()[1].endswith("--"),
+    check(disp.ABSENT in mon.display_lines()[1],
           "a stale value behind a cleared present bit MUST NOT be displayed")
 
     # A slot the device never asked for is ignored, not an error.
@@ -379,9 +408,110 @@ def main():
 
     # A reconnection starts blank rather than showing the last session.
     mon.on_connect()
-    check(all(line.endswith("--") for line in mon.display_lines()),
+    check(all(disp.ABSENT in line for line in mon.display_lines()),
           "a reconnection MUST clear the display, not inherit the previous "
           "connection's values")
+    check(mon.monitor_updates == 0,
+          "the update counter MUST reset with the connection")
+
+    # ---- Rendering, which is the only way the present bit is visible -------
+    check(disp.format_value(disp.LAP_TIME, 87_340, True) == "1:27.340",
+          "a lap time over a minute should render as minutes and seconds")
+    check(disp.format_value(disp.LAP_TIME, 42_318, True) == "42.318",
+          "a lap time under a minute should not show a leading 0:")
+    check(disp.format_value(disp.DELTA_BEST, 1_250, True) == "+1.250",
+          "a positive delta MUST show its sign, or it reads as a fast lap")
+    check(disp.format_value(disp.DELTA_BEST, -1_250, True) == "-1.250",
+          "a negative delta should render negative")
+    check(disp.format_value(disp.SPEED, 38_000, True) == "136.8",
+          "speed is mm/s on the wire and km/h on a dash")
+    for channel in (disp.LAP_TIME, disp.DELTA_BEST, disp.SPEED,
+                    disp.LAP_NUMBER, disp.SESSION_DISTANCE):
+        rendered = disp.format_value(channel, 12_345, False)
+        check(rendered == disp.ABSENT,
+              f"channel {channel} rendered {rendered!r} for an absent value; "
+              f"a cleared present bit MUST win over whatever is in the field")
+
+    # The formatter mirrors SPEC.md §13.2's enum; drift between them would show
+    # the wrong label against the right number.
+    check((disp.LAP_TIME, disp.DELTA_BEST, disp.SESSION_TIME)
+          == (dev.CH_LAP_TIME, dev.CH_DELTA_BEST, dev.CH_SESSION_TIME),
+          "display.py's channel constants have drifted from the device's")
+
+    # ---- A refused notification is loss, and must be reported (§8.3) ----
+    # The host stack refuses when its transmit queue is full and returns false.
+    # Ignoring that return loses data silently and misreports it, because the
+    # device's own counter never learns the notification was never sent.
+    refused = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=10,
+                            imu_hz=100)
+    refused.handle_control(bytes([dev.CAN_SUBSCRIBE, 1])
+                           + struct.pack("<IBH", 0x0C0, dev.SUB_EVERY_FRAME, 0))
+    produced = run(refused, clock, 1.0)
+    by_stream = {}
+    for characteristic, payload in produced:
+        by_stream.setdefault(characteristic, []).append(payload)
+
+    for characteristic, payloads in by_stream.items():
+        lost = refused.record_refused(characteristic, payloads[0])
+        check(lost > 0,
+              f"{characteristic}: a refused notification must count at least "
+              f"one lost item, got {lost}")
+        if characteristic in ("can", "imu"):
+            decoded = decode(characteristic, payloads[0])
+            expected = decoded["header"]["count"] if decoded else None
+            check(lost == expected,
+                  f"{characteristic}: a refused batch must count its "
+                  f"{expected} records, not {lost} — dropped is defined in "
+                  f"source items, not notifications")
+
+    after = [decode(c, p) for c, p in run(refused, clock, 0.5)]
+    reported = [d for d in after if d and (
+        d.get("dropped") or d.get("header", {}).get("dropped"))]
+    check(reported,
+          "items lost to a refused notification MUST appear in dropped on a "
+          "later notification, or the loss is invisible to the client")
+
+    # ---- A dropped link clears the table (§9.2) -------------------------
+    dropped_link = dev.VtpDevice(now_us=lambda: clock[0], mtu=247,
+                                 gps_hz=0, imu_hz=0)
+    dropped_link.handle_control(bytes([dev.CAN_SUBSCRIBE, 1])
+                                + struct.pack("<IBH", 0x0C0,
+                                              dev.SUB_EVERY_FRAME, 0))
+    check(len(dropped_link.can_table()) == 1, "the subscription did not install")
+    dropped_link.on_disconnect()
+    check(dropped_link.can_table() == [],
+          "SPEC.md §9.2 clears the table when the LINK DROPS, not when the "
+          "next connection starts; a disconnected device holding a stale table "
+          "reports ids nobody subscribed to")
+
+    # ---- Connection edges drive the per-connection reset ----------------
+    # The transport must tell the device when a link starts, or §8.2's sequence
+    # restart and §9.2's table clear never happen. They did not, for a while,
+    # because nothing called on_connect() outside this file.
+    # Importable without bless installed, which is the point: CI has no
+    # Bluetooth library and must still be able to check these.
+    check(serve.BlessServer is None,
+          "importing serve must not pull in bless; it is loaded when the "
+          "server starts, so a machine with no Bluetooth can still run this")
+    tracker = serve.ConnectionTracker()
+    check(tracker.update(False) is None, "no edge from disconnected to disconnected")
+    check(tracker.update(True) == "connected", "a first connection is a rising edge")
+    check(tracker.update(True) is None, "a steady connection is not an edge")
+    check(tracker.update(False) == "disconnected", "a drop is a falling edge")
+    check(tracker.update(True) == "connected", "a reconnection is a rising edge")
+
+    # ---- The advertisement has to carry the service UUID ----------------
+    # A client that matches on the service UUID never sees a device whose
+    # advertisement overflowed and dropped it, and nothing in the peripheral's
+    # log says so. This is a pure size calculation, so it is checkable here.
+    check(serve.check_advertisement_fits("VTP") is None,
+          "the default advertised name must fit beside the service UUID")
+    check(serve.check_advertisement_fits("VTP Logger") is not None,
+          "a 10-character name does NOT fit beside a 128-bit service UUID in "
+          "31 bytes, and must be reported rather than silently overflowing")
+    check(serve.MAX_NAME_CHARS == 8,
+          f"31 - 3 flags - 18 UUID - 2 header leaves 8 characters, not "
+          f"{serve.MAX_NAME_CHARS}")
 
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)

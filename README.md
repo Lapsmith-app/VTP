@@ -63,6 +63,10 @@ python3 conformance/run.py --impl "python3 reference/python/vtp1.py"
 
 # Regenerate every derived artefact from the schema
 python3 tools/generate.py
+
+# Run a synthetic VTP/1 device you can point a real client at
+python3 reference/peripheral/selftest.py      # verify it; needs no Bluetooth
+# then see reference/peripheral/README.md to run it over a real adapter
 ```
 
 ## Layout

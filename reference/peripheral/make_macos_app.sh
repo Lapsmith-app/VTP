@@ -33,6 +33,26 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="$HERE/VTPPeripheral.app"
 PYVER="${PYVER:-3.13}"
 
+# Rebuilding is almost never necessary and is not free: the bundle contains
+# only the interpreter and its libraries -- serve.py, vtp_device.py and
+# display.py are read from the repository at run time, so editing them needs no
+# rebuild. Re-signing changes the bundle's code signature, macOS treats it as a
+# different app, and the Bluetooth permission has to be granted again. If the
+# peripheral hangs after a rebuild with nothing but "logging to" in the log,
+# that is a permission prompt waiting for a click.
+if [ -d "$APP" ] && [ -z "${FORCE:-}" ]; then
+    cat >&2 <<EXISTS
+$APP already exists.
+
+Editing serve.py, vtp_device.py or display.py does NOT need a rebuild -- they
+are read from the repository at run time. Rebuilding re-signs the bundle, which
+makes macOS ask for Bluetooth permission again.
+
+Rebuild anyway with:  FORCE=1 $0
+EXISTS
+    exit 0
+fi
+
 command -v uv >/dev/null || {
     echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/" >&2
     exit 1

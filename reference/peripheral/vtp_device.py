@@ -76,36 +76,77 @@ METRES_PER_DEG_LAT = 111_320.0
 # ---------------------------------------------------------------------------
 
 class Circuit:
-    """A constant-speed circular lap, in metres and seconds."""
+    """A lap with a speed that actually changes.
 
-    def __init__(self, lat_deg=51.5074, lon_deg=-1.3970,
-                 radius_m=180.0, speed_mps=38.0):
+    A constant-speed circle was the first version of this and it was useless
+    for testing anything but position: every CAN value it produced — engine
+    speed, road speed, throttle, lateral g — was a constant, so a client that
+    decoded a channel correctly and a client that decoded a fixed byte offset
+    wrongly looked identical on screen.
+
+    Speed is therefore a function of time, `v(t) = v_mid + v_amp·sin(2πt/T)`,
+    and distance is its exact integral. Deriving position from the integral
+    rather than assuming a constant angular rate keeps the channels honest: the
+    speed on the CAN bus is the derivative of the GPS track, and the
+    longitudinal acceleration on the IMU is the derivative of that. A client
+    that cross-checks them finds them consistent, which is the property this
+    protocol exists for and therefore the one a test device must not fake.
+    """
+
+    def __init__(self, lat_deg=51.5074, lon_deg=-1.3970, radius_m=180.0,
+                 speed_mid_mps=30.0, speed_amp_mps=12.0, period_s=20.0):
         self.lat0, self.lon0 = lat_deg, lon_deg
-        self.radius, self.speed = radius_m, speed_mps
+        self.radius = radius_m
+        self.v_mid, self.v_amp, self.period = speed_mid_mps, speed_amp_mps, period_s
         self._m_per_deg_lon = METRES_PER_DEG_LAT * math.cos(math.radians(lat_deg))
 
+    # Four gears, by the road speed at which each is at its limit. RPM
+    # therefore sawtooths on every shift, which is far easier to recognise on a
+    # dashboard than a smooth curve — a wrongly decoded channel does not
+    # sawtooth.
+    GEAR_TOPS = (15.0, 25.0, 35.0, 50.0)
+    IDLE_RPM, REDLINE_RPM = 1200, 7000
+
     def at(self, t_s):
-        """Position, velocity and body-frame motion at `t_s` seconds."""
-        omega = self.speed / self.radius          # rad/s around the circle
-        theta = omega * t_s
+        w = 2.0 * math.pi / self.period
+        speed = self.v_mid + self.v_amp * math.sin(w * t_s)
+        # Exact derivative of `speed`, so the IMU agrees with the CAN bus.
+        accel = self.v_amp * w * math.cos(w * t_s)
+        # Exact integral of `speed`, so the GPS track agrees with both.
+        distance = (self.v_mid * t_s
+                    + (self.v_amp / w) * (1.0 - math.cos(w * t_s)))
+
+        theta = distance / self.radius
         north = self.radius * math.cos(theta)
         east = self.radius * math.sin(theta)
-
-        # Heading of motion is the tangent, 90 degrees ahead of the radius.
         heading = (math.degrees(theta) + 90.0) % 360.0
         hrad = math.radians(heading)
 
+        gear = next((i + 1 for i, top in enumerate(self.GEAR_TOPS)
+                     if speed <= top), len(self.GEAR_TOPS))
+        top = self.GEAR_TOPS[gear - 1]
+        floor_ = 0.0 if gear == 1 else self.GEAR_TOPS[gear - 2]
+        through = (speed - floor_) / (top - floor_) if top > floor_ else 0.0
+        rpm = self.IDLE_RPM + through * (self.REDLINE_RPM - self.IDLE_RPM)
+
+        a_max = self.v_amp * w
         return {
             "lat": self.lat0 + north / METRES_PER_DEG_LAT,
             "lon": self.lon0 + east / self._m_per_deg_lon,
-            "vel_n": self.speed * math.cos(hrad),
-            "vel_e": self.speed * math.sin(hrad),
+            "vel_n": speed * math.cos(hrad),
+            "vel_e": speed * math.sin(hrad),
             "heading": heading,
-            # Centripetal acceleration is constant on a circle and points at
-            # the centre, i.e. along the body Y axis.
-            "lat_g": (self.speed ** 2 / self.radius) / 9.80665,
-            "yaw_rate": math.degrees(omega),
-            "speed": self.speed,
+            "speed": speed,
+            "accel": accel,
+            "distance": distance,
+            "gear": gear,
+            "rpm": rpm,
+            # Centripetal acceleration, which now varies with v squared.
+            "lat_g": (speed ** 2 / self.radius) / 9.80665,
+            "long_g": accel / 9.80665,
+            "yaw_rate": math.degrees(speed / self.radius),
+            "throttle": max(0.0, min(100.0, accel / a_max * 100.0)),
+            "brake": max(0.0, min(100.0, -accel / a_max * 100.0)),
         }
 
 
@@ -121,7 +162,7 @@ class VtpDevice:
     """
 
     def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
-                 circuit=None):
+                 circuit=None, monitor_channels=None):
         self._clock = now_us or self._monotonic_us
         self._origin_ns = time.monotonic_ns()
         self._wall_origin_ms = int(time.time() * 1000)
@@ -158,14 +199,15 @@ class VtpDevice:
 
         # SPEC.md §13 — this device has a display, so it asks the client for
         # what it cannot compute. The declaration is fixed for the connection.
-        self._monitor_channels = [
-            (0, CH_LAP_TIME), (1, CH_LAST_LAP_TIME),
-            (2, CH_DELTA_BEST), (3, CH_LAP_NUMBER),
-        ]
+        self._monitor_channels = list(enumerate(
+            monitor_channels if monitor_channels is not None else
+            (CH_LAP_TIME, CH_LAST_LAP_TIME, CH_BEST_LAP_TIME,
+             CH_DELTA_BEST, CH_LAP_NUMBER, CH_SPEED)))
         # slot -> (value, present). Absent is a state the display renders, not
         # a value it substitutes.
         self._monitor_values = {}
         self._monitor_seq = None
+        self._monitor_updates = 0
         self._link = None
 
     # -- clock ------------------------------------------------------------
@@ -188,6 +230,44 @@ class VtpDevice:
         self._deferred = []
         # A new connection starts with nothing supplied, so the display shows
         # every slot as unavailable rather than the last connection's numbers.
+        self._monitor_values.clear()
+        self._monitor_seq = None
+        self._monitor_updates = 0
+
+    def record_refused(self, stream, payload):
+        """A notification the transport would not accept.
+
+        The host stack refuses when its transmit queue is full, and the
+        notification is then simply never sent. SPEC.md §8.3 is explicit about
+        what a device does with data it cannot deliver: discard it and report
+        the count, so `dropped` covers loss inside the device *and* loss the
+        link refused. Counting the source items rather than the notification
+        keeps `dropped` in the units the field is defined in.
+
+        Not retried. Without a ready-to-send callback from the host stack a
+        retry is a spin, and a batch redelivered out of order is worse than one
+        counted honestly — every record carries the time it was taken, so a
+        late batch misrepresents nothing except by being late.
+        """
+        if stream == "gps":
+            items = 1
+        else:
+            record = {"can": "can_header", "imu": "imu_header"}[stream]
+            fields = enc.SCHEMA["records"][record]["fields"]
+            offset = next(f["offset"] for f in fields if f["name"] == "count")
+            items = payload[offset] if len(payload) > offset else 0
+        self._dropped[stream] += items
+        return items
+
+    def on_disconnect(self):
+        """SPEC.md §9.2 — the table is cleared when the link drops.
+
+        Not when the next connection starts. The difference is only visible
+        from the device's own side, but it is the difference between a
+        disconnected device holding a stale table and one holding none.
+        """
+        self._subscriptions.clear()
+        self._can_pending, self._can_batch_t0 = [], None
         self._monitor_values.clear()
         self._monitor_seq = None
 
@@ -284,7 +364,9 @@ class VtpDevice:
     def _imu_sample(self, now):
         st = self.circuit.at(now / 1e6)
         return {
-            "ax": 0,
+            # Longitudinal acceleration is now real, and is the exact
+            # derivative of the speed on the CAN bus.
+            "ax": round(st["long_g"] * 1000),
             "ay": round(st["lat_g"] * 1000),
             "az": 1000,                       # 1 g down, level car
             "gx": 0, "gy": 0,
@@ -311,12 +393,24 @@ class VtpDevice:
     # The synthetic bus. Each signal has an id, a natural bus rate and an
     # encoder over the motion state.
     def _bus_frames(self, now):
+        """The synthetic bus. Little-endian throughout, matching the protocol.
+
+        Layouts are documented in README.md so a client can be configured
+        against them without reading this.
+        """
         st = self.circuit.at(now / 1e6)
-        rpm = int(1500 + st["speed"] * 120)
-        kph = int(st["speed"] * 3.6)
-        yield 0x0C0, 50, struct.pack("<HH4x", rpm, kph)
-        yield 0x1A0, 20, struct.pack("<BB6x", 62, 0)          # throttle, brake
-        yield 0x2E0, 10, struct.pack("<h6x", round(st["lat_g"] * 100))
+        # 0x0C0 @ 50 Hz — engine
+        yield 0x0C0, 50, struct.pack("<HHBB2x", round(st["rpm"]),
+                                     round(st["speed"] * 3.6),
+                                     st["gear"], 90)
+        # 0x1A0 @ 20 Hz — driver inputs
+        yield 0x1A0, 20, struct.pack("<BBh4x", round(st["throttle"]),
+                                     round(st["brake"]),
+                                     round(st["heading"] * 10))
+        # 0x2E0 @ 10 Hz — chassis
+        yield 0x2E0, 10, struct.pack("<hhh2x", round(st["lat_g"] * 100),
+                                     round(st["long_g"] * 100),
+                                     round(st["yaw_rate"] * 10))
 
     def _can_capacity(self):
         header = 16
@@ -347,6 +441,19 @@ class VtpDevice:
             self._next_gps_us = now + round(1_000_000 / self.gps_hz)
 
         if self.imu_hz:
+            # A device that has not been polled for a while must not replay the
+            # gap. Delivering a backlog means stale samples arriving as fast as
+            # the radio will take them, which is worse than losing them: the
+            # timestamps say when they were taken, so a client cannot tell the
+            # stream is behind. SPEC.md §8.3 says discard and report it.
+            period = self._imu_period_us
+            capacity = self._imu_capacity()
+            if now > self._next_imu_us:
+                behind = (now - self._next_imu_us) // period
+                if behind > capacity:
+                    skipped = behind - capacity
+                    self._dropped["imu"] += skipped
+                    self._next_imu_us += skipped * period
             while now >= self._next_imu_us:
                 t = self._next_imu_us
                 if self._imu_batch_t0 is None:
@@ -594,19 +701,48 @@ class VtpDevice:
 
         self._monitor_values.update(staged)
         self._monitor_seq = seq
+        self._monitor_updates += 1
         return None
 
+    def can_table(self):
+        """The installed CAN subscriptions, as CAN_LIST would report them.
+
+        Exposed for the debug panel: the difference between "three ids
+        installed" and "three ids installed and the client is listening" is
+        most of the diagnostic work in this protocol, and neither number means
+        much without the other.
+        """
+        return [(handle, s["id"], s["mask"], s["mode"], s["arg"])
+                for handle, s in sorted(self._subscriptions.items())]
+
+    def pending_dropped(self):
+        """Discards accumulated but not yet reported on a notification."""
+        return dict(self._dropped)
+
+    def rates(self):
+        """The rates this device is configured to produce, for display."""
+        return {"gps": self.gps_hz, "imu": self.imu_hz}
+
+    def monitor_state(self):
+        """(slot, channel, value, present) for every channel this device asked
+        for. Structured rather than formatted: rendering is display.py's job,
+        and it must be testable without a screen."""
+        return [(slot, channel, *self._monitor_values.get(slot, (0, False)))
+                for slot, channel in self._monitor_channels]
+
+    @property
+    def monitor_seq(self):
+        return self._monitor_seq
+
+    @property
+    def monitor_updates(self):
+        return self._monitor_updates
+
     def display_lines(self):
-        """What the device's screen would show. Absent renders as '--', never
+        """A plain-text rendering, for logs. Absence renders as absence, never
         as a number nobody supplied."""
-        names = {CH_LAP_TIME: "LAP", CH_LAST_LAP_TIME: "LAST",
-                 CH_DELTA_BEST: "DELTA", CH_LAP_NUMBER: "NO."}
-        out = []
-        for slot, channel in self._monitor_channels:
-            value, present = self._monitor_values.get(slot, (0, False))
-            label = names.get(channel, f"CH{channel}")
-            out.append(f"{label}: {value if present else '--'}")
-        return out
+        from display import render_lines
+        return render_lines(self.monitor_state())
 
     def _link_params(self):
         link = self._link or {}

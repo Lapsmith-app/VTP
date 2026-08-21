@@ -8,6 +8,139 @@ conformance vector.
 
 ## [Unreleased]
 
+### Changed
+- **The peripheral's synthetic vehicle now varies.** It ran at constant speed on
+  a circle, which made every CAN value a constant: engine speed, road speed,
+  throttle and lateral g never moved. A client decoding a channel correctly and
+  one reading a fixed byte offset wrongly produced identical screens, so the
+  bus tested nothing.
+
+  Speed is now `v(t) = 30 + 12·sin(2πt/20)` m/s, position is its exact integral
+  and longitudinal acceleration its exact derivative — so the road speed on the
+  CAN bus is the derivative of the GPS track and the IMU's X axis is the
+  derivative of that. Cross-channel agreement is the property VTP/1 exists to
+  provide, so a test device that faked it would be testing the wrong thing.
+
+  The bus carries three identifiers with documented layouts
+  (`reference/peripheral/README.md`): `0x0C0` engine at 50 Hz, `0x1A0` driver
+  inputs at 20 Hz, `0x2E0` chassis at 10 Hz. RPM sawtooths across four gears,
+  which a wrongly decoded channel does not.
+
+### Fixed
+- **A refused control response was dropped, which timed a client out.** The
+  device took a `CAN_SUBSCRIBE`, applied it, answered `ok` — and the indication
+  carrying that answer was refused by the transport and discarded. The client
+  waited on its tag, gave up and dropped the link, and the two ends disagreed
+  about the subscription table in the meantime.
+
+  A notification and a control response are not the same kind of thing. §8.3
+  discards what cannot be delivered and reports it; §9 says a device MUST
+  respond to every request, and there is no discard option. Responses are now
+  queued, retried until they land, and sent before notifications each
+  iteration. They are the one thing on this link that is owed rather than
+  offered.
+- **Notification sending is paced to the transport and fairly ordered.** Two
+  faults compounded: the send order was fixed, so whichever stream went last
+  absorbed every refusal — with GPS, IMU and CAN all subscribed, CAN was
+  refused almost in full while the other two flowed, purely by position — and
+  the device fired regardless of whether the stack could take it. The order now
+  rotates, and CoreBluetooth's ready-to-send callback is hooked (bless only
+  logged it) so at most one notification per stream is held rather than
+  produced into a queue known to be full. Measured in use: 195 callbacks, zero
+  safety timeouts.
+- **The debug panel was throttling the transport it exists to measure.**
+  `root.update()` blocks the loop for 15–30 ms per call, costing 20–35% of
+  notification throughput — every earlier throughput figure in this branch was
+  an artefact of the window rather than a property of the link. Repainting is
+  not the cost (0.6 ms); the writes are now cached anyway, and the panel
+  reports its own overhead so the trade is visible. `--no-display` is
+  documented as the mode for throughput-sensitive testing.
+- **The peripheral ignored the return value of its notify call.** The host
+  stack returns false when it will not carry a notification, and the
+  notification is then never sent. Ignoring that lost data silently *and*
+  misreported it, because the device's own `dropped` counter never learned. It
+  is checked now, and refused items are counted into `dropped` in source items
+  — eighteen samples for an IMU batch, not "one notification", because
+  `dropped` is defined in items.
+
+  A refusal because **nobody has subscribed** to that characteristic is not
+  loss and is counted separately: those notifications were never due, and
+  reporting them as discarded claimed data was missing that no client had asked
+  for.
+- **`VtpDevice.on_connect()` was never called by the transport.** Only the
+  selftest called it, so the live device had never performed its per-connection
+  reset: sequence numbers never restarted (§8.2) and the CAN subscription table
+  was never cleared (§9.2). A conformance violation in the reference device,
+  which is the worst place for one. A connection edge now drives it, and both
+  transitions are logged.
+- The display reported "client connected" forever. It latched true on the first
+  read or write and nothing ever cleared it, because there was no disconnect
+  detection at all.
+
+### Added
+- **The peripheral's window is now a scrollable debug panel.** Notify subscriptions per
+  characteristic, per-stream sent/refused/no-subscriber counts and rates, the
+  installed CAN subscription table with modes and arguments, and a rolling log
+  of control requests with their status — alongside the Monitor values.
+
+  Every value is a widget rather than preformatted text, so each carries its
+  own colour: dim is idle, bright is active, amber wants attention, red is
+  loss. The body scrolls, because the panel is taller than the window and the
+  Monitor section otherwise sat below the bottom edge with no way to reach it.
+
+  It calls out the combination that produces silent failure: CAN ids installed
+  with no subscriber on the CAN characteristic. Those are two different
+  subscriptions and having one without the other looks, from the client side,
+  exactly like a decode bug.
+- **A screen on the software peripheral** (`reference/peripheral/display.py`).
+  A Monitor device exists to display values it cannot compute, so the only way
+  to tell whether the role works end to end is to look at one. The window shows
+  the channels the device asked for and the values the client supplied.
+
+  What it makes visible is absence. A slot the client has not supplied, or has
+  marked absent, renders as `—·—` in a dimmer colour — never as `0.000`. Before
+  the first lap of a session there is no last lap time, and a display showing
+  zero for it has been told something false. That distinction is the reason
+  `monitor_value` carries a `present` bit (§13.4), and it is invisible in a log
+  of numbers.
+
+  Formatting is where the channel enum earns itself: each channel has exactly
+  one unit fixed by §13.2, so the device renders a lap time as `1:27.340` and a
+  speed as `136.8` km/h without asking the client anything.
+
+  Split like the rest of the peripheral — the formatting is pure and checked in
+  CI, and `tkinter` is imported lazily, because the interpreter CI runs does not
+  have it and must not need it. `python3 display.py` shows the screen alone with
+  no Bluetooth; `serve.py --no-display` runs headless.
+- The device's requested channel set is configurable, and it now asks for six.
+
+### Fixed
+- **The peripheral replayed its backlog after a stall instead of discarding
+  it.** The IMU catch-up loop emitted one sample per elapsed period however
+  long it had been since the last poll, so a device left unpolled for a minute
+  delivered six thousand batches as fast as the radio would take them. Found by
+  reading the log of a real run: 12,400 notifications in 0.2 seconds after the
+  process spent 38 minutes waiting on a permission prompt.
+
+  Delivering a backlog is worse than losing it. The timestamps say when the
+  samples were taken, so a client cannot tell the stream is behind — it just
+  receives a flood of stale data with old times on it. SPEC.md §8.3 already
+  says what to do: discard what cannot be delivered and report it in `dropped`.
+  The device now bounds the catch-up to one batch and counts the rest.
+- The display window is created **after** the server starts advertising. Tk
+  takes over the main run loop when it initialises, and CoreBluetooth needs that
+  run loop to deliver its power-on callback; creating the window first left
+  `BlessServer.start()` waiting for an event that could no longer arrive, with a
+  window up and nothing behind it.
+- `make_macos_app.sh` refuses to rebuild over an existing bundle. The bundle
+  holds only the interpreter — the scripts are read from the repository at run
+  time — so rebuilding is almost never necessary, and re-signing changes the
+  code signature, which makes macOS treat it as a different app and ask for
+  Bluetooth permission again. A peripheral hanging with nothing but `logging to`
+  in its log is waiting for that prompt. `FORCE=1` overrides.
+- Characteristic setup is logged one at a time, so a GATT call that never
+  returns can be told apart from any other. One of them did.
+
 ### Added
 - **The Monitor role (SPEC.md §13).** The one part of VTP/1 that runs
   client-to-device: the client supplies values the device cannot compute, so a
