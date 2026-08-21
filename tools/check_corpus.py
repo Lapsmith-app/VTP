@@ -24,7 +24,7 @@ contains one:
               them different values. Otherwise a decoder can read either from
               the other's offset and pass.
   enums       For every enum field, a vector carrying an unrecognised value.
-              SPEC.md §11.3 — unknown stays unknown.
+              SPEC.md §11.4 — unknown stays unknown.
 
 Usage:
   python3 tools/check_corpus.py          report gaps, exit 1 if any

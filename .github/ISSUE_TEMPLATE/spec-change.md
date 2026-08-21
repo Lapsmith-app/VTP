@@ -13,7 +13,7 @@ labels: spec
 **Compatibility:**
 - [ ] Fits in existing reserved bits (see SPEC.md Appendix A)
 - [ ] Needs a new extension record
-- [ ] Requires a prohibited change (SPEC.md §11.3) — i.e. this is a VTP/2 proposal
+- [ ] Requires a prohibited change (SPEC.md §11.4) — i.e. this is a VTP/2 proposal
 
 **New conformance vectors this would need:**
 

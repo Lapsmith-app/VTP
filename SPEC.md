@@ -432,7 +432,7 @@ finding in RATIONALE §4.1.
 
 They are bus diagnostics rather than vehicle telemetry, and no device
 implements this specification yet, so nothing is known to need them. Record
-sizes are frozen for the life of a major version (§11.3), which means adding
+sizes are frozen for the life of a major version (§11.4), which means adding
 them later is a VTP/2 change rather than a minor one. That is the cost of this
 decision and it is stated plainly rather than discovered.
 
@@ -869,15 +869,59 @@ A device MAY expose several major versions simultaneously as separate services.
 ### 11.2 Minor versions
 
 A client conforming to minor *N* MUST correctly parse minor *N + k* for all *k*.
-Three rules make this structural rather than aspirational:
+Two rules make that structural rather than aspirational:
 
 1. A record's size MUST NOT change within a major version.
-2. New fields MUST be added as extension records, never appended to a base
-   record.
-3. Reserved bits and reserved bytes MAY be assigned in a minor version. They
+2. Reserved bits and reserved bytes MAY be assigned in a minor version. They
    read as zero from older firmware and are ignored by older clients.
 
-### 11.3 Prohibited changes
+### 11.3 What a minor version may add
+
+A minor version has exactly three places to put something new. They are listed
+because the alternative — a general promise that new fields go in extension
+records — was not true of this specification and could not be made true after
+the fact. A conforming receiver rejects a payload whose length it does not
+expect (§5.5, §6.2, §7), so a trailer that did not exist in 1.0 cannot be
+introduced later: the first device to send one is rejected outright by every
+client already deployed. Extensibility is a decision taken before 1.0 or not at
+all.
+
+**Extension records**, on the records that carry them:
+
+<!-- BEGIN GENERATED: extensibility -->
+| Record | Extensible | Appears |
+| --- | --- | --- |
+| `info` | No — closed for major version 1 | Once per connection |
+| `gps_fix` | **Yes** — `ext_count` trailer (§5.5) | One per notification |
+| `can_header` | No — closed for major version 1 | One per notification |
+| `can_record` | No — closed for major version 1 | Up to 4000 per second |
+| `imu_header` | No — closed for major version 1 | One per notification |
+| `imu_sample` | No — closed for major version 1 | Up to 833 per second |
+| `can_list_page` | No — closed for major version 1 | One per CAN_LIST page |
+| `can_subscription` | No — closed for major version 1 | One per table entry |
+| `link_params` | No — closed for major version 1 | On request |
+<!-- END GENERATED: extensibility -->
+
+**Reserved space**, for flags and small values. Appendix A lists it. This is
+where a new boolean or a small enumerated value goes.
+
+**New control opcodes.** Control requests and responses are not fixed-size
+records, so a minor version may add as many as it needs, with any payload. This
+is the general-purpose extension point: anything a client can ask for, rather
+than anything the device pushes, is extensible without limit. Multi-bus CAN
+(§6.9) is intended to be closed this way.
+
+A record marked closed above stays closed for the life of major version 1. A
+field it does not carry today is a VTP/2 change, and §6.5 and §6.6 name two
+already: a remote frame's requested length, and CAN FD's BRS and ESI.
+
+The per-frame and per-sample records are closed deliberately rather than by
+omission. A one-byte trailer on `can_record` costs 4 kB/s at 4000 frames per
+second, on the one stream that can saturate a link — the same arithmetic §6.6
+used to exclude BRS and ESI, which does not stop applying because the byte is
+named differently.
+
+### 11.4 Prohibited changes
 
 Within major version 1, an implementation MUST NOT:
 
@@ -891,7 +935,7 @@ Within major version 1, an implementation MUST NOT:
 New enum members MAY be added. A receiver encountering an unknown enum value
 MUST report it as unknown and MUST NOT substitute a default.
 
-### 11.4 No negotiation
+### 11.5 No negotiation
 
 The device declares one version; the client adapts. There is no version
 negotiation exchange, and a client MUST NOT expect one.

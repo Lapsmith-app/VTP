@@ -178,7 +178,7 @@ def decode_can_list(buf):
     entries = []
     for i in range(page["count"]):
         e = _unpack("can_subscription", buf, hsz + i * esz)
-        # SPEC.md §11.3 — a mode from a later minor stays unknown. Reading it
+        # SPEC.md §11.4 — a mode from a later minor stays unknown. Reading it
         # as every_frame would silently misreport what the device is doing.
         e["mode_known"] = e["mode"] in known
         entries.append(e)

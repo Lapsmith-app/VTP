@@ -8,6 +8,44 @@ conformance vector.
 
 ## [Unreleased]
 
+### Changed
+- **Records other than `gps_fix` are declared closed for the life of major
+  version 1**, and SPEC.md §11.3 now describes the extension mechanisms that
+  exist instead of promising one that did not. §11.2 previously said "new
+  fields MUST be added as extension records" while eight of nine records had no
+  such mechanism.
+
+  The decision could not be deferred. A conforming receiver rejects a payload
+  whose length it does not expect, so a trailer introduced in a later minor is
+  rejected by every client already deployed — the first device to send one
+  stops working with the installed base. Extensibility is settled before 1.0 or
+  decided against.
+
+  What a minor version may add is now stated exactly: extension records on the
+  records that carry them (`gps_fix` alone), reserved bits and bytes, and new
+  control opcodes — which are not fixed-size records, so anything a client can
+  *ask* for remains extensible without limit. Multi-bus CAN (§6.9) is intended
+  to close that way.
+
+  A trailer on `can_record` would cost 4 kB/s at 4000 frames per second, on the
+  one stream RATIONALE §4.1 identifies as able to saturate a link — the same
+  arithmetic §6.6 used to exclude BRS and ESI, which does not stop applying
+  because the byte is named `ext_count`.
+
+  Consequences are stated in RATIONALE §5.4 rather than left to be discovered:
+  a magnetometer triple, a remote frame's requested length, and BRS/ESI are all
+  VTP/2 changes, as is any pushed batch-level field beyond the two reserved
+  bytes in each header.
+- §11.3 is now "What a minor version may add"; the prohibitions move to §11.4.
+  Every reference across the specification, the references, the tooling and the
+  issue templates was updated — a renumbering the docs checker cannot catch,
+  because the old number still resolves, just to the wrong section.
+
+### Added
+- The extensibility table in SPEC.md §11.3 is generated from the schema, so the
+  specification cannot claim a record is extensible when the codecs disagree —
+  which is exactly what the old wording did for eight of nine records.
+
 ### Changed — wire format
 - CAN frame semantics are specified (SPEC.md §6.4-§6.9). The bits were defined;
   what combinations of them mean was not.
