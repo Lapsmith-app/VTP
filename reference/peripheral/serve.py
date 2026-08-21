@@ -192,6 +192,14 @@ class Peripheral:
         # itself. Counted rather than assumed.
         self._ready_callbacks = 0
         self._timeouts = 0
+        # Control responses awaiting delivery. A notification may be discarded
+        # and reported (SPEC.md §8.3); a control response may NOT. §9 requires
+        # a device to respond to every request, and a client that never sees an
+        # answer waits on its tag until it gives up and drops the link -- which
+        # it did. Worse, the request had already been APPLIED, so the two ends
+        # disagreed about the subscription table.
+        self._control_out = collections.deque()
+        self._control_dropped = 0
         self._notify = {"gps": CHAR["gps"], "can": CHAR["can"],
                         "imu": CHAR["imu"]}
 
@@ -237,15 +245,10 @@ class Peripheral:
             log.warning("control write of %d byte(s) is not a request",
                         len(value))
             return
-        control = self.server.get_characteristic(CHAR["control"])
-        control.value = response
-        if not self.server.update_value(SERVICE, CHAR["control"]):
-            # SPEC.md §9 requires a response to every request, and a refused
-            # indication is a response the client never receives. Nothing here
-            # can retry it usefully, but a client left waiting on a tag should
-            # at least be diagnosable from this side.
-            log.error("control response for tag %d was REFUSED by the "
-                      "transport; the client will see no answer", response[1])
+        # Queued rather than sent from here: this callback does not run on the
+        # loop that owns the transport, and a refused response must be retried
+        # rather than dropped.
+        self._control_out.append(response)
 
     def _subscribed(self):
         """Characteristic names a central has enabled notifications on.
@@ -385,6 +388,19 @@ class Peripheral:
         while True:
             subscribed = self._subscribed()
 
+            # Control responses first, and retried until they land. They are
+            # the one thing on this link that is owed rather than offered.
+            while self._control_out and self._ready:
+                response = self._control_out[0]
+                control = self.server.get_characteristic(CHAR["control"])
+                control.value = response
+                if self.server.update_value(SERVICE, CHAR["control"]):
+                    self._control_out.popleft()
+                else:
+                    self._ready = False
+                    self._blocked_since = time.monotonic()
+                    break
+
             # New work. At most one notification per stream is held: a second
             # supersedes the first, and the superseded one is loss and is
             # counted as such. Holding more would deliver a backlog, which
@@ -451,6 +467,12 @@ class Peripheral:
                     # a disconnected device reporting three installed ids with
                     # nobody subscribed, which reads as a client fault.
                     self.device.on_disconnect()
+                    # The client is gone; nothing is owed to it any more.
+                    if self._control_out:
+                        self._control_dropped += len(self._control_out)
+                        log.warning("%d control response(s) undelivered when "
+                                    "the link dropped", len(self._control_out))
+                        self._control_out.clear()
                     log.info("CLIENT DISCONNECTED — subscription table cleared")
 
             now = self.device.now_us() / 1e6
@@ -466,6 +488,10 @@ class Peripheral:
                          unwanted["gps"], unwanted["can"], unwanted["imu"],
                          subs,
                          ", ".join(sorted(subscribed)) if subscribed else "none")
+                if self._control_out or self._control_dropped:
+                    log.info("  control responses: %d awaiting delivery, %d "
+                             "lost to a dropped link",
+                             len(self._control_out), self._control_dropped)
                 if self._paints:
                     log.info("  display: paint %.1f ms, pump %.1f ms, %d paints"
                              "  |  ready-callbacks %d, safety-timeouts %d",

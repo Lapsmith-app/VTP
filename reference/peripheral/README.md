@@ -186,6 +186,27 @@ LAP          LAST         BEST
 42.318       1:27.340     —·—
 ```
 
+### A control response is owed; a notification is only offered
+
+The two are handled differently on purpose, and conflating them cost a client
+its connection.
+
+SPEC.md §8.3 says a device discards what it cannot deliver and reports the
+count. That is right for a notification: every record carries the time it was
+taken, so a late batch misrepresents nothing except by being late, and a
+backlog delivered at speed is worse than loss.
+
+SPEC.md §9 says a device MUST respond to every request. There is no discard
+option. Dropping a control response is worse than losing data, because the
+request has already been **applied** — the device had installed a CAN
+subscription and answered `ok`, the answer was refused by the transport and
+discarded, and the client sat waiting on its tag until it timed out and dropped
+the link. The two ends then disagreed about the subscription table.
+
+Control responses are therefore queued, retried until they land, and sent
+**before** notifications each iteration. On a dropped link the queue is cleared
+and the count logged: nothing is owed to a client that has gone.
+
 ### The panel is not free
 
 Measured, because it was guessed at wrongly three times first:

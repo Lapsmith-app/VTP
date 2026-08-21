@@ -27,6 +27,18 @@ conformance vector.
   which a wrongly decoded channel does not.
 
 ### Fixed
+- **A refused control response was dropped, which timed a client out.** The
+  device took a `CAN_SUBSCRIBE`, applied it, answered `ok` — and the indication
+  carrying that answer was refused by the transport and discarded. The client
+  waited on its tag, gave up and dropped the link, and the two ends disagreed
+  about the subscription table in the meantime.
+
+  A notification and a control response are not the same kind of thing. §8.3
+  discards what cannot be delivered and reports it; §9 says a device MUST
+  respond to every request, and there is no discard option. Responses are now
+  queued, retried until they land, and sent before notifications each
+  iteration. They are the one thing on this link that is owed rather than
+  offered.
 - **Notification sending is paced to the transport and fairly ordered.** Two
   faults compounded: the send order was fixed, so whichever stream went last
   absorbed every refusal — with GPS, IMU and CAN all subscribed, CAN was
