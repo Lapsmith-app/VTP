@@ -136,6 +136,35 @@
       }
     },
     {
+      "name": "t-base-near-wrap",
+      "desc": "t_base within 100 us of the u64 ceiling, so t_base + dt*10 wraps. SPEC.md 8 defines the arithmetic as modulo 2^64; a decoder using arbitrary-precision integers MUST still report the wrapped value.",
+      "record": "can_batch",
+      "hex": "0b0000009cffffffffffffff010000001400a00100000100",
+      "expect": {
+        "header": {
+          "seq": 11,
+          "dropped": 0,
+          "t_base": 18446744073709551516,
+          "count": 1,
+          "flags": 0,
+          "reserved": 0
+        },
+        "records": [
+          {
+            "dt": 20,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00",
+            "t_device_us": 100
+          }
+        ]
+      },
+      "note": "Unreachable on real hardware -- a microsecond clock takes over half a million years to get here -- but the two reference decoders disagreed on it, which is a specification gap rather than a hardware one."
+    },
+    {
       "name": "empty-batch",
       "desc": "count 0. Legal, and means the bus is quiet \u2014 NOT an error and NOT a disconnect. A decoder MUST accept it.",
       "record": "can_batch",

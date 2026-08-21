@@ -24,6 +24,12 @@ SCHEMA = yaml.safe_load((ROOT / "schema" / "vtp1.yaml").read_text())
 PACK = {"u8": "B", "i8": "b", "u16": "H", "i16": "h",
         "u32": "I", "i32": "i", "u64": "Q", "i64": "q"}
 
+# SPEC.md §8 — derived timestamps are computed modulo 2^64. Python's integers
+# are arbitrary-precision, so without this the two reference decoders disagree
+# on any payload whose t_base is near the top of the range: C wraps and Python
+# does not. Neither is wrong on its own; the specification now says which.
+U64 = (1 << 64) - 1
+
 
 class Reject(Exception):
     """A payload that MUST NOT be decoded. SPEC.md §1.1."""
@@ -104,7 +110,7 @@ def decode_can_batch(buf):
             "len": r["len"],
             "payload": buf[off + rsz: off + rsz + r["len"]].hex(),
             # dt counts 10 us ticks — SPEC.md §6.1.
-            "t_device_us": hdr["t_base"] + r["dt"] * 10,
+            "t_device_us": (hdr["t_base"] + r["dt"] * 10) & U64,
         })
         off += rsz + r["len"]
     if off != len(buf):
@@ -132,7 +138,7 @@ def decode_imu_batch(buf):
     samples = []
     for i in range(hdr["count"]):
         s = _unpack("imu_sample", buf, hsz + i * ssz)
-        s["t_device_us"] = hdr["t_base"] + i * hdr["period"]
+        s["t_device_us"] = (hdr["t_base"] + i * hdr["period"]) & U64
         s["absent"] = absent
         samples.append(s)
     return {"header": hdr, "samples": samples}

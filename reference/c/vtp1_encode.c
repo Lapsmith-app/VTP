@@ -31,6 +31,22 @@ static uint64_t gate64(uint64_t value, uint32_t validity, uint32_t bit) {
 int vtp_encode_gps_fix(const vtp_gps_fix_t *f,
                        const uint8_t *ext, size_t ext_len,
                        uint8_t *out, size_t cap) {
+    /* Reporting success for bytes that were never written is worse than
+     * failing: the caller transmits whatever the buffer happened to hold. */
+    if (ext_len && !ext) return -1;
+    /* SPEC.md §5.5 — the notification length MUST equal the base record plus
+     * exactly the bytes accounted for by ext_count. An encoder that writes a
+     * count disagreeing with its own payload emits something no conforming
+     * decoder will accept, so it is refused here rather than on the wire. */
+    {
+        size_t off = 0;
+        uint8_t n = 0;
+        for (; n < f->ext_count; n++) {
+            if (off + 2 > ext_len) return -1;
+            off += (size_t)2 + ext[off + 1];
+        }
+        if (off != ext_len) return -1;
+    }
     if (cap < (size_t)VTP_GPS_FIX_SIZE + ext_len) return -1;
     memset(out, 0, VTP_GPS_FIX_SIZE);
 
@@ -79,6 +95,9 @@ int vtp_encode_can_batch(const vtp_can_header_t *h,
     size_t needed = VTP_CAN_HEADER_SIZE;
     for (uint8_t i = 0; i < h->count; i++) {
         if (frames[i].len > 64) return -1;
+        /* As above: a length with no payload behind it would be reported as
+         * written and sent as uninitialised memory. */
+        if (frames[i].len && !frames[i].payload) return -1;
         needed += VTP_CAN_RECORD_SIZE + frames[i].len;
     }
     if (cap < needed) return -1;
@@ -124,9 +143,12 @@ int vtp_encode_imu_batch(const vtp_imu_header_t *h,
     wr16(out + VTP_IMU_HEADER_OFF_SEQ, h->seq);
     wr16(out + VTP_IMU_HEADER_OFF_DROPPED, h->dropped);
     wr64(out + VTP_IMU_HEADER_OFF_T_BASE, h->t_base);
-    wr16(out + VTP_IMU_HEADER_OFF_PERIOD, h->period);
+    wr32(out + VTP_IMU_HEADER_OFF_PERIOD, h->period);
     out[VTP_IMU_HEADER_OFF_COUNT] = h->count;
     out[VTP_IMU_HEADER_OFF_FLAGS] = h->flags;
+    /* Written through, not zeroed, for the same reason as can_header.reserved:
+     * a later minor may have been assigned these bytes. */
+    wr16(out + VTP_IMU_HEADER_OFF_RESERVED, h->reserved);
 
     const int accel = (h->flags & VTP_IMU_HAS_ACCEL) != 0;
     const int gyro = (h->flags & VTP_IMU_HAS_GYRO) != 0;

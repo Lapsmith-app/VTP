@@ -6,7 +6,7 @@
       "name": "stationary-1g-down",
       "desc": "A level, stationary device: 1 g on Z, no rotation.",
       "record": "imu_batch",
-      "hex": "0100000080841e00000000008813020300000000e8030000000000000200ffffe70301000000ffff",
+      "hex": "0100000080841e0000000000881300000203000000000000e8030000000000000200ffffe70301000000ffff",
       "expect": {
         "header": {
           "seq": 1,
@@ -14,7 +14,8 @@
           "t_base": 2000000,
           "period": 5000,
           "count": 2,
-          "flags": 3
+          "flags": 3,
+          "reserved": 0
         },
         "samples": [
           {
@@ -45,7 +46,7 @@
       "name": "cornering-and-yaw",
       "desc": "Lateral acceleration with yaw rate. gx/gy/gz scale by 0.05 deg/s, so gz 1200 is 60 deg/s.",
       "record": "imu_batch",
-      "hex": "0200000000093d0000000000b00402036affd403f203ecff0f00b0044cfffc03ed03e7ff12001e05",
+      "hex": "0200000000093d0000000000b0040000020300006affd403f203ecff0f00b0044cfffc03ed03e7ff12001e05",
       "expect": {
         "header": {
           "seq": 2,
@@ -53,7 +54,8 @@
           "t_base": 4000000,
           "period": 1200,
           "count": 2,
-          "flags": 3
+          "flags": 3,
+          "reserved": 0
         },
         "samples": [
           {
@@ -84,7 +86,7 @@
       "name": "negative-full-scale",
       "desc": "Extremes on every axis; catches signed 16-bit handling.",
       "record": "imu_batch",
-      "hex": "03000000808d5b0000000000881301030080ff7f0080ff7f0080ff7f",
+      "hex": "03000000808d5b000000000088130000010300000080ff7f0080ff7f0080ff7f",
       "expect": {
         "header": {
           "seq": 3,
@@ -92,7 +94,8 @@
           "t_base": 6000000,
           "period": 5000,
           "count": 1,
-          "flags": 3
+          "flags": 3,
+          "reserved": 0
         },
         "samples": [
           {
@@ -109,10 +112,49 @@
       }
     },
     {
+      "name": "low-rate-10hz",
+      "desc": "A 10 Hz IMU: period 100000 us. This rate was unrepresentable while period was a u16, whose ceiling of 65535 us put a floor of 15.26 Hz on every conforming device.",
+      "record": "imu_batch",
+      "hex": "08000000002d310100000000a08601000203000000000000e8030000000000000500fbffea030100ffff0200",
+      "expect": {
+        "header": {
+          "seq": 8,
+          "dropped": 0,
+          "t_base": 20000000,
+          "period": 100000,
+          "count": 2,
+          "flags": 3,
+          "reserved": 0
+        },
+        "samples": [
+          {
+            "ax": 0,
+            "ay": 0,
+            "az": 1000,
+            "gx": 0,
+            "gy": 0,
+            "gz": 0,
+            "t_device_us": 20000000,
+            "absent": []
+          },
+          {
+            "ax": 5,
+            "ay": -5,
+            "az": 1002,
+            "gx": 1,
+            "gy": -1,
+            "gz": 2,
+            "t_device_us": 20100000,
+            "absent": []
+          }
+        ]
+      }
+    },
+    {
       "name": "stale-values-behind-cleared-flags",
       "desc": "flags clears both accel and gyro, but every sample byte still carries the previous reading. A decoder MUST report all six fields absent on the strength of the flags alone, and MUST NOT read 1 g and 60 deg/s out of them.",
       "record": "imu_batch",
-      "hex": "06000000001bb70000000000881301006affd403f203ecff0f00b004",
+      "hex": "06000000001bb7000000000088130000010000006affd403f203ecff0f00b004",
       "expect": {
         "header": {
           "seq": 6,
@@ -120,7 +162,8 @@
           "t_base": 12000000,
           "period": 5000,
           "count": 1,
-          "flags": 0
+          "flags": 0,
+          "reserved": 0
         },
         "samples": [
           {
@@ -143,28 +186,28 @@
         ]
       },
       "canonical": false,
-      "expect_roundtrip_hex": "06000000001bb7000000000088130100000000000000000000000000",
+      "expect_roundtrip_hex": "06000000001bb700000000008813000001000000000000000000000000000000",
       "note": "The only vector that exercises the IMU presence gates. Every other case either sets the flag or has zeroes behind the cleared one, so removing the gate changed nothing and the whole corpus still passed. Found by tools/check_corpus.py."
     },
     {
       "name": "short-payload",
       "desc": "15 bytes: shorter than the batch header itself. MUST be rejected rather than read past the end.",
       "record": "imu_batch",
-      "hex": "070000000100000000000000881300",
+      "hex": "07000000010000000000000088130000000300",
       "must_reject": "length"
     },
     {
       "name": "long-payload",
       "desc": "One sample declared, one sample present, plus a trailing byte. The length MUST equal the header plus count samples exactly.",
       "record": "imu_batch",
-      "hex": "0500000001000000000000008813010301000200030004000500060000",
+      "hex": "050000000100000000000000881300000103000001000200030004000500060000",
       "must_reject": "length"
     },
     {
       "name": "accel-only",
       "desc": "flags bit1 clear: the device has no gyro. Gyro fields are zero and MUST be reported absent, not as zero rotation.",
       "record": "imu_batch",
-      "hex": "0400000000127a0000000000102701010a001400e803000000000000",
+      "hex": "0400000000127a000000000010270000010100000a001400e803000000000000",
       "expect": {
         "header": {
           "seq": 4,
@@ -172,7 +215,8 @@
           "t_base": 8000000,
           "period": 10000,
           "count": 1,
-          "flags": 1
+          "flags": 1,
+          "reserved": 0
         },
         "samples": [
           {

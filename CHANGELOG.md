@@ -8,6 +8,43 @@ conformance vector.
 
 ## [Unreleased]
 
+### Changed — wire format
+- `imu_header` grows from 16 to 20 bytes and `period` from `u16` to `u32`
+  microseconds. A `u16` microsecond period cannot express any interval longer
+  than 65535 µs, which put a **floor of 15.26 Hz on every conforming device** —
+  a 10 Hz IMU was unrepresentable. Microseconds are kept rather than a finer
+  unit so the field shares the device clock's units with GPS and CAN;
+  cross-channel alignment is the point of the clock, and a second scale would
+  mean a division at every comparison. The freed bytes give `imu_header` a
+  2-byte `reserved` field, matching `can_header`.
+- `imu_header.flags` bit 2 (`mag`) removed. It advertised a magnetometer while
+  `imu_sample` carries no magnetometer fields, so a device setting it described
+  data that had nowhere to go — a flag whose only possible effect was to mislead.
+- SPEC.md §8 defines derived timestamps as computed modulo 2^64. The two
+  reference decoders disagreed on any payload near the top of the range: C wrapped,
+  Python did not. Neither was wrong on its own; the specification now says which.
+
+### Fixed
+- SPEC.md §7 claimed `period` was "exact for any ODR". It is not: an interval
+  that is not a whole number of microseconds is misrepresented by up to 0.5 µs
+  per sample. The bound is now stated instead of claimed away — the error
+  accumulates only *within* a batch, since each notification re-anchors on its
+  own measured `t_base`, so the worst case at 833 Hz across nineteen samples is
+  about 9 µs, below the 10 µs resolution of a CAN frame timestamp.
+- SPEC.md §7 offered to carry a sensor-to-case rotation "in an extension
+  record". The IMU characteristic has no extension mechanism, so that was
+  unimplementable. Mounting orientation is now stated as out of scope for
+  major version 1.
+- `vtp_encode_gps_fix` accepted `ext_len > 0` with `ext == NULL`, returned
+  success, and left those bytes unwritten — the caller would transmit whatever
+  the buffer held. `vtp_encode_can_batch` did the same for a payload length with
+  a null payload. Both now refuse.
+- `vtp_encode_gps_fix` did not check that `ext_count` agreed with the extension
+  bytes supplied, so it could emit a record no conforming decoder would accept.
+- Two `info` vectors contradicted themselves: the GPS-only board declared "every
+  CAN capacity is zero" while reporting `can_max_payload = 8`, and the
+  future-minor board reported 64-byte payloads without declaring `can_fd`.
+
 ### Added
 - `tools/check_corpus.py`: derives from the schema what a vector would have to
   look like to exercise each rule, and fails when the corpus has none. It
@@ -80,7 +117,7 @@ rely on it.
   prefix that lets a client recognise an unsupported major version.
 - Machine-readable schema (`schema/vtp1.yaml`) as the source of truth, with
   generation of the spec tables, the C header and the conformance vectors.
-- Conformance corpus: 47 vectors across 5 record types, including must-reject
+- Conformance corpus: 49 vectors across 5 record types, including must-reject
   cases for truncated and over-long payloads.
 - C99 reference decoder and encoder, no dependencies, separate translation
   units so a client links only the decoder and a device only the encoder.
