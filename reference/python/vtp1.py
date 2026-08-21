@@ -101,12 +101,23 @@ def decode_can_batch(buf):
         if off + rsz + r["len"] > len(buf):
             raise Reject("truncated-record")
         raw = r["id"]
+        extended = bool(raw & (1 << 29))
+        fd, rtr = bool(raw & (1 << 30)), bool(raw & (1 << 31))
+        # SPEC.md §6.4 — each of these describes a frame that cannot exist, and
+        # is rejected rather than repaired: a repaired frame is a plausible
+        # wrong value carrying a correct-looking identifier.
+        if not extended and (raw & 0x1FFFFFFF) > 0x7FF:
+            raise Reject("bad-standard-id")
+        if fd and rtr:
+            raise Reject("fd-rtr")
+        if rtr and r["len"]:
+            raise Reject("rtr-with-payload")
         records.append({
             "dt": r["dt"],
             "id": raw & 0x1FFFFFFF,
-            "extended": bool(raw & (1 << 29)),
-            "fd": bool(raw & (1 << 30)),
-            "rtr": bool(raw & (1 << 31)),
+            "extended": extended,
+            "fd": fd,
+            "rtr": rtr,
             "len": r["len"],
             "payload": buf[off + rsz: off + rsz + r["len"]].hex(),
             # dt counts 10 us ticks — SPEC.md §6.1.

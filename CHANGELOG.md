@@ -9,6 +9,42 @@ conformance vector.
 ## [Unreleased]
 
 ### Changed — wire format
+- CAN frame semantics are specified (SPEC.md §6.4-§6.9). The bits were defined;
+  what combinations of them mean was not.
+  - **Identifier validity is enforced.** A standard frame carrying more than
+    eleven bits, a frame with both the CAN FD and RTR bits set, and a remote
+    frame with a payload are each rejected whole rather than repaired — a
+    repaired frame is a plausible wrong value with a correct-looking identifier.
+  - **Timestamps are taken at end of frame** (§6.7). A device cannot generally
+    know a frame's time on air without its bit timing and stuff bits, so
+    start-of-frame would be back-computed rather than measured. The consequence
+    is stated: a 64-byte FD frame at 500 kbit/s is stamped about a millisecond
+    after it began.
+  - **Subscription modes forward the first matching frame** in every mode
+    (§6.8), so a client installing a subscription need not wait for a second
+    frame before it can display anything. `every_nth` with N of 0 is
+    `bad_params`.
+
+### Documented limits, deliberately
+- **A remote frame's requested DLC is not carried** (§6.5). `len` is the payload
+  length and the batch's length arithmetic depends on it being exactly that.
+- **CAN FD's BRS and ESI are not carried** (§6.6). Both are per-frame, so they
+  cost a byte on the highest-volume record in the protocol — 4 kB/s at 4000
+  frames per second, on the one stream RATIONALE §4.1 identifies as able to
+  saturate a link. Record sizes are frozen within a major version, so adding
+  them later is a VTP/2 change. That cost is stated rather than discovered.
+- **Major version 1 addresses one CAN bus** (§6.9). The low byte of
+  `can_header.reserved` is earmarked for a bus index and MUST be zero until a
+  minor version assigns it; per-bus subscription would need a new opcode, which
+  a minor version may add.
+
+### Fixed
+- `tools/check_docs.py` only recognised a `SPEC` qualifier on section
+  references, so a `RATIONALE §4.1` written inside SPEC.md resolved silently
+  against the wrong document. It understands both now — and caught this while
+  the CAN sections were being written.
+
+### Changed — wire format
 - Sequence and loss are specified (SPEC.md §8.2, §8.3). Both fields existed on
   all three streams; only `gps_fix` said what either meant.
   - **`seq` counts notifications on its own characteristic**, uniformly, +1
@@ -196,7 +232,7 @@ rely on it.
   prefix that lets a client recognise an unsupported major version.
 - Machine-readable schema (`schema/vtp1.yaml`) as the source of truth, with
   generation of the spec tables, the C header and the conformance vectors.
-- Conformance corpus: 62 vectors across 6 record types, including must-reject
+- Conformance corpus: 67 vectors across 6 record types, including must-reject
   cases for truncated and over-long payloads.
 - C99 reference decoder and encoder, no dependencies, separate translation
   units so a client links only the decoder and a device only the encoder.

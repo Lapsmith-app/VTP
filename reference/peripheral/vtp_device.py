@@ -374,13 +374,23 @@ class VtpDevice:
             if now - sub["last"] < interval:
                 continue
             sub["seen"] += 1
+            # SPEC.md §6.8 — the first matching frame is forwarded in every
+            # mode. A client that installs a subscription and waits for a value
+            # to display should not have to wait for a second frame.
+            first = sub["seen"] == 1
             emit = True
-            if sub["mode"] == SUB_PERIODIC and sub["arg"]:
-                emit = (now - sub["last"]) >= sub["arg"] * 1000
+            if sub["mode"] == SUB_PERIODIC and sub["arg"] and not first:
+                emit = (now - sub["emitted_at"]) >= sub["arg"] * 1000
             elif sub["mode"] == SUB_EVERY_NTH and sub["arg"]:
-                emit = (sub["seen"] % sub["arg"]) == 0
+                emit = ((sub["seen"] - 1) % sub["arg"]) == 0
+            elif sub["mode"] == SUB_ON_CHANGE and not first:
+                emit = payload != sub["last_payload"]
+                if emit and sub["arg"]:
+                    emit = (now - sub["emitted_at"]) >= sub["arg"] * 1000
             sub["last"] = now
             if emit:
+                sub["emitted_at"] = now
+                sub["last_payload"] = payload
                 yield {"id": cid, "payload": payload, "_t": now}
 
     # -- Control ----------------------------------------------------------
@@ -415,6 +425,9 @@ class VtpDevice:
                 cid, mask, mode, arg = struct.unpack("<IIBH", params)
             if mode > SUB_EVERY_NTH:
                 return reply(ST_BAD_PARAMS)
+            # SPEC.md §6.8 — N of 0 selects no frames at all and is meaningless.
+            if mode == SUB_EVERY_NTH and arg == 0:
+                return reply(ST_BAD_PARAMS)
             cid &= CAN_ID_BITS
             mask &= CAN_ID_BITS
 
@@ -440,7 +453,7 @@ class VtpDevice:
             self._next_handle = (self._next_handle % 0xFFFF) + 1
             self._subscriptions[handle] = {
                 "id": cid, "mask": mask, "mode": mode, "arg": arg,
-                "last": 0, "seen": 0,
+                "last": 0, "seen": 0, "emitted_at": 0, "last_payload": None,
             }
             return reply(ST_OK, struct.pack("<H", handle))
 

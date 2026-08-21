@@ -93,6 +93,20 @@ int vtp_can_batch_begin(const uint8_t *b, size_t len,
         if (off + VTP_CAN_RECORD_SIZE > len) { *err = "truncated-record"; return -1; }
         size_t plen = b[off + VTP_CAN_RECORD_OFF_LEN];
         if (plen > 64) { *err = "bad-length"; return -1; }
+        {
+            /* SPEC.md §6.4 — frames that cannot exist are rejected, not
+             * repaired. Truncating an over-long standard identifier would
+             * yield a different identifier that looks entirely valid. */
+            const uint32_t raw = rd32(b + off + VTP_CAN_RECORD_OFF_ID);
+            const int ext = (raw & (1u << 29)) != 0;
+            const int fd  = (raw & (1u << 30)) != 0;
+            const int rtr = (raw & (1u << 31)) != 0;
+            if (!ext && (raw & 0x1FFFFFFFu) > 0x7FFu) {
+                *err = "bad-standard-id"; return -1;
+            }
+            if (fd && rtr)   { *err = "fd-rtr"; return -1; }
+            if (rtr && plen) { *err = "rtr-with-payload"; return -1; }
+        }
         if (off + VTP_CAN_RECORD_SIZE + plen > len) { *err = "truncated-record"; return -1; }
         off += VTP_CAN_RECORD_SIZE + plen;
     }

@@ -266,6 +266,24 @@ def main():
           f"{len(got)} frames in 2 s: the broad every_frame mask governed "
           f"instead of the more specific every_nth subscription (SPEC.md §9.3)")
 
+    # SPEC.md §6.8 — the first matching frame is forwarded in every mode, and
+    # every_nth with N of 0 is meaningless.
+    device.handle_control(bytes([dev.CAN_RESET, 30]))
+    zero = device.handle_control(bytes([dev.CAN_SUBSCRIBE, 31])
+                                 + struct.pack("<IBH", 0x0C0,
+                                               dev.SUB_EVERY_NTH, 0))
+    check(zero[2] == dev.ST_BAD_PARAMS,
+          "every_nth with N of 0 selects no frames and MUST be bad_params")
+
+    device.handle_control(bytes([dev.CAN_SUBSCRIBE, 32])
+                          + struct.pack("<IBH", 0x0C0, dev.SUB_EVERY_NTH, 5))
+    early = run(device, clock, 0.1)
+    first_frames = [r for c, p in early if c == "can"
+                    for r in (decode(c, p) or {"records": []})["records"]]
+    check(len(first_frames) >= 1,
+          "every_nth held back the first matching frame: SPEC.md §6.8 forwards "
+          "it in every mode, so a client need not wait for a second")
+
     resp = device.handle_control(bytes([0xEE, 6]))
     check(resp[2] == dev.ST_UNSUPPORTED,
           "an unimplemented opcode MUST answer unsupported_opcode, and MUST "
