@@ -150,6 +150,30 @@ def decode_info(buf):
     return _unpack("info", buf)
 
 
+def decode_can_list(buf):
+    """SPEC.md §9.5 — one page of the CAN subscription table."""
+    hsz = _size("can_list_page")
+    if len(buf) < hsz:
+        raise Reject("length")
+    page = _unpack("can_list_page", buf)
+
+    esz = _size("can_subscription")
+    if len(buf) < hsz + page["count"] * esz:
+        raise Reject("truncated-record")
+    if len(buf) != hsz + page["count"] * esz:
+        raise Reject("length")
+
+    known = {m["value"] for m in SCHEMA["enums"]["sub_mode"]["members"]}
+    entries = []
+    for i in range(page["count"]):
+        e = _unpack("can_subscription", buf, hsz + i * esz)
+        # SPEC.md §11.3 — a mode from a later minor stays unknown. Reading it
+        # as every_frame would silently misreport what the device is doing.
+        e["mode_known"] = e["mode"] in known
+        entries.append(e)
+    return {"page": page, "entries": entries}
+
+
 def decode_link_params(buf):
     """SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response.
 
@@ -181,6 +205,7 @@ DECODERS = {
     "imu_batch": decode_imu_batch,
     "info": decode_info,
     "link_params": decode_link_params,
+    "can_list": decode_can_list,
 }
 
 

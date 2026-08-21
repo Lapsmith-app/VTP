@@ -50,7 +50,8 @@ PACK = {"u8": "B", "i8": "b", "u16": "H", "i16": "h",
 # file, and reported all fifteen sample field pairs as untested when it had in
 # fact never looked at one.
 COMPOSITE = {"can_batch": ("can_header", "can_record"),
-             "imu_batch": ("imu_header", "imu_sample")}
+             "imu_batch": ("imu_header", "imu_sample"),
+             "can_list": ("can_list_page", "can_subscription")}
 STANDALONE = ("gps_fix", "info", "link_params")
 
 

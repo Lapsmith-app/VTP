@@ -8,6 +8,37 @@ conformance vector.
 
 ## [Unreleased]
 
+### Changed — wire format
+- The CAN control plane is specified rather than named (SPEC.md §9.2-§9.5).
+  Building the software peripheral established that `CAN_LIST`,
+  `CAN_SUBSCRIBE_MASK` and `LIST_CHANNELS` could not be implemented at all:
+  they were listed with no response payload defined.
+  - **Subscription handles.** An identifier stopped being a unique name for a
+    subscription the moment masks existed. `CAN_SUBSCRIBE` and
+    `CAN_SUBSCRIBE_MASK` return a handle; `CAN_UNSUBSCRIBE` takes one, and an
+    unknown handle is answered with the new `unknown_handle` status.
+    Re-installing the same `(id, mask)` updates in place and keeps its handle,
+    so a client reprogramming on every connect cannot exhaust the table.
+  - **`CAN_LIST` is paged**, returning a `can_list_page` record followed by
+    `can_subscription` entries. At the minimum ATT MTU a response holds six
+    entries, against a slot count that may be far larger, so a single-shot
+    response was never implementable.
+  - **Overlapping subscriptions have a rule** (§9.3): most specific mask, then
+    lowest handle, and a frame is forwarded at most once. Both terms are
+    visible through `CAN_LIST`.
+  - **`rate_exceeded` is only required where it is decidable** (§9.4). For
+    `every_frame` and `on_change` a device cannot know future bus traffic; it
+    admits and sheds, reporting loss in `dropped`.
+  - **Subscriptions do not survive disconnection**, so a client always finds a
+    known state.
+  - `TIME_SYNC` declares its response layout (`t_device:u64`).
+- **`LIST_CHANNELS` removed.** It belonged to the Monitor role, which had a
+  UUID and a capability bit but no characteristic format and no state machine.
+  Monitor should return as a designed feature or not at all.
+- Every control opcode now declares its response detail in the schema, and
+  `tools/generate.py` refuses to generate if one does not. Leaving that to
+  prose is what made three of them unimplementable.
+
 ### Added
 - `reference/peripheral/`: a synthetic VTP/1 device. `vtp_device.py` holds one
   monotonic clock, the three roles derived from a common motion model,
@@ -137,7 +168,7 @@ rely on it.
   prefix that lets a client recognise an unsupported major version.
 - Machine-readable schema (`schema/vtp1.yaml`) as the source of truth, with
   generation of the spec tables, the C header and the conformance vectors.
-- Conformance corpus: 49 vectors across 5 record types, including must-reject
+- Conformance corpus: 59 vectors across 6 record types, including must-reject
   cases for truncated and over-long payloads.
 - C99 reference decoder and encoder, no dependencies, separate translation
   units so a client links only the decoder and a device only the encoder.

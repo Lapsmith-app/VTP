@@ -108,30 +108,35 @@ bless also warns that the local name may be truncated because the service UUID
 fills the advertisement. Harmless — a client matches on the service UUID — but
 it is a live demonstration of why §3.3's Service Data does not fit here.
 
-## What building this revealed about the Control plane
+## The Control plane
 
-Three opcodes are named in SPEC.md §9 with **no response payload defined**, so
-this device answers `unsupported_opcode` for all three rather than inventing a
-format. A reference implementation that invents wire format creates a de facto
-standard by accident, and no decoder in this repository could check it:
+Building this device is what produced SPEC.md §9.2-§9.5. Three opcodes were
+named with no response payload defined, and the device could not implement
+them without inventing wire format — which a reference implementation must
+never do, because it creates a de facto standard by accident that no decoder
+here can check.
 
-- **`CAN_LIST`** — "Response carries the installed subscription table." The
-  table's encoding is unspecified. With 32 slots it also cannot fit in one
-  indication at the minimum MTU of 100, so it needs pagination or a cursor,
-  which is a design decision rather than an oversight to patch.
-- **`CAN_SUBSCRIBE_MASK`** — the parameters are specified; the interaction with
-  overlapping exact-id subscriptions is not. Which wins, and does unsubscribing
-  an id covered by a mask remove it?
-- **`LIST_CHANNELS`** — belongs to the Monitor role, which has a UUID and a
-  capability bit but no characteristic format and no state machine anywhere in
-  the specification.
+All three are now specified, and this device implements them:
 
-Two further gaps this device had to make a local decision about:
+- **`CAN_LIST`** returns a paged `can_list_page` record. Paging is not
+  decoration: at the minimum ATT MTU a response carries 97 bytes, of which 3
+  are opcode/tag/status and 6 the page header, leaving **six entries** against
+  a `can_subscription_slots` that may be far larger.
+- **Subscription handles.** An identifier stopped being a unique name for a
+  subscription the moment masks existed, so `CAN_UNSUBSCRIBE` takes a handle
+  and installs return one. Re-installing the same `(id, mask)` updates in
+  place and keeps its handle, so a client reprogramming on every connect
+  cannot exhaust the table.
+- **Overlap has a rule** (§9.3): most specific mask, then lowest handle, and a
+  frame is forwarded at most once. Both terms are visible through `CAN_LIST`,
+  so a client can determine which subscription governs rather than discover it.
+- **`rate_exceeded` is only claimed where it is decidable** (§9.4). For
+  `every_frame` and `on_change` the device cannot know future bus traffic, so
+  it admits and sheds, reporting loss in `dropped`. A prediction the device
+  cannot make is not a promise the protocol should ask for.
 
-- **`TIME_SYNC`** returns `t_device` at receipt as a `u64`, which §9 implies
-  but does not state as a layout.
-- **`rate_exceeded` is not decidable** for an `every_frame` subscription: the
-  device cannot know future bus traffic, so it cannot tell at admission time
-  whether the subscription would exceed `can_max_frames_per_s`. This device
-  admits and then sheds, reporting the loss in `dropped` — which is defensible
-  but is not what §9 describes.
+**`LIST_CHANNELS` was removed** rather than specified. It belonged to the
+Monitor role, which had a UUID and a capability bit but no characteristic
+format and no state machine anywhere in the specification. Whether Monitor
+returns is a product question — it lets a client feed its own channels *into*
+the device — and it should return as a designed feature or not at all.

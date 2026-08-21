@@ -179,6 +179,45 @@ int vtp_decode_info(const uint8_t *b, size_t len,
     return 0;
 }
 
+int vtp_sub_mode_known(uint8_t m) {
+    switch (m) {
+        case VTP_SUB_MODE_EVERY_FRAME:
+        case VTP_SUB_MODE_PERIODIC:
+        case VTP_SUB_MODE_ON_CHANGE:
+        case VTP_SUB_MODE_EVERY_NTH:
+            return 1;
+        default:
+            return 0;   /* A later minor's mode. Stays unknown. SPEC.md §11.3 */
+    }
+}
+
+int vtp_decode_can_list(const uint8_t *b, size_t len,
+                        vtp_can_list_page_t *p, const char **err) {
+    if (len < VTP_CAN_LIST_PAGE_SIZE) { *err = "length"; return -1; }
+
+    p->total    = rd16(b + VTP_CAN_LIST_PAGE_OFF_TOTAL);
+    p->index    = rd16(b + VTP_CAN_LIST_PAGE_OFF_INDEX);
+    p->count    = b[VTP_CAN_LIST_PAGE_OFF_COUNT];
+    p->reserved = b[VTP_CAN_LIST_PAGE_OFF_RESERVED];
+
+    const size_t needed = (size_t)VTP_CAN_LIST_PAGE_SIZE
+                        + (size_t)p->count * VTP_CAN_SUBSCRIPTION_SIZE;
+    if (len < needed) { *err = "truncated-record"; return -1; }
+    if (len != needed) { *err = "length"; return -1; }
+    return 0;
+}
+
+void vtp_can_subscription_at(const uint8_t *b, uint8_t index,
+                             vtp_can_subscription_t *o) {
+    const uint8_t *e = b + VTP_CAN_LIST_PAGE_SIZE
+                     + (size_t)index * VTP_CAN_SUBSCRIPTION_SIZE;
+    o->handle = rd16(e + VTP_CAN_SUBSCRIPTION_OFF_HANDLE);
+    o->id     = rd32(e + VTP_CAN_SUBSCRIPTION_OFF_ID);
+    o->mask   = rd32(e + VTP_CAN_SUBSCRIPTION_OFF_MASK);
+    o->mode   = e[VTP_CAN_SUBSCRIPTION_OFF_MODE];
+    o->arg    = rd16(e + VTP_CAN_SUBSCRIPTION_OFF_ARG);
+}
+
 int vtp_phy_known(uint8_t p) {
     switch (p) {
         case VTP_PHY_LE_1M:

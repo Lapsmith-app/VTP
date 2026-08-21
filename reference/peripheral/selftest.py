@@ -84,6 +84,26 @@ def main():
     check(resp[:3] == bytes([dev.CAN_SUBSCRIBE, 0x42, dev.ST_OK]),
           "CAN_SUBSCRIBE was not accepted")
     check(resp[1] == 0x42, "control: the response MUST echo the request tag")
+    check(len(resp) == 5, "CAN_SUBSCRIBE MUST return a handle")
+    (handle,) = struct.unpack("<H", resp[3:])
+
+    # SPEC.md §9.2 — the same (id, mask) updates in place and keeps its handle.
+    again = device.handle_control(bytes([dev.CAN_SUBSCRIBE, 0x43])
+                                  + struct.pack("<IBH", 0x0C0,
+                                                dev.SUB_PERIODIC, 50))
+    check(struct.unpack("<H", again[3:])[0] == handle,
+          "re-subscribing the same id and mask MUST return the existing handle "
+          "rather than consuming a second slot")
+    page = vtp1.decode_can_list(
+        device.handle_control(bytes([dev.CAN_LIST, 9]) + struct.pack("<H", 0))[3:])
+    check(page["page"]["total"] == 1,
+          f"re-subscribing consumed a slot: table holds {page['page']['total']}")
+    check(page["entries"][0]["mode"] == dev.SUB_PERIODIC,
+          "re-subscribing MUST update mode in place")
+
+    # Put it back to every_frame for the streaming checks below.
+    device.handle_control(bytes([dev.CAN_SUBSCRIBE, 0x44])
+                          + struct.pack("<IBH", 0x0C0, dev.SUB_EVERY_FRAME, 0))
 
     # ---- Stream ---------------------------------------------------------
     emitted = run(device, clock, 6.0)
@@ -153,8 +173,33 @@ def main():
               "can: a frame appeared for an id that was never subscribed")
 
     # ---- Control changes behaviour, not just the reply ------------------
+    # SPEC.md §9.5 — the table is reported exactly as installed.
+    listing = device.handle_control(bytes([dev.CAN_LIST, 8])
+                                    + struct.pack("<H", 0))
+    check(listing[2] == dev.ST_OK, "CAN_LIST was refused")
+    table = vtp1.decode_can_list(listing[3:])
+    check(table["page"]["total"] == 1,
+          f"table should hold one subscription, holds {table['page']['total']}")
+    check(table["entries"][0]["handle"] == handle,
+          "CAN_LIST reports a different handle than the install returned")
+    check(table["entries"][0]["mask"] == 0x1FFFFFFF,
+          "CAN_SUBSCRIBE MUST be recorded as a mask of 0x1FFFFFFF")
+
+    # A start past the end is ok with count 0, never an error.
+    beyond = vtp1.decode_can_list(
+        device.handle_control(bytes([dev.CAN_LIST, 10])
+                              + struct.pack("<H", 99))[3:])
+    check(beyond["page"]["count"] == 0 and beyond["page"]["total"] == 1,
+          "CAN_LIST past the end MUST answer ok with count 0 and the true total")
+
+    # An unknown handle is refused, not silently ignored.
+    bad = device.handle_control(bytes([dev.CAN_UNSUBSCRIBE, 11])
+                                + struct.pack("<H", 0xBEEF))
+    check(bad[2] == dev.ST_UNKNOWN_HANDLE,
+          "unsubscribing an unknown handle MUST answer unknown_handle")
+
     device.handle_control(bytes([dev.CAN_UNSUBSCRIBE, 1])
-                          + struct.pack("<I", 0x0C0))
+                          + struct.pack("<H", handle))
     after = run(device, clock, 1.0)
     frames = [r for c, p in after if c == "can"
               for r in (decode(c, p) or {"records": []})["records"]]
@@ -185,6 +230,34 @@ def main():
         "peripheral_latency", "supervision_timeout", "phy_tx", "phy_rx"},
         "link_params: with no link attached every field MUST read absent, "
         "never as a guess")
+
+    # SPEC.md §9.3 — a frame matching several subscriptions is forwarded once,
+    # governed by the most specific mask.
+    device.handle_control(bytes([dev.CAN_RESET, 20]))
+    broad = device.handle_control(bytes([dev.CAN_SUBSCRIBE_MASK, 21])
+                                  + struct.pack("<IIBH", 0x0C0, 0x1FFFFF00,
+                                                dev.SUB_EVERY_FRAME, 0))
+    check(broad[2] == dev.ST_OK, "CAN_SUBSCRIBE_MASK was refused")
+    device.handle_control(bytes([dev.CAN_SUBSCRIBE, 22])
+                          + struct.pack("<IBH", 0x0C0, dev.SUB_EVERY_NTH, 3))
+    overlap = run(device, clock, 2.0)
+    got = [r for c, p in overlap if c == "can"
+           for r in (decode(c, p) or {"records": []})["records"]]
+    check(all(r["id"] == 0x0C0 for r in got),
+          "an id outside both subscriptions was forwarded")
+    ts = [r["t_device_us"] for r in got]
+    check(len(ts) == len(set(ts)),
+          "a frame was forwarded more than once: two subscriptions matched and "
+          "both emitted, which is indistinguishable from a bus fault")
+    check(len(got) > 0,
+          "no frames were forwarded while two overlapping subscriptions were "
+          "installed; the more specific one should govern, not silence the id")
+    # 0x0C0 arrives at 50 Hz, so 2 s is ~100 frames. The broad mask says
+    # every_frame and the exact id says every 3rd; §9.3 makes the exact one
+    # govern, so ~33 is right and ~100 means the wrong subscription won.
+    check(len(got) < 60,
+          f"{len(got)} frames in 2 s: the broad every_frame mask governed "
+          f"instead of the more specific every_nth subscription (SPEC.md §9.3)")
 
     resp = device.handle_control(bytes([0xEE, 6]))
     check(resp[2] == dev.ST_UNSUPPORTED,

@@ -187,6 +187,32 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     return VTP_INFO_SIZE;
 }
 
+int vtp_encode_can_list(const vtp_can_list_page_t *p,
+                        const vtp_can_subscription_t *entries,
+                        uint8_t *out, size_t cap) {
+    const size_t needed = (size_t)VTP_CAN_LIST_PAGE_SIZE
+                        + (size_t)p->count * VTP_CAN_SUBSCRIPTION_SIZE;
+    if (cap < needed) return -1;
+    if (p->count && !entries) return -1;
+    memset(out, 0, needed);
+
+    wr16(out + VTP_CAN_LIST_PAGE_OFF_TOTAL, p->total);
+    wr16(out + VTP_CAN_LIST_PAGE_OFF_INDEX, p->index);
+    out[VTP_CAN_LIST_PAGE_OFF_COUNT] = p->count;
+    out[VTP_CAN_LIST_PAGE_OFF_RESERVED] = p->reserved;
+
+    for (uint8_t i = 0; i < p->count; i++) {
+        uint8_t *e = out + VTP_CAN_LIST_PAGE_SIZE
+                   + (size_t)i * VTP_CAN_SUBSCRIPTION_SIZE;
+        wr16(e + VTP_CAN_SUBSCRIPTION_OFF_HANDLE, entries[i].handle);
+        wr32(e + VTP_CAN_SUBSCRIPTION_OFF_ID, entries[i].id);
+        wr32(e + VTP_CAN_SUBSCRIPTION_OFF_MASK, entries[i].mask);
+        e[VTP_CAN_SUBSCRIPTION_OFF_MODE] = entries[i].mode;
+        wr16(e + VTP_CAN_SUBSCRIPTION_OFF_ARG, entries[i].arg);
+    }
+    return (int)needed;
+}
+
 int vtp_encode_link_params(const vtp_link_params_t *l, uint8_t *out, size_t cap) {
     if (cap < VTP_LINK_PARAMS_SIZE) return -1;
     memset(out, 0, VTP_LINK_PARAMS_SIZE);
