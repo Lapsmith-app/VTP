@@ -51,6 +51,14 @@ CHAR = UUIDS["characteristics"]
 
 log = logging.getLogger("vtp.peripheral")
 
+# Launched through LaunchServices there is no terminal to write to, so the log
+# goes somewhere findable instead of nowhere.
+LOG_FILE = "/tmp/vtp-peripheral.log"
+
+
+def _in_app_bundle():
+    return "/Contents/MacOS/" in sys.executable
+
 
 class Peripheral:
     def __init__(self, device, name="VTP Logger"):
@@ -87,16 +95,20 @@ class Peripheral:
     # -- lifecycle --------------------------------------------------------
 
     async def start(self):
-        # On macOS a command-line process that has not been granted Bluetooth
-        # permission is TERMINATED when it creates a CBPeripheralManager --
-        # killed outright, with no exception to catch and nothing on stderr.
-        # Say so before it can happen, because the silent death is otherwise
-        # indistinguishable from a hang.
-        if sys.platform == "darwin":
-            log.info("creating the peripheral manager; if this process dies "
-                     "here with no output, grant Bluetooth access to your "
-                     "terminal in System Settings > Privacy & Security > "
-                     "Bluetooth, then run it again")
+        # macOS TERMINATES any process that creates a CBPeripheralManager
+        # without an NSBluetoothAlwaysUsageDescription in its Info.plist --
+        # killed outright, no exception to catch, nothing on stderr. It is not
+        # a permission that can be granted after the fact: the process dies
+        # before it can ask, so it never appears in System Settings, and that
+        # pane has no way to add one by hand. Run it from the bundle that
+        # make_macos_app.sh builds, via `open`, and note that exec'ing the
+        # bundle's binary directly fails identically -- a directly-launched
+        # Mach-O uses its embedded __info_plist section, not the file.
+        if sys.platform == "darwin" and not _in_app_bundle():
+            log.error("not running from an app bundle: macOS will kill this "
+                      "process when it creates the peripheral manager")
+            log.error("build one with reference/peripheral/make_macos_app.sh, "
+                      "then: open -a VTPPeripheral.app --args serve.py")
         self.server = BlessServer(name=self.name)
         self.server.read_request_func = self.read_request
         self.server.write_request_func = self.write_request
@@ -110,13 +122,17 @@ class Peripheral:
         readable = GATTAttributePermissions.readable
         writeable = GATTAttributePermissions.writeable
 
+        # CoreBluetooth: "Characteristics with cached values must be
+        # read-only". Only Info may carry an initial value; anything
+        # notifiable or writable must be created with None, or addService_
+        # raises NSInternalInconsistencyException.
         await self.server.add_new_characteristic(
             SERVICE, CHAR["info"], read, self.device.info(), readable)
         for name in ("gps", "can", "imu"):
             await self.server.add_new_characteristic(
-                SERVICE, CHAR[name], notify, b"", readable)
+                SERVICE, CHAR[name], notify, None, readable)
         await self.server.add_new_characteristic(
-            SERVICE, CHAR["control"], write | indicate, b"",
+            SERVICE, CHAR["control"], write | indicate, None,
             readable | writeable)
 
         await self.server.start()
@@ -143,20 +159,35 @@ class Peripheral:
 
 
 async def main_async(args):
+    handlers = [logging.StreamHandler()]
+    if not sys.stdout.isatty():
+        handlers.append(logging.FileHandler(LOG_FILE, mode="w"))
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        handlers=handlers)
+    if not sys.stdout.isatty():
+        log.info("logging to %s", LOG_FILE)
 
     device = dev.VtpDevice(mtu=args.mtu, gps_hz=args.gps_hz,
                            imu_hz=args.imu_hz)
     peripheral = Peripheral(device, name=args.name)
-    await peripheral.start()
+    # Launched through LaunchServices there is no stderr, so an unhandled
+    # exception would vanish and look exactly like a silent exit. Everything
+    # goes to the log file instead.
     try:
+        await peripheral.start()
         await peripheral.run()
     except asyncio.CancelledError:
         pass
+    except Exception:
+        log.exception("the peripheral stopped with an error")
+        raise
     finally:
-        await peripheral.stop()
+        try:
+            await peripheral.stop()
+        except Exception:
+            log.exception("error while stopping")
         log.info("stopped")
 
 
@@ -174,6 +205,9 @@ def main():
         asyncio.run(main_async(args))
     except KeyboardInterrupt:
         pass
+    except Exception:
+        logging.getLogger("vtp.peripheral").exception("fatal")
+        return 1
     return 0
 
 

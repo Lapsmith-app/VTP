@@ -5,10 +5,18 @@ adapter and streams GPS, CAN and IMU from one monotonic clock, so a client can
 be developed and demonstrated before any firmware exists.
 
 ```sh
-pip install bless
-python3 serve.py                  # present it over Bluetooth
-python3 selftest.py               # verify it without any Bluetooth at all
+python3 selftest.py               # verify the device; needs no Bluetooth at all
+
+./make_macos_app.sh               # macOS: build a bundle that can hold the
+open "$PWD/VTPPeripheral.app" \   #        Bluetooth permission (see below)
+     --args "$PWD/serve.py"
+tail -f /tmp/vtp-peripheral.log
+
+pip install bless && python3 serve.py     # Linux
 ```
+
+Confirmed working: it advertises the VTP/1 service UUID as `VTP Logger` and
+streams GPS, CAN and IMU notifications.
 
 ## Two layers, deliberately
 
@@ -52,10 +60,29 @@ must read Info to learn its capabilities — which §3.3 requires regardless,
 Service Data being advisory. It is the one part of the specification a Mac
 cannot exercise.
 
-macOS also **terminates** a command-line process that creates a
-`CBPeripheralManager` without a Bluetooth permission grant — killed outright,
-no exception, no stderr, indistinguishable from a hang. Grant Bluetooth access
-to your terminal under System Settings → Privacy & Security → Bluetooth.
+macOS also **terminates** any process that creates a `CBPeripheralManager`
+without an `NSBluetoothAlwaysUsageDescription` in its `Info.plist` — killed
+outright, no exception, no stderr, indistinguishable from a hang. This is *not*
+a permission you can grant: the process dies before it can ask, so it never
+appears in System Settings → Privacy & Security → Bluetooth, and that pane has
+no way to add one by hand.
+
+`make_macos_app.sh` builds a bundle that works. Four things have to be true and
+each one fails with the **same misleading message**, so the script documents
+each at the point that causes it:
+
+1. A **non-framework** Python. Homebrew's and Apple's are framework builds, so
+   the process identifies as `org.python.python` and the wrapper's `Info.plist`
+   is ignored entirely. `uv`'s standalone interpreters adopt their bundle.
+2. A **self-contained** bundle — interpreter, stdlib and dependencies inside it.
+3. Launched with **`open`**. A binary exec'd directly reads the Mach-O's
+   embedded `__info_plist` section rather than the file, so a correct bundle
+   still dies. (`open <path>`, not `open -a <path>`; the `-a` form wants an
+   application name.)
+4. A **plain foreground app** — neither `LSBackgroundOnly` nor `LSUIElement`. An
+   app that cannot put a window on screen cannot show the prompt either, and
+   macOS reports that as "no usage description" rather than "cannot be
+   prompted". It costs a Dock icon while running.
 
 **Linux.** BlueZ advertises arbitrary Service Data, so §3.3 is reachable, and
 `btmgmt` can set the connection parameters and PHY that §2.1–§2.3 ask for and
@@ -64,6 +91,22 @@ adapter is a better rig than a Pi and considerably cheaper.
 
 **Windows.** WinRT's `GattServiceProvider` is workable but the least tested of
 the three here.
+
+## What running it revealed
+
+Two bugs the selftest could not reach, which is the argument for doing this at
+all rather than trusting a device model:
+
+- CoreBluetooth rejects a notify or write characteristic created with an
+  initial value: *"Characteristics with cached values must be read-only"*.
+  Only Info may carry one.
+- `serve.py` swallowed its own exceptions. Under `open` there is no stderr, so
+  every failure looked like a silent exit. It logs tracebacks to the file now,
+  which is how the above was diagnosed.
+
+bless also warns that the local name may be truncated because the service UUID
+fills the advertisement. Harmless — a client matches on the service UUID — but
+it is a live demonstration of why §3.3's Service Data does not fit here.
 
 ## What building this revealed about the Control plane
 
