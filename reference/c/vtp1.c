@@ -24,7 +24,7 @@ int vtp_fix_type_known(uint8_t t) {
         case VTP_FIX_TYPE_TIME_ONLY:
             return 1;
         default:
-            return 0;   /* A future minor's value. Stays unknown. SPEC.md §11.3 */
+            return 0;   /* A future minor's value. Stays unknown. SPEC.md §11.4 */
     }
 }
 
@@ -201,7 +201,7 @@ int vtp_sub_mode_known(uint8_t m) {
         case VTP_SUB_MODE_EVERY_NTH:
             return 1;
         default:
-            return 0;   /* A later minor's mode. Stays unknown. SPEC.md §11.3 */
+            return 0;   /* A later minor's mode. Stays unknown. SPEC.md §11.4 */
     }
 }
 

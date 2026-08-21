@@ -263,6 +263,26 @@ def spec_tables(schema):
                      f"{resp} | {op.get('desc', '—')} |")
     out["control"] = "\n".join(lines)
 
+    # Which records carry an extension trailer, straight from the schema, so
+    # SPEC.md cannot claim a record is extensible when the codecs disagree --
+    # the exact failure the old "new fields go in extension records" wording
+    # produced for eight of nine records.
+    lines = ["| Record | Extensible | Appears |", "| --- | --- | --- |"]
+    FREQ = {"info": "Once per connection",
+            "gps_fix": "One per notification",
+            "can_header": "One per notification",
+            "can_record": "Up to 4000 per second",
+            "imu_header": "One per notification",
+            "imu_sample": "Up to 833 per second",
+            "can_list_page": "One per CAN_LIST page",
+            "can_subscription": "One per table entry",
+            "link_params": "On request"}
+    for name, rec in schema["records"].items():
+        mark = ("**Yes** — `ext_count` trailer (§5.5)" if rec.get("extensible")
+                else "No — closed for major version 1")
+        lines.append(f"| `{name}` | {mark} | {FREQ.get(name, '—')} |")
+    out["extensibility"] = "\n".join(lines)
+
     uu = json.loads(UUIDS.read_text())
 
     # Derived from the allocation itself: hand-written hex in prose is exactly
@@ -405,7 +425,7 @@ def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=Non
     # Derived assertions the schema cannot express as a field, but which the
     # specification states as a requirement. Without these the corpus checks
     # only what a field holds, never what a decoder must CONCLUDE from it --
-    # and SPEC.md 11.3's "an unknown enum value MUST stay unknown" is exactly
+    # and SPEC.md 11.4's "an unknown enum value MUST stay unknown" is exactly
     # such a conclusion. It went unasserted in the first version of this
     # corpus, so all three reference decoders could have coerced an unknown
     # fix_type to 3D and still passed.

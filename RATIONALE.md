@@ -354,7 +354,76 @@ answer to the same problem was `CAN_LIST` reading real state back, not another
 bit. `control` already tells a client whether there is a control channel at all,
 which is the part worth knowing before connecting.
 
-## 5. What VTP/1 costs
+## 5. Why most records are closed
+
+Only `gps_fix` carries an extension trailer. Every other record is fixed for the
+life of major version 1, and SPEC.md §11.3 says so rather than promising otherwise.
+
+### 5.1 The decision could not be deferred
+
+A conforming receiver rejects a payload whose length it does not expect. That
+rule is what makes "malformed is rejected whole" mean anything, and it has a
+consequence that is easy to miss: a trailer introduced in a later minor is
+rejected by every client already deployed. The first device to send one simply
+stops working with the installed base.
+
+So extensibility is not a thing a protocol can add when it turns out to need it.
+It is decided before the first release or it is decided against. Recognising
+that is most of the answer, because it converts an open-ended "should we allow
+for the future" into a concrete question with a price attached.
+
+### 5.2 The price is paid per appearance
+
+A trailer costs one byte on the record that carries it, and records appear at
+wildly different rates. On `info`, read once per connection, a byte is free. On
+`can_record` at 4000 frames per second it is 4 kB/s — on the one stream §4.1
+identifies as able to saturate a link, and the identical arithmetic that kept
+BRS and ESI out of the specification in the first place.
+
+There is no consistent answer that is also cheap. Extending everything
+contradicts §4.1; extending nothing is uniform and costs nothing; extending only
+the cheap records is defensible but buys a narrower kind of optionality than it
+first appears, for reasons that follow.
+
+### 5.3 Three mechanisms already exist
+
+The argument for trailers assumes there is otherwise no way to add anything.
+That is not the case:
+
+- `gps_fix` — the record most likely to want new fields, and the one where
+  RTK detail and further accuracy metrics would land — already has a trailer.
+- Reserved bits and bytes absorb flags and small values: 24 spare capability
+  bits, 20 spare GPS validity bits, two spare bytes in each batch header.
+- **Control opcodes are not fixed-size records.** A minor version may add as
+  many as it likes with any payload it likes. Anything a client can *ask* for
+  is already extensible without limit.
+
+That last one does more work than it looks. Multi-bus CAN, a sensor mounting
+rotation, further device capacities — each is something a client requests
+rather than something the device pushes, and each can arrive as a new opcode.
+What none of the three covers is a new field *pushed alongside streaming data*
+on a record other than `gps_fix`, and it is genuinely hard to name one that
+matters and is not per-frame.
+
+### 5.4 What this costs
+
+Stated plainly, because §5.1 makes it irreversible:
+
+- A magnetometer triple, a remote frame's requested length, and CAN FD's BRS
+  and ESI are VTP/2 changes. All three are per-item, so no affordable trailer
+  scheme would have rescued them anyway.
+- A pushed batch-level field beyond the two reserved bytes in each header is a
+  VTP/2 change. This is the real exposure, and it is a bet that two bytes and a
+  control channel are enough.
+- A VTP/2 means a new service UUID, so a device speaking it is invisible to
+  VTP/1 clients that do not also scan for it (SPEC.md §11.1). That is the mechanism
+  working as designed, but it is not free.
+
+The alternative was four new extension mechanisms to specify, test and
+implement twice over, against a need nobody has yet articulated, in a
+repository whose own list of costs already names "more surface to get wrong".
+
+## 6. What VTP/1 costs
 
 Stating these plainly, because a rationale that only lists benefits is marketing:
 

@@ -33,7 +33,7 @@ and a high-priority one.
 
 ### What will be refused
 
-Within major version 1, the prohibitions in SPEC.md §11.3 are absolute:
+Within major version 1, the prohibitions in SPEC.md §11.4 are absolute:
 
 - Changing the meaning, units or scale of an existing field.
 - Changing the size, offset or type of an existing field.
@@ -92,7 +92,7 @@ a new opcode, a new extension type, a newly assigned reserved bit — requires
    header), and
 2. a minor bump of the specification version.
 
-A change that SPEC.md §11.3 prohibits is not a minor version in either sense.
+A change that SPEC.md §11.4 prohibits is not a minor version in either sense.
 It requires a new service UUID and a new schema — see "What will be refused"
 above.
 
