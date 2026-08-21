@@ -106,9 +106,18 @@ def main():
                 # set so an implementation that resolves absence differently
                 # (null, a sentinel-free optional, an omitted key) still proves
                 # it honours the bitmask rather than the payload.
-                if "expect_absent" in case and "absent" in got:
-                    absent_checked[0] += 1
-                    want, have = set(case["expect_absent"]), set(got["absent"])
+                if "expect_absent" in case:
+                    if "absent" not in got:
+                        # Reporting absence IS the protocol's central rule
+                        # (SPEC.md §1.1). An implementation that omits it has
+                        # not demonstrated the one thing this corpus exists to
+                        # prove, so this is a failure and not a skip.
+                        problems.append(
+                            "no `absent` list reported, so the central rule of "
+                            "the protocol is untested for this case")
+                    else:
+                        absent_checked[0] += 1
+                    want, have = set(case["expect_absent"]), set(got.get("absent", []))
                     for field in sorted(want - have):
                         problems.append(
                             f"{field}: validity bit is clear, so it MUST be "

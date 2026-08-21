@@ -419,12 +419,12 @@ Total: **12 bytes**. All fields little-endian.
 
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | 2 | `i16` | `ax` | `mg`; milli-g |
-| 2 | 2 | `i16` | `ay` | `mg` |
-| 4 | 2 | `i16` | `az` | `mg` |
-| 6 | 2 | `i16` | `gx` | `deg/s`; scale 0.05 |
-| 8 | 2 | `i16` | `gy` | `deg/s`; scale 0.05 |
-| 10 | 2 | `i16` | `gz` | `deg/s`; scale 0.05 |
+| 0 | 2 | `i16` | `ax` | `mg`; present when `imu_header.flags` bit 0 (`accel`) is set; milli-g |
+| 2 | 2 | `i16` | `ay` | `mg`; present when `imu_header.flags` bit 0 (`accel`) is set |
+| 4 | 2 | `i16` | `az` | `mg`; present when `imu_header.flags` bit 0 (`accel`) is set |
+| 6 | 2 | `i16` | `gx` | `deg/s`; scale 0.05; present when `imu_header.flags` bit 1 (`gyro`) is set |
+| 8 | 2 | `i16` | `gy` | `deg/s`; scale 0.05; present when `imu_header.flags` bit 1 (`gyro`) is set |
+| 10 | 2 | `i16` | `gz` | `deg/s`; scale 0.05; present when `imu_header.flags` bit 1 (`gyro`) is set |
 <!-- END GENERATED: imu_sample -->
 
 Samples are evenly spaced: sample *i* is at `t_base + i × period` microseconds.

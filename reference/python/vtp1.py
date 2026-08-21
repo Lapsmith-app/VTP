@@ -120,10 +120,20 @@ def decode_imu_batch(buf):
     if len(buf) != hsz + hdr["count"] * ssz:
         raise Reject("length")
 
+    # SPEC.md §7 — a sensor group whose presence flag is clear is ABSENT, not a
+    # measurement of zero. Derived from the schema's `presence` declaration, so
+    # a group added in a later minor is covered without editing this.
+    rec = SCHEMA["records"]["imu_sample"]
+    pres = rec["presence"]
+    absent = sorted(f["name"] for f in rec["fields"]
+                    if f.get("presence_bit") is not None
+                    and not (hdr[pres["field"]] & (1 << pres["bits"][f["presence_bit"]])))
+
     samples = []
     for i in range(hdr["count"]):
         s = _unpack("imu_sample", buf, hsz + i * ssz)
         s["t_device_us"] = hdr["t_base"] + i * hdr["period"]
+        s["absent"] = absent
         samples.append(s)
     return {"header": hdr, "samples": samples}
 

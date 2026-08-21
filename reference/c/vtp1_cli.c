@@ -97,6 +97,29 @@ static void put_link_absent(const vtp_link_params_t *l) {
     printf("]");
 }
 
+/* SPEC.md §7 — a sensor group whose presence flag is clear is ABSENT, not a
+ * measurement of zero. The decoder carries raw values and leaves this to the
+ * caller, exactly as it does for gps_fix, so the harness reports what an
+ * application built on it would be required to treat as absent. */
+static void put_imu_absent(uint8_t flags) {
+    static const char *ACCEL[] = {"ax", "ay", "az"};
+    static const char *GYRO[] = {"gx", "gy", "gz"};
+    printf(",\"absent\":[");
+    int first = 1;
+    /* Emitted in sorted order so it compares equal to the vector's list. */
+    for (size_t i = 0; i < 3; i++) {
+        if (flags & VTP_IMU_HAS_ACCEL) break;
+        printf("%s\"%s\"", first ? "" : ",", ACCEL[i]);
+        first = 0;
+    }
+    for (size_t i = 0; i < 3; i++) {
+        if (flags & VTP_IMU_HAS_GYRO) break;
+        printf("%s\"%s\"", first ? "" : ",", GYRO[i]);
+        first = 0;
+    }
+    printf("]");
+}
+
 static void put_hex(const uint8_t *p, size_t n) {
     for (size_t i = 0; i < n; i++) printf("%02x", p[i]);
 }
@@ -193,9 +216,11 @@ int main(void) {
             for (uint8_t i = 0; i < h.count; i++) {
                 const vtp_imu_sample_t *s = &samples[i];
                 printf("%s{\"ax\":%d,\"ay\":%d,\"az\":%d,\"gx\":%d,\"gy\":%d,\"gz\":%d,"
-                       "\"t_device_us\":%" PRIu64 "}",
+                       "\"t_device_us\":%" PRIu64,
                        i ? "," : "", s->ax, s->ay, s->az, s->gx, s->gy, s->gz,
                        s->t_device);
+                put_imu_absent(h.flags);
+                printf("}");
             }
             printf("]");
             finish(enc, vtp_encode_imu_batch(&h, samples, enc, sizeof enc));

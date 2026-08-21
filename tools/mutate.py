@@ -18,12 +18,17 @@ review:
 
 Operators:
 
-  gate    Drop one encoder validity gate. Catches "the encoder does not enforce
-          SPEC.md §5.1", which only a non-canonical vector can detect.
-  offset  Read one decoder field from a sibling field's offset. Catches a
-          corpus whose vectors never distinguish two same-sized fields.
-  length  Relax one exact-length check to accept trailing bytes. Catches
-          "a malformed payload is rejected whole", SPEC.md §1.1.
+  gate      Drop one encoder validity gate. Catches "the encoder does not
+            enforce SPEC.md §5.1", which only a non-canonical vector detects.
+  presence  Drop one ternary presence gate (SPEC.md §7). Added after the gate
+            operator's textual pattern was found to miss the IMU gating
+            entirely, leaving two unprotected gates unreported.
+  offset    Read one decoder field from a sibling field's offset. Catches a
+            corpus whose vectors never distinguish two same-sized fields.
+  length    Relax one exact-length check to accept trailing bytes. Catches
+            "a malformed payload is rejected whole", SPEC.md §1.1.
+  bound     Disable a range check such as `len > 64`. A corpus cannot reach
+            these by construction, so only a must-reject vector tests them.
 
 Usage:
   python3 tools/mutate.py             sweep every operator, exit 1 on a survivor
@@ -125,6 +130,40 @@ def op_offset():
                    f"{siblings[0]['name']}'s offset", DECODER, mutated)
 
 
+def op_presence():
+    """Drop a ternary presence gate, e.g. `accel ? (uint16_t)s->ax : 0`.
+
+    The gate operator above only recognises gate32()/gate64() calls, so the
+    IMU gating -- written as a ternary -- was invisible to it and two
+    unprotected presence gates went unreported until an external review found
+    them. Operators written by hand are incomplete in the same way a corpus
+    is; tools/check_corpus.py exists because of this.
+    """
+    text = (CDIR / ENCODER).read_text()
+    pattern = re.compile(r"(\w+)\s*\?\s*(\([a-z0-9_]+_t\)\s*[\w>.-]+)\s*:\s*0")
+    for m in reversed(list(pattern.finditer(text))):
+        flag, value = m.group(1), m.group(2)
+        mutated = text[:m.start()] + value + text[m.end():]
+        line = text[:m.start()].count("\n") + 1
+        yield (f"encoder drops the '{flag}' presence gate ({ENCODER}:{line})",
+               ENCODER, mutated)
+
+
+def op_bound():
+    """Disable a range check, e.g. `if (plen > 64)`.
+
+    A corpus cannot reach these by construction -- every legal vector is in
+    range -- so only a hand-written must-reject vector tests them, and only a
+    mutation reveals when there isn't one.
+    """
+    text = (CDIR / DECODER).read_text()
+    for m in reversed(list(re.finditer(r"if \((\w+) > (\d+)\)", text))):
+        mutated = text[:m.start()] + "if (0)" + text[m.end():]
+        line = text[:m.start()].count("\n") + 1
+        yield (f"decoder drops the {m.group(1)} > {m.group(2)} bound "
+               f"({DECODER}:{line})", DECODER, mutated)
+
+
 def op_length():
     """Relax an exact-length check so trailing bytes are accepted."""
     text = (CDIR / DECODER).read_text()
@@ -135,7 +174,8 @@ def op_length():
                DECODER, mutated)
 
 
-OPERATORS = {"gate": op_gate, "offset": op_offset, "length": op_length}
+OPERATORS = {"gate": op_gate, "presence": op_presence,
+             "offset": op_offset, "length": op_length, "bound": op_bound}
 
 
 def run_case(label, filename, mutated, workdir):

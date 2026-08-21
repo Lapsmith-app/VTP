@@ -24,7 +24,8 @@
             "gx": 0,
             "gy": 0,
             "gz": 0,
-            "t_device_us": 2000000
+            "t_device_us": 2000000,
+            "absent": []
           },
           {
             "ax": 2,
@@ -33,7 +34,8 @@
             "gx": 1,
             "gy": 0,
             "gz": -1,
-            "t_device_us": 2005000
+            "t_device_us": 2005000,
+            "absent": []
           }
         ]
       },
@@ -61,7 +63,8 @@
             "gx": -20,
             "gy": 15,
             "gz": 1200,
-            "t_device_us": 4000000
+            "t_device_us": 4000000,
+            "absent": []
           },
           {
             "ax": -180,
@@ -70,7 +73,8 @@
             "gx": -25,
             "gy": 18,
             "gz": 1310,
-            "t_device_us": 4001200
+            "t_device_us": 4001200,
+            "absent": []
           }
         ]
       },
@@ -98,10 +102,56 @@
             "gx": 32767,
             "gy": -32768,
             "gz": 32767,
-            "t_device_us": 6000000
+            "t_device_us": 6000000,
+            "absent": []
           }
         ]
       }
+    },
+    {
+      "name": "stale-values-behind-cleared-flags",
+      "desc": "flags clears both accel and gyro, but every sample byte still carries the previous reading. A decoder MUST report all six fields absent on the strength of the flags alone, and MUST NOT read 1 g and 60 deg/s out of them.",
+      "record": "imu_batch",
+      "hex": "06000000001bb70000000000881301006affd403f203ecff0f00b004",
+      "expect": {
+        "header": {
+          "seq": 6,
+          "dropped": 0,
+          "t_base": 12000000,
+          "period": 5000,
+          "count": 1,
+          "flags": 0
+        },
+        "samples": [
+          {
+            "ax": -150,
+            "ay": 980,
+            "az": 1010,
+            "gx": -20,
+            "gy": 15,
+            "gz": 1200,
+            "t_device_us": 12000000,
+            "absent": [
+              "ax",
+              "ay",
+              "az",
+              "gx",
+              "gy",
+              "gz"
+            ]
+          }
+        ]
+      },
+      "canonical": false,
+      "expect_roundtrip_hex": "06000000001bb7000000000088130100000000000000000000000000",
+      "note": "The only vector that exercises the IMU presence gates. Every other case either sets the flag or has zeroes behind the cleared one, so removing the gate changed nothing and the whole corpus still passed. Found by tools/check_corpus.py."
+    },
+    {
+      "name": "short-payload",
+      "desc": "15 bytes: shorter than the batch header itself. MUST be rejected rather than read past the end.",
+      "record": "imu_batch",
+      "hex": "070000000100000000000000881300",
+      "must_reject": "length"
     },
     {
       "name": "long-payload",
@@ -132,7 +182,12 @@
             "gx": 0,
             "gy": 0,
             "gz": 0,
-            "t_device_us": 8000000
+            "t_device_us": 8000000,
+            "absent": [
+              "gx",
+              "gy",
+              "gz"
+            ]
           }
         ]
       }

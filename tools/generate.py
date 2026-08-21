@@ -26,6 +26,13 @@ UUIDS = ROOT / "schema" / "uuids.json"
 PACK = {"u8": "B", "i8": "b", "u16": "H", "i16": "h",
         "u32": "I", "i32": "i", "u64": "Q", "i64": "q"}
 
+# The width each type actually occupies on the wire. `size` in the schema is
+# checked against this rather than trusted: the two are consumed by different
+# code paths -- documentation reads `size`, encoding reads `type` -- so nothing
+# else in this generator would ever notice them disagreeing.
+WIDTH = {"u8": 1, "i8": 1, "u16": 2, "i16": 2,
+         "u32": 4, "i32": 4, "u64": 8, "i64": 8}
+
 _pending: list[tuple[pathlib.Path, str]] = []
 SCHEMA_ENUMS: dict = {}
 
@@ -52,6 +59,133 @@ def flush(check: bool) -> int:
 
 
 # --------------------------------------------------------------------------
+# schema validation
+# --------------------------------------------------------------------------
+
+def validate(schema):
+    """Structural invariants the schema must satisfy to mean anything.
+
+    Without these the "source of truth" can be internally incoherent and every
+    downstream check still passes: declaring gps_fix.lat as `size: 3, type:
+    i32` published a three-byte 32-bit integer in SPEC.md while both reference
+    implementations, the corpus and the mutation sweep stayed green, because
+    the tables read `size` and the codecs read `type` and nothing compared
+    them.
+    """
+    problems = []
+    enums, bitmasks = schema["enums"], schema["bitmasks"]
+
+    for name, en in enums.items():
+        values = [m["value"] for m in en["members"]]
+        if len(set(values)) != len(values):
+            problems.append(f"enum {name}: duplicate member values")
+        names = [m["name"] for m in en["members"]]
+        if len(set(names)) != len(names):
+            problems.append(f"enum {name}: duplicate member names")
+
+    for name, bm in bitmasks.items():
+        bits = [b["bit"] for b in bm["bits"]]
+        if len(set(bits)) != len(bits):
+            problems.append(f"bitmask {name}: duplicate bit positions")
+        limit = bm["width"] * 8
+        for b in bits:
+            if not 0 <= b < limit:
+                problems.append(
+                    f"bitmask {name}: bit {b} outside its {bm['width']}-byte width")
+        if "reserved_from" in bm and bits and bm["reserved_from"] <= max(bits):
+            problems.append(
+                f"bitmask {name}: reserved_from {bm['reserved_from']} collides "
+                f"with assigned bit {max(bits)}")
+
+    for name, rec in schema["records"].items():
+        fields = rec["fields"]
+
+        seen = [f["name"] for f in fields]
+        if len(set(seen)) != len(seen):
+            problems.append(f"record {name}: duplicate field names")
+
+        mask = rec.get("validity")
+        if mask and mask not in bitmasks:
+            problems.append(f"record {name}: unknown validity bitmask {mask!r}")
+        valid_names = {b["name"] for b in bitmasks.get(mask, {}).get("bits", [])}
+
+        for f in fields:
+            where = f"record {name}.{f['name']}"
+            if f["type"] not in WIDTH:
+                problems.append(f"{where}: unknown type {f['type']!r}")
+                continue
+            if f["size"] != WIDTH[f["type"]]:
+                problems.append(
+                    f"{where}: declared size {f['size']} but type {f['type']} "
+                    f"occupies {WIDTH[f['type']]} bytes")
+            if f.get("enum") and f["enum"] not in enums:
+                problems.append(f"{where}: unknown enum {f['enum']!r}")
+            if f.get("bitmask") and f["bitmask"] not in bitmasks:
+                problems.append(f"{where}: unknown bitmask {f['bitmask']!r}")
+            pb = f.get("presence_bit")
+            if pb is not None:
+                pres = rec.get("presence")
+                if not pres:
+                    problems.append(
+                        f"{where}: presence_bit {pb!r} but the record declares "
+                        f"no presence source")
+                elif pb not in pres["bits"]:
+                    problems.append(
+                        f"{where}: presence_bit {pb!r} is not declared in the "
+                        f"record's presence bits")
+            vb = f.get("valid_bit")
+            if vb is not None:
+                if not mask:
+                    problems.append(
+                        f"{where}: valid_bit {vb!r} but the record declares no "
+                        f"validity bitmask")
+                elif vb not in valid_names:
+                    problems.append(
+                        f"{where}: valid_bit {vb!r} is not a bit of {mask}")
+
+        pres = rec.get("presence")
+        if pres:
+            src = schema["records"].get(pres["record"])
+            if src is None:
+                problems.append(
+                    f"record {name}: presence names unknown record "
+                    f"{pres['record']!r}")
+            elif not any(g["name"] == pres["field"] for g in src["fields"]):
+                problems.append(
+                    f"record {name}: presence names unknown field "
+                    f"{pres['record']}.{pres['field']}")
+
+        # Layout: every byte of the record accounted for exactly once. A gap is
+        # an undeclared byte and an overlap is two fields sharing storage;
+        # both would encode without complaint.
+        cursor = 0
+        for f in sorted(fields, key=lambda g: g["offset"]):
+            if f["offset"] < cursor:
+                problems.append(
+                    f"record {name}.{f['name']}: offset {f['offset']} overlaps "
+                    f"the preceding field, which ends at {cursor}")
+            elif f["offset"] > cursor:
+                problems.append(
+                    f"record {name}: bytes {cursor}..{f['offset'] - 1} are not "
+                    f"covered by any field")
+            cursor = max(cursor, f["offset"] + f["size"])
+        if cursor != rec["size"]:
+            problems.append(
+                f"record {name}: fields cover {cursor} bytes but size is "
+                f"{rec['size']}")
+
+    opcodes = [o["value"] for o in schema["control"]["opcodes"]]
+    if len(set(opcodes)) != len(opcodes):
+        problems.append("control: duplicate opcode values")
+
+    if problems:
+        for p in problems:
+            print(f"SCHEMA: {p}", file=sys.stderr)
+        sys.exit(f"\nschema/vtp1.yaml is not internally consistent "
+                 f"({len(problems)} problem(s)).")
+
+
+# --------------------------------------------------------------------------
 # spec tables
 # --------------------------------------------------------------------------
 
@@ -74,6 +208,12 @@ def field_rows(schema, rec):
         vb = f.get("valid_bit")
         if vb is not None:
             notes.append(f"valid when `validity` bit {bit_of[vb]} (`{vb}`) is set")
+        pb = f.get("presence_bit")
+        if pb is not None:
+            pres = rec["presence"]
+            notes.append(
+                f"present when `{pres['record']}.{pres['field']}` bit "
+                f"{pres['bits'][pb]} (`{pb}`) is set")
         if f.get("desc"):
             notes.append(f["desc"])
         rows.append(f"| {f['offset']} | {f['size']} | `{f['type']}` | `{f['name']}` | "
@@ -443,6 +583,27 @@ def vectors(schema):
                   [can_rec(0, 0x1A0, bytes.fromhex("00"))],
                   [{"dt": 0, "id": 0x1A0, "extended": False, "fd": False, "rtr": False,
                     "len": 1, "payload": "00", "t_device_us": 13_000_000}]),
+        {"name": "len-above-maximum",
+         "desc": "A record declaring a 100-byte payload. `len` is 0..64 even for CAN "
+                 "FD, so the record is malformed and the batch MUST be rejected — not "
+                 "clamped, and not read as 100 bytes.",
+         "record": "can_batch",
+         "hex": (encode(schema, "can_header",
+                        dict(seq=10, dropped=0, t_base=1, count=1, flags=0))
+                 + struct.pack("<HIB", 0, 0x1A0, 100) + bytes(100)).hex(),
+         "must_reject": "bad-length",
+         "note": "The corpus cannot reach this rule by construction — every legal "
+                 "vector has len <= 64, so removing the bound check changed nothing "
+                 "and all 43 vectors still passed. Found by source mutation, which is "
+                 "why tools/mutate.py earns its place alongside "
+                 "tools/check_corpus.py."},
+        {"name": "short-payload",
+         "desc": "15 bytes: shorter than the batch header itself. MUST be rejected "
+                 "rather than read past the end.",
+         "record": "can_batch",
+         "hex": encode(schema, "can_header",
+                       dict(seq=9, dropped=0, t_base=1, count=0, flags=0))[:-1].hex(),
+         "must_reject": "length"},
         {"name": "count-exceeds-payload",
          "desc": "Header claims 4 records but only one is present. MUST be rejected.",
          "record": "can_batch",
@@ -461,18 +622,44 @@ def vectors(schema):
     ]
 
     # ---- IMU -------------------------------------------------------------
-    def imu_batch(name, desc, hdr, samples, **kw):
+    def imu_batch(name, desc, hdr, samples, *, canonical=True, **kw):
+        # SPEC.md 7: a sample group whose presence flag is clear MUST be zero on
+        # the wire and MUST be reported absent. Derived from the schema's
+        # `presence` declaration rather than restated here, so this stays true
+        # if a group is added.
+        rec = schema["records"]["imu_sample"]
+        pres = rec["presence"]
+        flags = hdr.get("flags", 0)
+        absent = sorted(f["name"] for f in rec["fields"]
+                        if f.get("presence_bit") is not None
+                        and not (flags & (1 << pres["bits"][f["presence_bit"]])))
+
+        def gate(s):
+            return {f["name"]: (0 if f["name"] in absent else s.get(f["name"], 0))
+                    for f in rec["fields"]}
+
+        gated = [gate(s) for s in samples]
+        # A canonical vector carries the gated bytes; a non-canonical one keeps
+        # the stale values, and its round-trip asserts the encoder normalises.
+        wire = gated if canonical else [dict(s) for s in samples]
+
         raw = encode(schema, "imu_header", hdr) + b"".join(
-            encode(schema, "imu_sample", s) for s in samples)
+            encode(schema, "imu_sample", s) for s in wire)
         exp = []
-        for i, s in enumerate(samples):
-            e = {f["name"]: s.get(f["name"], 0) for f in schema["records"]["imu_sample"]["fields"]}
+        for i, s in enumerate(wire):
+            e = {f["name"]: s.get(f["name"], 0) for f in rec["fields"]}
             e["t_device_us"] = hdr["t_base"] + i * hdr["period"]
+            e["absent"] = absent
             exp.append(e)
         c = {"name": name, "desc": desc, "record": "imu_batch", "hex": raw.hex(),
              "expect": {"header": {f["name"]: hdr.get(f["name"], 0)
                                    for f in schema["records"]["imu_header"]["fields"]},
                         "samples": exp}}
+        if not canonical:
+            c["canonical"] = False
+            c["expect_roundtrip_hex"] = (
+                encode(schema, "imu_header", hdr) + b"".join(
+                    encode(schema, "imu_sample", s) for s in gated)).hex()
         c.update(kw)
         return c
 
@@ -496,6 +683,26 @@ def vectors(schema):
                   "Extremes on every axis; catches signed 16-bit handling.",
                   dict(seq=3, dropped=0, t_base=6_000_000, period=5000, count=1, flags=0b011),
                   [dict(ax=-32768, ay=32767, az=-32768, gx=32767, gy=-32768, gz=32767)]),
+        imu_batch("stale-values-behind-cleared-flags",
+                  "flags clears both accel and gyro, but every sample byte still "
+                  "carries the previous reading. A decoder MUST report all six "
+                  "fields absent on the strength of the flags alone, and MUST NOT "
+                  "read 1 g and 60 deg/s out of them.",
+                  dict(seq=6, dropped=0, t_base=12_000_000, period=5000, count=1, flags=0),
+                  [dict(ax=-150, ay=980, az=1010, gx=-20, gy=15, gz=1200)],
+                  canonical=False,
+                  note="The only vector that exercises the IMU presence gates. Every "
+                       "other case either sets the flag or has zeroes behind the "
+                       "cleared one, so removing the gate changed nothing and the "
+                       "whole corpus still passed. Found by tools/check_corpus.py."),
+        {"name": "short-payload",
+         "desc": "15 bytes: shorter than the batch header itself. MUST be rejected "
+                 "rather than read past the end.",
+         "record": "imu_batch",
+         "hex": encode(schema, "imu_header",
+                       dict(seq=7, dropped=0, t_base=1, period=5000,
+                            count=0, flags=0b011))[:-1].hex(),
+         "must_reject": "length"},
         {"name": "long-payload",
          "desc": "One sample declared, one sample present, plus a trailing byte. The "
                  "length MUST equal the header plus count samples exactly.",
@@ -654,6 +861,7 @@ def main():
     args = ap.parse_args()
 
     schema = yaml.safe_load(SCHEMA.read_text())
+    validate(schema)
     global SCHEMA_ENUMS
     SCHEMA_ENUMS = {n: e["members"] for n, e in schema["enums"].items()}
     substitute(ROOT / "SPEC.md", spec_tables(schema))

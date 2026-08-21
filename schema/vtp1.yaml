@@ -191,13 +191,18 @@ records:
   imu_sample:
     size: 12
     desc: "Sensor-frame acceleration and rotation. Vehicle alignment is the client's job."
+    # A sample carries no mask of its own: presence is declared once per batch
+    # in imu_header.flags. Stating that here rather than in prose is what lets
+    # the encoder gating, the decoder's absent set and the corpus completeness
+    # check all derive it, instead of each reimplementing SPEC.md 7 by hand.
+    presence: {record: imu_header, field: flags, bits: {accel: 0, gyro: 1}}
     fields:
-      - {name: ax, offset: 0,  size: 2, type: i16, units: mg,     desc: "milli-g"}
-      - {name: ay, offset: 2,  size: 2, type: i16, units: mg}
-      - {name: az, offset: 4,  size: 2, type: i16, units: mg}
-      - {name: gx, offset: 6,  size: 2, type: i16, units: deg/s, scale: 0.05}
-      - {name: gy, offset: 8,  size: 2, type: i16, units: deg/s, scale: 0.05}
-      - {name: gz, offset: 10, size: 2, type: i16, units: deg/s, scale: 0.05}
+      - {name: ax, offset: 0,  size: 2, type: i16, units: mg,     desc: "milli-g", presence_bit: accel}
+      - {name: ay, offset: 2,  size: 2, type: i16, units: mg, presence_bit: accel}
+      - {name: az, offset: 4,  size: 2, type: i16, units: mg, presence_bit: accel}
+      - {name: gx, offset: 6,  size: 2, type: i16, units: deg/s, scale: 0.05, presence_bit: gyro}
+      - {name: gy, offset: 8,  size: 2, type: i16, units: deg/s, scale: 0.05, presence_bit: gyro}
+      - {name: gz, offset: 10, size: 2, type: i16, units: deg/s, scale: 0.05, presence_bit: gyro}
 
   link_params:
     access: control

@@ -9,6 +9,43 @@ conformance vector.
 ## [Unreleased]
 
 ### Added
+- `tools/check_corpus.py`: derives from the schema what a vector would have to
+  look like to exercise each rule, and fails when the corpus has none. It
+  complements `tools/mutate.py` rather than duplicating it — this finds rules no
+  vector exercises, that one finds code no rule reaches, and each caught holes
+  the other could not.
+- Structural validation of `schema/vtp1.yaml` inside `tools/generate.py`, so
+  generation refuses to run on an incoherent source of truth. Declaring
+  `gps_fix.lat` as `size: 3, type: i32` previously published a three-byte 32-bit
+  integer in SPEC.md while the corpus, both references and the mutation sweep
+  all stayed green: the tables read `size`, the codecs read `type`, and nothing
+  compared them. Now checked: type width against declared size, offset overlap
+  and gaps, field coverage against record size, duplicate names, values, bits
+  and opcodes, and every enum, bitmask, `valid_bit` and `presence_bit`
+  reference resolving.
+- `imu_sample` declares its presence bits in the schema (`presence:` and
+  `presence_bit:`) rather than only in prose, so the encoder gating, the
+  decoder's absent set, the generated spec table and the corpus completeness
+  check all derive from one statement of SPEC.md §7.
+- `presence` and `bound` mutation operators, covering ternary presence gates and
+  range checks such as `len > 64`. Neither was reachable by the existing textual
+  `gate32(` pattern.
+
+### Fixed
+- **Both reference decoders reported absent IMU sensor groups as a measurement
+  of zero**, contradicting SPEC.md §7 and the governing principle in §1.1. They
+  now report a per-sample `absent` set, and the corpus asserts it. Found by
+  external review.
+- The IMU presence gates were entirely untested: every vector either set the
+  flag or had zeroes behind a cleared one, so removing either gate changed no
+  bytes and all 43 vectors passed. The `len > 64` bound on a CAN record was
+  likewise unreachable by any legal vector. Both now have vectors.
+- `conformance/run.py` treated a missing `absent` list as "not exercised" and
+  still reported a pass. Reporting absence is the protocol's central rule, so
+  omitting it is now a failure rather than a silent skip.
+- `can_batch` and `imu_batch` had no must-reject vector shorter than their own
+  batch header.
+
 - Python reference encoder (`reference/python/vtp1_encode.py`), schema-driven
   like the decoder beside it and split into its own module for the same reason
   the C encoder is its own translation unit: a client needs only the decoder, a
@@ -43,7 +80,7 @@ rely on it.
   prefix that lets a client recognise an unsupported major version.
 - Machine-readable schema (`schema/vtp1.yaml`) as the source of truth, with
   generation of the spec tables, the C header and the conformance vectors.
-- Conformance corpus: 43 vectors across 5 record types, including must-reject
+- Conformance corpus: 47 vectors across 5 record types, including must-reject
   cases for truncated and over-long payloads.
 - C99 reference decoder and encoder, no dependencies, separate translation
   units so a client links only the decoder and a device only the encoder.
