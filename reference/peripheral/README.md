@@ -1,22 +1,141 @@
 # Software peripheral
 
-A synthetic VTP/1 device. It presents the GATT service over a host Bluetooth
-adapter and streams GPS, CAN and IMU from one monotonic clock, so a client can
-be developed and demonstrated before any firmware exists.
+A synthetic VTP/1 device: it presents the GATT service over a host Bluetooth
+adapter and streams GPS, CAN, IMU and Monitor from one monotonic clock, so a
+client can be built and demonstrated before any firmware exists.
+
+It advertises as **`VTP`** on service `56545001-5f05-5b56-af87-dcab2baf2522`.
+
+---
+
+## Running it
+
+### macOS
+
+macOS will not let an ordinary process advertise, so the interpreter has to be
+wrapped in an app bundle. Build it **once**:
 
 ```sh
-python3 selftest.py               # verify the device; needs no Bluetooth at all
-
-./make_macos_app.sh               # macOS: build a bundle that can hold the
-open "$PWD/VTPPeripheral.app" \   #        Bluetooth permission (see below)
-     --args "$PWD/serve.py"
-tail -f /tmp/vtp-peripheral.log
-
-pip install bless && python3 serve.py     # Linux
+./make_macos_app.sh
 ```
 
-Confirmed working: it advertises the VTP/1 service UUID as `VTP Logger` and
-streams GPS, CAN and IMU notifications.
+Then run it. Note `open -n` and not plain `open`: without `-n`, macOS activates
+an already-running copy and **silently discards your arguments**.
+
+```sh
+# with the debug panel — costs ~30% of notification throughput, see below
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py"
+
+# headless — full throughput, use this when measuring anything
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display
+
+tail -f /tmp/vtp-peripheral.log
+```
+
+Stop it with `pkill -f VTPPeripheral`, or by closing the window.
+
+**Do not rebuild the bundle unless you have to.** It contains only the
+interpreter — `serve.py`, `vtp_device.py` and `display.py` are read from the
+repository at run time, so editing them needs no rebuild. Re-signing changes the
+bundle's code signature, macOS treats it as a different app, and the Bluetooth
+permission has to be granted again.
+
+### Linux
+
+```sh
+pip install bless
+python3 serve.py                  # add --no-display for headless
+```
+
+### Without any Bluetooth at all
+
+```sh
+python3 selftest.py               # verifies the device against the reference decoder
+python3 display.py                # the panel alone, with fake data
+```
+
+---
+
+## The panel costs about 30% of throughput
+
+Measured, on a connected client:
+
+| | loop blocked | notifications delivered |
+| --- | --- | --- |
+| `--no-display` | 0 | **~24/s, 96% of what the device produces** |
+| panel open | 140–320 ms/s | **~15/s, around 70%** |
+
+`root.update()` takes 15–30 ms per call and the peripheral cannot send while it
+runs, so the panel costs roughly what it blocks. The drawing is not the
+expensive part — repainting every value measures 0.6 ms — and lowering the
+refresh rate makes it *worse*, because Tk's work is per unit time rather than
+per paint and a slower rate batches it into fewer, longer stalls.
+
+**Use `--no-display` for anything where throughput or loss matters.** Keep the
+panel for watching a client work, where 15/s is ample. The status line reports
+the panel's own cost every ten seconds so the trade stays visible.
+
+---
+
+## Checking it works
+
+The log prints a status line every ten seconds:
+
+```
+sent gps=686 can=692 imu=380 | refused gps=21 can=11 imu=25 |
+no-subscriber gps=165 can=0 imu=95 | CAN ids=3 |
+notify-subscribed: can, control, gps, imu
+```
+
+- **`notify-subscribed`** — which characteristics the client has enabled
+  notifications on. The single most useful field: a client can install CAN ids
+  through the control channel and never subscribe to the CAN characteristic,
+  and the device then produces batches that go nowhere. That looks exactly like
+  a decode bug from the client side. The log warns when it sees that state.
+- **`refused`** — a subscriber exists and the transport still rejected the
+  notification. Real loss, counted into `dropped` per SPEC.md §8.3.
+- **`no-subscriber`** — produced for a characteristic nobody subscribed to.
+  Not loss; nobody asked for it.
+- **`CAN ids`** — subscriptions installed by `CAN_SUBSCRIBE`.
+
+Control requests are logged individually by name with their parameters and the
+status returned, so a client's whole conversation is visible.
+
+---
+
+## Configuring a client against the test bus
+
+The bus carries three identifiers, 11-bit standard addressing, little-endian.
+There is no bus bit rate: VTP/1 does not carry one, and this device has no
+transceiver. Full layouts are under
+[The synthetic CAN bus](#the-synthetic-can-bus) below.
+
+A client must send `CAN_SUBSCRIBE` for each id before any CAN arrives — the
+table is empty on every connection (SPEC.md §9.2).
+
+As a worked example, in LapSmith's pasted-channel format:
+
+```
+# name, unit, canId, equation
+Engine Speed, rpm, 0x0C0, bytesToUIntLe(raw, 0, 2)
+Vehicle Speed, km/h, 0x0C0, bytesToUIntLe(raw, 2, 2)
+Gear, , 0x0C0, bytesToUIntLe(raw, 4, 1)
+Coolant Temp, degC, 0x0C0, bytesToUIntLe(raw, 5, 1)
+Throttle, %, 0x1A0, bytesToUIntLe(raw, 0, 1)
+Brake, %, 0x1A0, bytesToUIntLe(raw, 1, 1)
+Heading, deg, 0x1A0, bytesToIntLe(raw, 2, 2) * 0.1
+Lateral G, g, 0x2E0, bytesToIntLe(raw, 0, 2) * 0.01
+Longitudinal G, g, 0x2E0, bytesToIntLe(raw, 2, 2) * 0.01
+Yaw Rate, deg/s, 0x2E0, bytesToIntLe(raw, 4, 2) * 0.1
+```
+
+Engine speed is the one to check first: it sawtooths 1200–7000 rpm across four
+gear changes every 20 seconds, and a wrongly decoded channel does not sawtooth.
+Vehicle speed should track the GPS speed exactly, because the CAN value **is**
+the derivative of the GPS track. Coolant is a constant 90 °C on purpose; a
+frozen value there is not a fault.
+
+---
 
 ## Two layers, deliberately
 
@@ -186,6 +305,17 @@ LAP          LAST         BEST
 42.318       1:27.340     —·—
 ```
 
+The thing to watch is **`—·—`**. A Monitor slot the client has not supplied,
+or has explicitly marked absent, renders as absence and in a dimmer colour —
+never as `0.000`. Before the first lap of a session there is no last lap time,
+and a display showing zero for it has been told something false. That
+distinction is the whole reason `monitor_value` carries a `present` bit
+(SPEC.md §13.4), and it is invisible in a log of numbers.
+
+Formatting is where the channel enum earns itself: each channel has exactly one
+unit fixed by §13.2, so the device renders a lap time as `1:27.340` and a speed
+as `136.8` km/h without asking the client anything.
+
 ### A control response is owed; a notification is only offered
 
 The two are handled differently on purpose, and conflating them cost a client
@@ -206,82 +336,6 @@ the link. The two ends then disagreed about the subscription table.
 Control responses are therefore queued, retried until they land, and sent
 **before** notifications each iteration. On a dropped link the queue is cleared
 and the count logged: nothing is owed to a client that has gone.
-
-### The panel is not free
-
-Measured, because it was guessed at wrongly three times first:
-
-| | loop blocked | notifications accepted |
-| --- | --- | --- |
-| `--no-display` | 0 | **~23.5/s** |
-| panel open | 140–320 ms/s | **~15–18/s** |
-
-`root.update()` costs 15–30 ms per call and the peripheral cannot send while it
-runs, so the panel costs roughly what it blocks — **20–35% of throughput**. The
-drawing itself is not the problem: repainting every value measures 0.6 ms, and
-lowering the refresh rate makes it *worse*, because Tk's work is per unit time
-rather than per paint and a slower rate merely batches it into fewer, longer
-stalls.
-
-Fixing it properly means Tk and asyncio on separate threads, and on macOS both
-Tk and CoreBluetooth want the main one. Not worth it for a debug tool, so the
-cost is stated instead: **use `--no-display` when measuring throughput**, and
-keep the panel for everything else, where 15/s is ample to watch a client
-work. The status line reports its own cost every ten seconds so the trade is
-visible rather than folklore.
-
-The row that mattered most in practice is **notify subscriptions**. A VTP
-device can have CAN ids installed *and* no subscriber on the CAN
-characteristic, and it then produces batches that go nowhere — which from the
-client side looks exactly like a decode bug. The panel turns that red and says
-so. Those are two different subscriptions: the `CAN_SUBSCRIBE` control opcode
-says which arbitration ids to forward, and a GATT subscribe says whether the
-notifications are carried at all.
-
-**`no-sub`** counts notifications produced for a characteristic nobody has
-subscribed to. That is not loss and is not reported in `dropped` — nobody asked
-for it. **`refused`** is loss: a subscriber exists and the host stack still
-rejected the notification, so the items go into `dropped` per §8.3.
-
-Rates matter more than totals: a total cannot tell a stalled stream from a slow
-one, and every stall in this repository's history looked like a large number
-that had stopped growing.
-
-A Monitor device exists to display values it cannot compute, so the only way to
-tell whether the role works end to end is to look at one. `serve.py` opens a
-window showing the channels the device asked for and the values the client
-supplied:
-
-```
-LAP          LAST         BEST
-42.318       1:27.340     —·—
-
-DELTA        LAP No.      SPEED  km/h
-+1.250       3            136.8
-```
-
-The thing to watch is `—·—`. A slot the client has not supplied, or has
-explicitly marked absent, renders as absence and in a dimmer colour — never as
-`0.000`. Before the first lap of a session there is no last lap time, and a
-display showing `0.000` for it has been told something false. That distinction
-is the whole reason `monitor_value` carries a `present` bit (SPEC.md §13.4), and
-it is invisible in a log of numbers.
-
-Formatting is where the channel enum earns itself. Each channel has exactly one
-unit fixed by §13.2, so the device renders a lap time as `1:27.340` and a speed
-as `136.8 km/h` without asking the client anything — no unit negotiation, no
-scale factor, no configuration.
-
-```sh
-python3 display.py          # the screen alone, no Bluetooth, for a look at it
-serve.py --no-display       # headless
-```
-
-The window is created **after** the server starts advertising, not before. Tk
-takes over the main run loop when it initialises, and CoreBluetooth needs that
-run loop to deliver its power-on callback — creating the window first leaves
-the server waiting for an event that can no longer arrive, with a window up and
-nothing behind it.
 
 ## What running it revealed
 
