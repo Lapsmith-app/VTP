@@ -8,7 +8,26 @@ conformance vector.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- Python reference encoder (`reference/python/vtp1_encode.py`), schema-driven
+  like the decoder beside it and split into its own module for the same reason
+  the C encoder is its own translation unit: a client needs only the decoder, a
+  device needs only the encoder. It enforces rather than trusts — a field whose
+  validity bit is clear, and an IMU triple whose presence flag is clear, are
+  written as zero whatever the caller passed — while writing
+  `can_header.reserved` through, since an encoder must not erase a field a
+  later minor may have assigned.
+
+  The Python reference now reports `roundtrip_hex`, so the corpus checks it as
+  an encoder too: 35 of the 43 vectors verified byte-identical, where the runner
+  previously reported "encoder not exercised". The two encoders were also
+  compared directly across the whole corpus and agree on every byte — a real
+  check, given one derives its offsets from the schema at runtime and the other
+  compiles them in.
+
+  This is the prerequisite for a software peripheral: a program presenting a
+  VTP/1 GATT service over a host Bluetooth adapter, so a client can be
+  developed against something before any firmware exists.
 
 ## [0.1.0] - 2026-08-21
 

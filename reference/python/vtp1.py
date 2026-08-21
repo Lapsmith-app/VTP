@@ -16,6 +16,8 @@ try:
 except ImportError:
     sys.exit("PyYAML is required: pip install pyyaml")
 
+from vtp1_encode import ENCODERS, EncodeError
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCHEMA = yaml.safe_load((ROOT / "schema" / "vtp1.yaml").read_text())
 
@@ -56,6 +58,9 @@ def decode_gps_fix(buf):
         off += 2 + ext_len
     if off != len(buf):
         raise Reject("length")
+    # Kept so a round-trip can append them verbatim: their content is opaque to
+    # this decoder by design (SPEC.md §5.5) but it is not free to discard them.
+    fix["ext_hex"] = buf[_size("gps_fix"):].hex()
 
     known = {m["value"] for m in SCHEMA["enums"]["fix_type"]["members"]}
     fix["fix_type_known"] = fix["fix_type"] in known
@@ -179,6 +184,15 @@ def main():
         except ValueError:
             print(json.dumps({"ok": False, "reason": "bad-hex"}), flush=True)
             continue
+        # The runner requires this to equal the input byte for byte, or -- for
+        # a deliberately non-canonical vector -- to equal the normalised form.
+        # That checks what no decode can: that the encoder agrees about the
+        # layout and emits the canonical payload rather than merely one that
+        # happens to decode back.
+        try:
+            result["roundtrip_hex"] = ENCODERS[record](result).hex()
+        except EncodeError as exc:
+            result["roundtrip_error"] = str(exc)
         print(json.dumps({"ok": True, **result}), flush=True)
 
 
