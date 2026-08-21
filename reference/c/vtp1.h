@@ -153,6 +153,49 @@ int vtp_decode_can_list(const uint8_t *buf, size_t len,
 void vtp_can_subscription_at(const uint8_t *buf, uint8_t index,
                              vtp_can_subscription_t *out);
 
+/* ---- Monitor ---------------------------------------------------------- */
+
+/* SPEC.md §13 — the one role that runs client-to-device: the client supplies
+ * values the device cannot compute, so a device with a display can show them.
+ * Channels are enumerated rather than computed, so nothing here parses an
+ * expression. */
+
+typedef struct {
+    uint16_t total, index;
+    uint8_t  count, reserved;
+} vtp_monitor_page_t;
+
+typedef struct {
+    uint8_t  slot;
+    uint16_t channel;
+    uint8_t  reserved;
+} vtp_monitor_channel_t;
+
+typedef struct {
+    uint16_t seq;
+    uint8_t  count, reserved;
+} vtp_monitor_header_t;
+
+typedef struct {
+    uint8_t  slot;
+    uint8_t  validity;
+    int32_t  value;     /* absent unless validity & VTP_MONITOR_VALIDITY_PRESENT */
+} vtp_monitor_value_t;
+
+/* Non-zero when the channel is one this build recognises. False means UNKNOWN;
+ * the client answers the slot absent rather than substituting another. */
+int vtp_channel_known(uint16_t channel);
+
+int vtp_decode_monitor_list(const uint8_t *buf, size_t len,
+                            vtp_monitor_page_t *page, const char **err);
+void vtp_monitor_channel_at(const uint8_t *buf, uint8_t index,
+                            vtp_monitor_channel_t *out);
+
+int vtp_decode_monitor_update(const uint8_t *buf, size_t len,
+                              vtp_monitor_header_t *hdr, const char **err);
+void vtp_monitor_value_at(const uint8_t *buf, uint8_t index,
+                          vtp_monitor_value_t *out);
+
 /* ---- Link parameters ------------------------------------------------- */
 
 /* SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response. Reporting only:

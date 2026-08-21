@@ -261,6 +261,45 @@ int main(void) {
             printf("]");
             finish(enc, vtp_encode_can_list(&pg, subs, enc, sizeof enc));
 
+        } else if (!strcmp(record, "monitor_list")) {
+            vtp_monitor_page_t pg;
+            if (vtp_decode_monitor_list(buf, len, &pg, &err)) { reject(err); continue; }
+            vtp_monitor_channel_t chans[256];
+            for (uint8_t i = 0; i < pg.count; i++)
+                vtp_monitor_channel_at(buf, i, &chans[i]);
+            printf("{\"ok\":true,\"page\":{\"total\":%u,\"index\":%u,"
+                   "\"count\":%u,\"reserved\":%u},\"entries\":[",
+                   pg.total, pg.index, pg.count, pg.reserved);
+            for (uint8_t i = 0; i < pg.count; i++) {
+                printf("%s{\"slot\":%u,\"channel\":%u,\"reserved\":%u,"
+                       "\"channel_known\":%s}",
+                       i ? "," : "", chans[i].slot, chans[i].channel,
+                       chans[i].reserved,
+                       vtp_channel_known(chans[i].channel) ? "true" : "false");
+            }
+            printf("]");
+            finish(enc, vtp_encode_monitor_list(&pg, chans, enc, sizeof enc));
+
+        } else if (!strcmp(record, "monitor_update")) {
+            vtp_monitor_header_t mh;
+            if (vtp_decode_monitor_update(buf, len, &mh, &err)) { reject(err); continue; }
+            vtp_monitor_value_t vals[256];
+            for (uint8_t i = 0; i < mh.count; i++)
+                vtp_monitor_value_at(buf, i, &vals[i]);
+            printf("{\"ok\":true,\"header\":{\"seq\":%u,\"count\":%u,"
+                   "\"reserved\":%u},\"values\":[",
+                   mh.seq, mh.count, mh.reserved);
+            for (uint8_t i = 0; i < mh.count; i++) {
+                const int present =
+                    (vals[i].validity & VTP_MONITOR_VALIDITY_PRESENT) != 0;
+                printf("%s{\"slot\":%u,\"validity\":%u,\"value\":%d,"
+                       "\"absent\":[%s]}",
+                       i ? "," : "", vals[i].slot, vals[i].validity,
+                       vals[i].value, present ? "" : "\"value\"");
+            }
+            printf("]");
+            finish(enc, vtp_encode_monitor_update(&mh, vals, enc, sizeof enc));
+
         } else if (!strcmp(record, "link_params")) {
             vtp_link_params_t l;
             if (vtp_decode_link_params(buf, len, &l, &err)) { reject(err); continue; }

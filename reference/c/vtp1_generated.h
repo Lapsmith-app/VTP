@@ -87,6 +87,31 @@
 #define VTP_IMU_SAMPLE_OFF_GY 8
 #define VTP_IMU_SAMPLE_OFF_GZ 10
 
+/* One page of the channels a device asks for. Followed by `count` monitor_channel entries. */
+#define VTP_MONITOR_PAGE_SIZE 6
+#define VTP_MONITOR_PAGE_OFF_TOTAL 0
+#define VTP_MONITOR_PAGE_OFF_INDEX 2
+#define VTP_MONITOR_PAGE_OFF_COUNT 4
+#define VTP_MONITOR_PAGE_OFF_RESERVED 5
+
+/* One channel a device asks the client to supply. */
+#define VTP_MONITOR_CHANNEL_SIZE 4
+#define VTP_MONITOR_CHANNEL_OFF_SLOT 0
+#define VTP_MONITOR_CHANNEL_OFF_CHANNEL 1
+#define VTP_MONITOR_CHANNEL_OFF_RESERVED 3
+
+/* Batch header for a client-to-device value update. Followed by `count` monitor_value entries. */
+#define VTP_MONITOR_HEADER_SIZE 4
+#define VTP_MONITOR_HEADER_OFF_SEQ 0
+#define VTP_MONITOR_HEADER_OFF_COUNT 2
+#define VTP_MONITOR_HEADER_OFF_RESERVED 3
+
+/* One value for a slot the device asked for. */
+#define VTP_MONITOR_VALUE_SIZE 6
+#define VTP_MONITOR_VALUE_OFF_SLOT 0
+#define VTP_MONITOR_VALUE_OFF_VALIDITY 1
+#define VTP_MONITOR_VALUE_OFF_VALUE 2
+
 /* One page of the CAN subscription table. Followed by `count` can_subscription entries. */
 #define VTP_CAN_LIST_PAGE_SIZE 6
 #define VTP_CAN_LIST_PAGE_OFF_TOTAL 0
@@ -142,6 +167,18 @@ typedef enum {
 } vtp_sub_mode_t;
 
 typedef enum {
+    VTP_CHANNEL_LAP_TIME = 1,
+    VTP_CHANNEL_LAST_LAP_TIME = 2,
+    VTP_CHANNEL_BEST_LAP_TIME = 3,
+    VTP_CHANNEL_DELTA_BEST = 4,
+    VTP_CHANNEL_PREDICTED_LAP_TIME = 5,
+    VTP_CHANNEL_LAP_NUMBER = 6,
+    VTP_CHANNEL_SPEED = 7,
+    VTP_CHANNEL_SESSION_DISTANCE = 8,
+    VTP_CHANNEL_SESSION_TIME = 9,
+} vtp_channel_t;
+
+typedef enum {
     VTP_PHY_LE_1M = 1,
     VTP_PHY_LE_2M = 2,
     VTP_PHY_LE_CODED = 3,
@@ -173,6 +210,8 @@ typedef enum {
 #define VTP_CAPABILITIES_CAN_FD (1u << 5)
 #define VTP_CAPABILITIES_MASKED_SUBSCRIPTIONS (1u << 6)
 #define VTP_CAPABILITIES_ON_CHANGE_SUBSCRIPTIONS (1u << 7)
+
+#define VTP_MONITOR_VALIDITY_PRESENT (1u << 0)
 
 #define VTP_LINK_VALIDITY_ATT_MTU (1u << 0)
 #define VTP_LINK_VALIDITY_LL_DATA_LENGTH (1u << 1)

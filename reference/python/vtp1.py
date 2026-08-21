@@ -185,6 +185,52 @@ def decode_can_list(buf):
     return {"page": page, "entries": entries}
 
 
+def decode_monitor_list(buf):
+    """SPEC.md §13.3 — one page of the channels a device asks for."""
+    hsz, esz = _size("monitor_page"), _size("monitor_channel")
+    if len(buf) < hsz:
+        raise Reject("length")
+    page = _unpack("monitor_page", buf)
+    if len(buf) < hsz + page["count"] * esz:
+        raise Reject("truncated-record")
+    if len(buf) != hsz + page["count"] * esz:
+        raise Reject("length")
+
+    known = {m["value"] for m in SCHEMA["enums"]["channel"]["members"]}
+    entries = []
+    for i in range(page["count"]):
+        e = _unpack("monitor_channel", buf, hsz + i * esz)
+        # SPEC.md §13.2 — a channel from a later minor stays unknown, and the
+        # client answers the slot absent rather than substituting another.
+        e["channel_known"] = e["channel"] in known
+        entries.append(e)
+    return {"page": page, "entries": entries}
+
+
+def decode_monitor_update(buf):
+    """SPEC.md §13.4 — a client-to-device batch of values."""
+    hsz, esz = _size("monitor_header"), _size("monitor_value")
+    if len(buf) < hsz:
+        raise Reject("length")
+    hdr = _unpack("monitor_header", buf)
+    if len(buf) < hsz + hdr["count"] * esz:
+        raise Reject("truncated-record")
+    if len(buf) != hsz + hdr["count"] * esz:
+        raise Reject("length")
+
+    bit = {b["name"]: b["bit"]
+           for b in SCHEMA["bitmasks"]["monitor_validity"]["bits"]}
+    values = []
+    for i in range(hdr["count"]):
+        v = _unpack("monitor_value", buf, hsz + i * esz)
+        # The one place the protocol reverses direction, and §1.1 still holds:
+        # a cleared present bit means the client cannot supply the channel, not
+        # that the channel is zero.
+        v["absent"] = ([] if v["validity"] & (1 << bit["present"]) else ["value"])
+        values.append(v)
+    return {"header": hdr, "values": values}
+
+
 def decode_link_params(buf):
     """SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response.
 
@@ -217,6 +263,8 @@ DECODERS = {
     "info": decode_info,
     "link_params": decode_link_params,
     "can_list": decode_can_list,
+    "monitor_list": decode_monitor_list,
+    "monitor_update": decode_monitor_update,
 }
 
 

@@ -45,6 +45,17 @@ int vtp_encode_info(const vtp_info_t *info, uint8_t *out, size_t cap);
 int vtp_encode_link_params(const vtp_link_params_t *lp, uint8_t *out, size_t cap);
 
 /* `page->count` entries are read from `entries`. */
+int vtp_encode_monitor_list(const vtp_monitor_page_t *page,
+                            const vtp_monitor_channel_t *entries,
+                            uint8_t *out, size_t cap);
+
+/* `hdr->count` values are read from `values`. A value whose present bit is
+ * clear is written as zero whatever the caller supplied (SPEC.md §13.4). */
+int vtp_encode_monitor_update(const vtp_monitor_header_t *hdr,
+                              const vtp_monitor_value_t *values,
+                              uint8_t *out, size_t cap);
+
+/* `page->count` entries are read from `entries`. */
 int vtp_encode_can_list(const vtp_can_list_page_t *page,
                         const vtp_can_subscription_t *entries,
                         uint8_t *out, size_t cap);

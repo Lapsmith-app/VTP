@@ -112,6 +112,56 @@
         }
       ]
     },
+    "channel": {
+      "width": 2,
+      "members": [
+        {
+          "value": 1,
+          "name": "lap_time",
+          "desc": "Elapsed time in the current lap, ms"
+        },
+        {
+          "value": 2,
+          "name": "last_lap_time",
+          "desc": "ms"
+        },
+        {
+          "value": 3,
+          "name": "best_lap_time",
+          "desc": "ms"
+        },
+        {
+          "value": 4,
+          "name": "delta_best",
+          "desc": "Time ahead of or behind the best lap, ms, signed"
+        },
+        {
+          "value": 5,
+          "name": "predicted_lap_time",
+          "desc": "ms"
+        },
+        {
+          "value": 6,
+          "name": "lap_number",
+          "desc": "Laps completed in this session, from 1"
+        },
+        {
+          "value": 7,
+          "name": "speed",
+          "desc": "mm/s"
+        },
+        {
+          "value": 8,
+          "name": "session_distance",
+          "desc": "m"
+        },
+        {
+          "value": 9,
+          "name": "session_time",
+          "desc": "ms"
+        }
+      ]
+    },
     "phy": {
       "width": 1,
       "members": [
@@ -233,7 +283,8 @@
         },
         {
           "bit": 3,
-          "name": "monitor"
+          "name": "monitor",
+          "desc": "Device asks the client for values to display (\u00a713)"
         },
         {
           "bit": 4,
@@ -253,6 +304,17 @@
         }
       ],
       "reserved_from": 8
+    },
+    "monitor_validity": {
+      "width": 1,
+      "bits": [
+        {
+          "bit": 0,
+          "name": "present",
+          "desc": "The client can currently supply this channel"
+        }
+      ],
+      "reserved_from": 1
     },
     "link_validity": {
       "width": 2,
@@ -754,6 +816,124 @@
         }
       ]
     },
+    "monitor_page": {
+      "access": "control",
+      "size": 6,
+      "desc": "One page of the channels a device asks for. Followed by `count` monitor_channel entries.",
+      "fields": [
+        {
+          "name": "total",
+          "offset": 0,
+          "size": 2,
+          "type": "u16",
+          "desc": "Channels requested, across all pages"
+        },
+        {
+          "name": "index",
+          "offset": 2,
+          "size": 2,
+          "type": "u16",
+          "desc": "Table index of the first entry in this page"
+        },
+        {
+          "name": "count",
+          "offset": 4,
+          "size": 1,
+          "type": "u8",
+          "desc": "Entries in this page"
+        },
+        {
+          "name": "reserved",
+          "offset": 5,
+          "size": 1,
+          "type": "u8",
+          "reserved": true
+        }
+      ]
+    },
+    "monitor_channel": {
+      "access": "control",
+      "size": 4,
+      "desc": "One channel a device asks the client to supply.",
+      "fields": [
+        {
+          "name": "slot",
+          "offset": 0,
+          "size": 1,
+          "type": "u8",
+          "desc": "The device's own name for this value; used in monitor_value"
+        },
+        {
+          "name": "channel",
+          "offset": 1,
+          "size": 2,
+          "type": "u16",
+          "enum": "channel"
+        },
+        {
+          "name": "reserved",
+          "offset": 3,
+          "size": 1,
+          "type": "u8",
+          "reserved": true
+        }
+      ]
+    },
+    "monitor_header": {
+      "characteristic": "monitor_values",
+      "size": 4,
+      "access": "write",
+      "desc": "Batch header for a client-to-device value update. Followed by `count` monitor_value entries.",
+      "fields": [
+        {
+          "name": "seq",
+          "offset": 0,
+          "size": 2,
+          "type": "u16",
+          "desc": "Updates written by the client; +1 each, wraps, restarts at 0 per connection"
+        },
+        {
+          "name": "count",
+          "offset": 2,
+          "size": 1,
+          "type": "u8"
+        },
+        {
+          "name": "reserved",
+          "offset": 3,
+          "size": 1,
+          "type": "u8",
+          "reserved": true
+        }
+      ]
+    },
+    "monitor_value": {
+      "size": 6,
+      "validity": "monitor_validity",
+      "desc": "One value for a slot the device asked for.",
+      "fields": [
+        {
+          "name": "slot",
+          "offset": 0,
+          "size": 1,
+          "type": "u8"
+        },
+        {
+          "name": "validity",
+          "offset": 1,
+          "size": 1,
+          "type": "u8",
+          "bitmask": "monitor_validity"
+        },
+        {
+          "name": "value",
+          "offset": 2,
+          "size": 4,
+          "type": "i32",
+          "valid_bit": "present"
+        }
+      ]
+    },
     "can_list_page": {
       "access": "control",
       "size": 6,
@@ -973,6 +1153,13 @@
         "name": "GET_LINK_PARAMS",
         "params": "",
         "response": "link_params record"
+      },
+      {
+        "value": 64,
+        "name": "MONITOR_LIST",
+        "params": "start:u16",
+        "response": "monitor_page record",
+        "desc": "One page of the channels this device asks the client to supply"
       }
     ]
   }
