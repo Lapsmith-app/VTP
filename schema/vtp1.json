@@ -386,14 +386,14 @@
           "offset": 0,
           "size": 2,
           "type": "u16",
-          "desc": "Increments per fix produced, including dropped ones. Wraps."
+          "desc": "Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection"
         },
         {
           "name": "dropped",
           "offset": 2,
           "size": 2,
           "type": "u16",
-          "desc": "Fixes discarded since the previous notification"
+          "desc": "Fixes accepted then discarded since the previous notification; saturates, never wraps"
         },
         {
           "name": "validity",
@@ -561,14 +561,15 @@
           "name": "seq",
           "offset": 0,
           "size": 2,
-          "type": "u16"
+          "type": "u16",
+          "desc": "Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection"
         },
         {
           "name": "dropped",
           "offset": 2,
           "size": 2,
           "type": "u16",
-          "desc": "Frames the device discarded since the previous notification"
+          "desc": "Frames accepted then discarded since the previous notification; excludes frames no subscription matched; saturates"
         },
         {
           "name": "t_base",
@@ -639,14 +640,15 @@
           "name": "seq",
           "offset": 0,
           "size": 2,
-          "type": "u16"
+          "type": "u16",
+          "desc": "Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection"
         },
         {
           "name": "dropped",
           "offset": 2,
           "size": 2,
           "type": "u16",
-          "desc": "Samples discarded since the previous notification"
+          "desc": "Samples accepted then discarded since the previous notification; saturates, never wraps"
         },
         {
           "name": "t_base",

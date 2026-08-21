@@ -9,6 +9,34 @@ conformance vector.
 ## [Unreleased]
 
 ### Changed — wire format
+- Sequence and loss are specified (SPEC.md §8.2, §8.3). Both fields existed on
+  all three streams; only `gps_fix` said what either meant.
+  - **`seq` counts notifications on its own characteristic**, uniformly, +1
+    each, wrapping. `gps_fix.seq` previously counted *fixes produced*, which no
+    batch header can do — a CAN header cannot count frames the device never
+    accepted, and an IMU header would jump by `count`. Only the notification is
+    something all three streams have exactly one of. No information is lost:
+    `dropped` already carries what the device discarded.
+  - **`seq` restarts at 0 per connection**, so a client never has to
+    distinguish a reconnection from a wrap and the protocol needs no session or
+    boot identifier to do it for them.
+  - **`dropped` counts items accepted and then discarded.** A CAN frame that
+    matched no subscription was never accepted and MUST NOT be counted:
+    conflating filtering that worked with capacity that was exceeded makes the
+    field useless for the only thing it is for.
+  - **`dropped` saturates at 65535 and MUST NOT wrap.** A wrapping drop counter
+    reads 0 after exactly 65536 discards — perfect health at the moment the
+    device is losing data fastest. That is a plausible wrong value, so §1.1
+    spends the ceiling instead.
+
+### Added
+- `VtpDevice.simulate_loss()` in the software peripheral. A desktop device
+  never loses anything, so a client's `dropped` handling would go untested
+  until real hardware on a real track produced some.
+- `VtpDevice.on_connect()`, making the per-connection reset explicit and
+  testable: sequence numbers to zero, subscription table cleared.
+
+### Changed — wire format
 - The CAN control plane is specified rather than named (SPEC.md §9.2-§9.5).
   Building the software peripheral established that `CAN_LIST`,
   `CAN_SUBSCRIBE_MASK` and `LIST_CHANNELS` could not be implemented at all:
@@ -168,7 +196,7 @@ rely on it.
   prefix that lets a client recognise an unsupported major version.
 - Machine-readable schema (`schema/vtp1.yaml`) as the source of truth, with
   generation of the spec tables, the C header and the conformance vectors.
-- Conformance corpus: 59 vectors across 6 record types, including must-reject
+- Conformance corpus: 62 vectors across 6 record types, including must-reject
   cases for truncated and over-long payloads.
 - C99 reference decoder and encoder, no dependencies, separate translation
   units so a client links only the decoder and a device only the encoder.

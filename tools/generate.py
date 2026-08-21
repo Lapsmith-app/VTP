@@ -504,6 +504,14 @@ def vectors(schema):
              "seq at its maximum. The next fix is seq 0; a decoder MUST NOT treat that as loss."),
         case(schema, "gps_fix", "dropped-nonzero", dict(nominal, seq=9, dropped=12),
              "The device discarded 12 fixes. A decoder MUST surface this, not ignore it."),
+        case(schema, "gps_fix", "dropped-saturated",
+             dict(nominal, seq=12, dropped=65535),
+             "dropped at its ceiling. SPEC.md 8.3: the counter saturates and MUST NOT "
+             "wrap, so a receiver reads this as 'at least 65535', never as exactly "
+             "that many.",
+             note="A wrapping drop counter reads 0 after 65536 discards -- perfect "
+                  "health at the moment the device is losing data fastest. Saturation "
+                  "is the 1.1 rule applied to a counter."),
         case(schema, "gps_fix", "unknown-fix-type", dict(nominal, seq=6, fix_type=200),
              "An enum value from a future minor. A decoder MUST report unknown, "
              "and MUST NOT fall back to 3D.",
@@ -593,6 +601,14 @@ def vectors(schema):
                        "half a million years to get here -- but the two reference "
                        "decoders disagreed on it, which is a specification gap rather "
                        "than a hardware one."),
+        can_batch("seq-wrap-and-saturated-loss",
+                  "seq at 65535 with dropped at its ceiling. The next notification is "
+                  "seq 0, which a receiver MUST NOT read as a gap, and dropped MUST be "
+                  "read as 'at least 65535'.",
+                  dict(seq=65535, dropped=65535, t_base=17_000_000, count=1, flags=0x01),
+                  [can_rec(0, 0x1A0, bytes.fromhex("00"))],
+                  [{"dt": 0, "id": 0x1A0, "extended": False, "fd": False, "rtr": False,
+                    "len": 1, "payload": "00", "t_device_us": 17_000_000}]),
         can_batch("empty-batch",
                   "count 0. Legal, and means the bus is quiet — NOT an error and NOT a "
                   "disconnect. A decoder MUST accept it.",
@@ -741,6 +757,13 @@ def vectors(schema):
                  + encode(schema, "imu_sample", dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6))
                  + b"\x00").hex(),
          "must_reject": "length"},
+        imu_batch("seq-wrap",
+                  "seq at 65535 on the IMU stream. SPEC.md 8.2: seq counts "
+                  "notifications on its own characteristic and wraps, so the next one "
+                  "is 0 and that is not loss.",
+                  dict(seq=65535, dropped=3, t_base=14_000_000, period=5000, count=1,
+                       flags=0b011),
+                  [dict(ax=1, ay=2, az=1000, gx=3, gy=4, gz=5)]),
         imu_batch("accel-only",
                   "flags bit1 clear: the device has no gyro. Gyro fields are zero and MUST "
                   "be reported absent, not as zero rotation.",

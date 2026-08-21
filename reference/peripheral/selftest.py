@@ -20,6 +20,13 @@ import pathlib
 import struct
 import sys
 
+# Leave no .pyc behind. Editing the device and re-running is the whole workflow
+# here -- including seeding a deliberate fault to check this file can detect it
+# -- and a same-length edit within the same second leaves Python's mtime+size
+# cache check satisfied, so a stale module gets imported and the result is
+# silently about code that is no longer on disk. That cost an hour once.
+sys.dont_write_bytecode = True
+
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT / "reference" / "python"))
@@ -263,6 +270,41 @@ def main():
     check(resp[2] == dev.ST_UNSUPPORTED,
           "an unimplemented opcode MUST answer unsupported_opcode, and MUST "
           "still be answered")
+
+    # ---- Sequence and loss (SPEC.md §8.2, §8.3) -------------------------
+    fresh = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=10, imu_hz=0)
+    first = run(fresh, clock, 0.5)
+    first_gps = [decode(c, p) for c, p in first if c == "gps"]
+    check(first_gps and first_gps[0]["seq"] == 1,
+          "seq MUST start from 0 and reach 1 on the first notification of a "
+          "connection, so a client never confuses a reconnection with a wrap")
+
+    # A device that never loses anything cannot demonstrate that it reports
+    # loss, which is why simulate_loss exists.
+    fresh.simulate_loss("gps", 5)
+    after_loss = [decode(c, p) for c, p in run(fresh, clock, 0.3) if c == "gps"]
+    check(after_loss and after_loss[0]["dropped"] == 5,
+          "a discarded fix MUST be reported in dropped on the next notification")
+    check(len(after_loss) > 1 and after_loss[1]["dropped"] == 0,
+          "dropped counts since the PREVIOUS notification, so it MUST reset")
+
+    fresh.simulate_loss("gps", 200_000)
+    saturated = [decode(c, p) for c, p in run(fresh, clock, 0.3) if c == "gps"]
+    check(saturated and saturated[0]["dropped"] == 0xFFFF,
+          f"dropped MUST saturate at 65535, not wrap: 200000 discards reported "
+          f"as {saturated[0]['dropped'] if saturated else 'nothing'}")
+
+    # SPEC.md §9.2 — a reconnection inherits nothing.
+    fresh.handle_control(bytes([dev.CAN_SUBSCRIBE, 1])
+                         + struct.pack("<IBH", 0x0C0, dev.SUB_EVERY_FRAME, 0))
+    fresh.on_connect()
+    table = vtp1.decode_can_list(
+        fresh.handle_control(bytes([dev.CAN_LIST, 2]) + struct.pack("<H", 0))[3:])
+    check(table["page"]["total"] == 0,
+          "subscriptions MUST NOT survive a reconnection")
+    reconnected = [decode(c, p) for c, p in run(fresh, clock, 0.3) if c == "gps"]
+    check(reconnected and reconnected[0]["seq"] == 1,
+          "seq MUST restart at 0 on a new connection")
 
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)

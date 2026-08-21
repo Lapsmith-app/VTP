@@ -165,6 +165,34 @@
       "note": "Unreachable on real hardware -- a microsecond clock takes over half a million years to get here -- but the two reference decoders disagreed on it, which is a specification gap rather than a hardware one."
     },
     {
+      "name": "seq-wrap-and-saturated-loss",
+      "desc": "seq at 65535 with dropped at its ceiling. The next notification is seq 0, which a receiver MUST NOT read as a gap, and dropped MUST be read as 'at least 65535'.",
+      "record": "can_batch",
+      "hex": "ffffffff4066030100000000010100000000a00100000100",
+      "expect": {
+        "header": {
+          "seq": 65535,
+          "dropped": 65535,
+          "t_base": 17000000,
+          "count": 1,
+          "flags": 1,
+          "reserved": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00",
+            "t_device_us": 17000000
+          }
+        ]
+      }
+    },
+    {
       "name": "empty-batch",
       "desc": "count 0. Legal, and means the bus is quiet \u2014 NOT an error and NOT a disconnect. A decoder MUST accept it.",
       "record": "can_batch",

@@ -204,6 +204,35 @@
       "must_reject": "length"
     },
     {
+      "name": "seq-wrap",
+      "desc": "seq at 65535 on the IMU stream. SPEC.md 8.2: seq counts notifications on its own characteristic and wraps, so the next one is 0 and that is not loss.",
+      "record": "imu_batch",
+      "hex": "ffff0300809fd50000000000881300000103000001000200e803030004000500",
+      "expect": {
+        "header": {
+          "seq": 65535,
+          "dropped": 3,
+          "t_base": 14000000,
+          "period": 5000,
+          "count": 1,
+          "flags": 3,
+          "reserved": 0
+        },
+        "samples": [
+          {
+            "ax": 1,
+            "ay": 2,
+            "az": 1000,
+            "gx": 3,
+            "gy": 4,
+            "gz": 5,
+            "t_device_us": 14000000,
+            "absent": []
+          }
+        ]
+      }
+    },
+    {
       "name": "accel-only",
       "desc": "flags bit1 clear: the device has no gyro. Gyro fields are zero and MUST be reported absent, not as zero rotation.",
       "record": "imu_batch",
