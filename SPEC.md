@@ -387,11 +387,99 @@ header plus `count` complete records.
 
 ### 6.3 Loss
 
-`dropped` counts frames the device discarded since the previous notification,
-for any reason. A device MUST report discards here rather than silently omitting
-frames. A client SHOULD surface a non-zero `dropped` to the user.
+`dropped` is defined in §8.3. A device MUST report discards there rather than
+silently omitting frames, and MUST NOT count frames that matched no
+subscription — those were never accepted. A client SHOULD surface a non-zero
+`dropped` to the user.
 
 `flags` bit 0 indicates the device is actively shedding load.
+
+### 6.4 Identifier validity
+
+A standard frame is one whose `id` bit 29 is clear. Its arbitration identifier
+is eleven bits, so bits 11–28 MUST be zero. A receiver MUST **reject the whole
+batch** if a standard frame carries a larger identifier: an eleven-bit
+identifier that does not fit in eleven bits is malformed, and the only
+alternative is to truncate it to a different identifier that looks entirely
+valid.
+
+Bit 30 (CAN FD) and bit 31 (RTR) MUST NOT both be set. CAN FD has no remote
+frames, so the combination describes a frame that cannot exist.
+
+A remote frame carries no data. If bit 31 is set, `len` MUST be zero.
+
+Each of these is rejected rather than repaired, under §1.1: a repaired frame is
+a plausible wrong value with a correct-looking identifier.
+
+### 6.5 What a remote frame does not carry
+
+The data length a remote frame *requests* is not represented in major version
+1. `len` is the payload length, and the batch's length arithmetic depends on it
+being exactly that, so it cannot also carry a requested size.
+
+A logger therefore records that a remote frame for an identifier occurred, and
+not how many bytes it asked for. This is a deliberate limitation and not an
+oversight: remote frames are rare on the vehicle buses this protocol targets,
+and the alternative is a second length field on the highest-volume record in
+the specification.
+
+### 6.6 CAN FD flags not carried
+
+Bit Rate Switch and Error State Indicator are not represented. Both are
+per-frame, so carrying them costs a byte on `can_record` — at 4000 frames per
+second that is 4 kB/s on the one stream that can saturate a link, which is the
+finding in RATIONALE §4.1.
+
+They are bus diagnostics rather than vehicle telemetry, and no device
+implements this specification yet, so nothing is known to need them. Record
+sizes are frozen for the life of a major version (§11.3), which means adding
+them later is a VTP/2 change rather than a minor one. That is the cost of this
+decision and it is stated plainly rather than discovered.
+
+### 6.7 When a timestamp is taken
+
+`t_base` and every `dt` are bus-arrival times measured at the **end of the
+frame** — the point at which the controller signals a completed reception.
+
+Not start-of-frame. A device cannot generally know a frame's time on air
+without knowing the bit timing and the number of stuffed bits, so a
+start-of-frame timestamp would be back-computed rather than measured, and this
+specification prefers a measurement it can defend to an estimate it cannot.
+
+The consequence is that a long frame is stamped later than a short one relative
+to the moment it began, by its own transmission time. At 500 kbit/s a 64-byte
+CAN FD frame is roughly a millisecond of that; at 1 Mbit/s an 8-byte classic
+frame is well under a tenth. A client aligning below a millisecond should know
+which end of the frame it is aligning to.
+
+### 6.8 Subscription modes and the first frame
+
+The first matching frame is forwarded in every mode. A client that installs a
+subscription and then waits for a value it can display should not have to wait
+for a second frame to arrive.
+
+| Mode | `arg` | Behaviour after the first frame |
+| --- | --- | --- |
+| `every_frame` | ignored | Every matching frame. |
+| `periodic` | minimum interval, ms | At most one frame per `arg` ms. `arg` 0 means no limit. |
+| `on_change` | debounce, ms | Forwarded when the payload differs from the last one forwarded, and not within `arg` ms of it. `arg` 0 means no debounce. |
+| `every_nth` | N | Every Nth frame after the first. N MUST be at least 1; a device MUST answer `bad_params` to N of 0. |
+
+`on_change` compares the payload only. A frame whose payload is unchanged is
+not forwarded even though its arrival time differs, which is the point of the
+mode; a client that needs arrival times needs `every_frame`.
+
+### 6.9 One bus
+
+Major version 1 addresses a single CAN bus. A device with more than one
+transceiver cannot say which bus a frame arrived on, and the subscription
+commands have no bus parameter.
+
+The low byte of `can_header.reserved` is earmarked for a bus index so a later
+minor version may add one. Until then it MUST be written as zero and MUST be
+ignored on receive. Subscribing per bus would need a new opcode, which a minor
+version may add (§11.2), so this is a gap that can be closed without a major
+version.
 
 ---
 
@@ -854,7 +942,7 @@ needs verifying on a bench rather than in CI.
 | `gps_fix.validity` | bits 12–31 | Validity for fields added in a later minor |
 | `gps_fix.fix_flags` | bits 4–7 | Additional solution-quality flags |
 | `info.capabilities` | bits 8–31 | Roles and features added in a later minor |
-| `can_header.reserved` | 2 bytes | In-band CAN metadata |
+| `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (§6.9); high byte unassigned |
 | `can_list_page.reserved` | 1 byte | Paging metadata |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
 | `imu_header.flags` | bits 2–7 | Additional sensor groups |

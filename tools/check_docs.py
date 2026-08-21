@@ -39,8 +39,13 @@ SOURCES = ["SPEC.md", "RATIONALE.md", "README.md", "CONTRIBUTING.md",
            "schema/README.md", "reference/README.md"]
 
 HEADING = re.compile(r"^#{2,4}\s+(?:Appendix\s+)?(\d+(?:\.\d+)*)\.?\s")
-# An optional "SPEC.md "/"SPEC " qualifier decides which document is meant.
-REFERENCE = re.compile(r"(SPEC(?:\.md)?\s+)?§\s?(\d+(?:\.\d+)*)")
+# An optional "SPEC.md "/"RATIONALE.md " qualifier decides which document is
+# meant; a bare reference means the document it appears in. Both qualifiers are
+# recognised because both documents carry their own numbering and cite each
+# other, and a bare "§4.1" inside SPEC.md that meant RATIONALE's §4.1 resolved
+# silently against the wrong document until this checker flagged it.
+REFERENCE = re.compile(
+    r"(SPEC|RATIONALE)?(?:\.md)?\s*§\s?(\d+(?:\.\d+)*)")
 COUNT = re.compile(r"(\d+)\s+vectors\s+across\s+(\d+)\s+record\s+types")
 
 
@@ -64,10 +69,13 @@ def check_references(problems):
         own = name if name in NUMBERED else None
         for n, line in enumerate(path.read_text().splitlines(), 1):
             for qualifier, section in REFERENCE.findall(line):
-                # An explicit "SPEC.md §x" always means SPEC.md. A bare "§x"
+                # An explicit qualifier names the document. A bare reference
                 # means the current document when it has its own numbering,
                 # and SPEC.md otherwise.
-                target = "SPEC.md" if qualifier or own is None else own
+                if qualifier:
+                    target = f"{qualifier}.md"
+                else:
+                    target = own or "SPEC.md"
                 if section not in known[target]:
                     problems.append(
                         f"{name}:{n}: §{section} does not exist in {target}")

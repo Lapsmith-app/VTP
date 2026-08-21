@@ -620,6 +620,46 @@ def vectors(schema):
                   [can_rec(0, 0x1A0, bytes.fromhex("00"))],
                   [{"dt": 0, "id": 0x1A0, "extended": False, "fd": False, "rtr": False,
                     "len": 1, "payload": "00", "t_device_us": 13_000_000}]),
+        can_batch("remote-frame",
+                  "A remote frame: RTR set, len 0, no payload. SPEC.md 6.5 -- the "
+                  "length such a frame REQUESTS is not carried in major version 1, "
+                  "only the fact that it occurred.",
+                  dict(seq=12, dropped=0, t_base=19_000_000, count=1, flags=0),
+                  [can_rec(0, 0x1A0, b"", rtr=True)],
+                  [{"dt": 0, "id": 0x1A0, "extended": False, "fd": False, "rtr": True,
+                    "len": 0, "payload": "", "t_device_us": 19_000_000}]),
+        can_batch("standard-id-at-maximum",
+                  "The largest legal standard identifier, 0x7FF. One more is a "
+                  "different frame entirely and MUST be rejected.",
+                  dict(seq=13, dropped=0, t_base=21_000_000, count=1, flags=0),
+                  [can_rec(0, 0x7FF, bytes.fromhex("01"))],
+                  [{"dt": 0, "id": 0x7FF, "extended": False, "fd": False, "rtr": False,
+                    "len": 1, "payload": "01", "t_device_us": 21_000_000}]),
+        {"name": "standard-id-too-large",
+         "desc": "A standard frame carrying 0x800: an eleven-bit identifier that does "
+                 "not fit in eleven bits. MUST be rejected, never truncated -- "
+                 "truncation yields a different identifier that looks entirely valid.",
+         "record": "can_batch",
+         "hex": (encode(schema, "can_header",
+                        dict(seq=14, dropped=0, t_base=1, count=1, flags=0))
+                 + can_rec(0, 0x800, bytes.fromhex("01"))).hex(),
+         "must_reject": "bad-standard-id"},
+        {"name": "fd-and-rtr-together",
+         "desc": "Both the CAN FD and RTR bits set. CAN FD has no remote frames, so "
+                 "this describes a frame that cannot exist and MUST be rejected.",
+         "record": "can_batch",
+         "hex": (encode(schema, "can_header",
+                        dict(seq=15, dropped=0, t_base=1, count=1, flags=0))
+                 + can_rec(0, 0x1A0, b"", fd=True, rtr=True)).hex(),
+         "must_reject": "fd-rtr"},
+        {"name": "remote-frame-with-payload",
+         "desc": "RTR set with a one-byte payload. A remote frame carries no data, so "
+                 "len MUST be zero and this MUST be rejected.",
+         "record": "can_batch",
+         "hex": (encode(schema, "can_header",
+                        dict(seq=16, dropped=0, t_base=1, count=1, flags=0))
+                 + can_rec(0, 0x1A0, bytes.fromhex("FF"), rtr=True)).hex(),
+         "must_reject": "rtr-with-payload"},
         {"name": "len-above-maximum",
          "desc": "A record declaring a 100-byte payload. `len` is 0..64 even for CAN "
                  "FD, so the record is malformed and the batch MUST be rejected — not "
