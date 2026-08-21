@@ -35,7 +35,7 @@ sys.path.insert(0, str(HERE))
 import vtp1  # noqa: E402
 import vtp_device as dev  # noqa: E402
 import display as disp  # noqa: E402  (pure formatting; no GUI import at module level)
-import serve  # noqa: E402  (bless is imported lazily inside it)
+import serve  # noqa: E402  (bless is loaded lazily, so this needs no radio)
 
 FAILURES = []
 
@@ -475,6 +475,11 @@ def main():
     # The transport must tell the device when a link starts, or §8.2's sequence
     # restart and §9.2's table clear never happen. They did not, for a while,
     # because nothing called on_connect() outside this file.
+    # Importable without bless installed, which is the point: CI has no
+    # Bluetooth library and must still be able to check these.
+    check(serve.BlessServer is None,
+          "importing serve must not pull in bless; it is loaded when the "
+          "server starts, so a machine with no Bluetooth can still run this")
     tracker = serve.ConnectionTracker()
     check(tracker.update(False) is None, "no edge from disconnected to disconnected")
     check(tracker.update(True) == "connected", "a first connection is a rising edge")

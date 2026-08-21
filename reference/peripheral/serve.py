@@ -43,11 +43,29 @@ sys.path.insert(0, str(HERE))
 import vtp_device as dev  # noqa: E402
 import display as disp  # noqa: E402
 
-try:
-    from bless import (BlessServer, GATTCharacteristicProperties,
-                       GATTAttributePermissions)
-except ImportError:
-    sys.exit("bless is required: pip install bless")
+# Imported lazily, in _load_bless(), rather than at module scope. Half this
+# file is transport-independent -- the advertisement budget, the connection
+# edge detection -- and the selftest checks those on a machine that has no
+# Bluetooth and therefore no reason to install a Bluetooth library. Exiting the
+# process on a missing import made importing this module for two pure functions
+# take the whole test run down with it.
+BlessServer = GATTCharacteristicProperties = GATTAttributePermissions = None
+
+
+def _load_bless():
+    global BlessServer, GATTCharacteristicProperties, GATTAttributePermissions
+    if BlessServer is not None:
+        return
+    try:
+        from bless import (BlessServer as _Server,
+                           GATTCharacteristicProperties as _Props,
+                           GATTAttributePermissions as _Perms)
+    except ImportError:
+        raise RuntimeError(
+            "bless is required to run the peripheral: pip install bless"
+        ) from None
+    BlessServer, GATTCharacteristicProperties = _Server, _Props
+    GATTAttributePermissions = _Perms
 
 UUIDS = json.loads((ROOT / "schema" / "uuids.json").read_text())
 SERVICE = UUIDS["service"]["vtp1"]
@@ -238,6 +256,7 @@ class Peripheral:
     # -- lifecycle --------------------------------------------------------
 
     async def start(self):
+        _load_bless()
         CHAR_NAMES.update({v.lower(): k for k, v in CHAR.items()})
         # macOS TERMINATES any process that creates a CBPeripheralManager
         # without an NSBluetoothAlwaysUsageDescription in its Info.plist --
@@ -260,12 +279,10 @@ class Peripheral:
         log.info("creating service %s", SERVICE)
         await self.server.add_new_service(SERVICE)
 
-        read = GATTCharacteristicProperties.read
-        notify = GATTCharacteristicProperties.notify
-        write = GATTCharacteristicProperties.write
-        indicate = GATTCharacteristicProperties.indicate
-        readable = GATTAttributePermissions.readable
-        writeable = GATTAttributePermissions.writeable
+        props, perms = GATTCharacteristicProperties, GATTAttributePermissions
+        read, notify = props.read, props.notify
+        write, indicate = props.write, props.indicate
+        readable, writeable = perms.readable, perms.writeable
 
         # CoreBluetooth: "Characteristics with cached values must be
         # read-only". Only Info may carry an initial value; anything
