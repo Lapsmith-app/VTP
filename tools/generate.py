@@ -249,10 +249,18 @@ def spec_tables(schema):
         lines.append("| *other* | *unknown* | MUST decode as unknown, never as a default |")
         out[f"enum:{name}"] = "\n".join(lines)
 
-    lines = ["| Opcode | Command | Params | Notes |", "| --- | --- | --- | --- |"]
+    lines = ["| Opcode | Command | Params | Response detail | Notes |",
+             "| --- | --- | --- | --- | --- |"]
     for op in schema["control"]["opcodes"]:
-        lines.append(f"| `0x{op['value']:02X}` | `{op['name']}` | "
-                     f"{'`' + op['params'] + '`' if op['params'] else '—'} | {op.get('desc', '—')} |")
+        params = f"`{op['params']}`" if op["params"] else "—"
+        # Every opcode declares its response detail. Leaving that to prose is
+        # what made three of these unimplementable.
+        resp = op.get("response")
+        if resp is None:
+            sys.exit(f"control: opcode {op['name']} declares no response detail")
+        resp = f"`{resp}`" if resp else "—"
+        lines.append(f"| `0x{op['value']:02X}` | `{op['name']}` | {params} | "
+                     f"{resp} | {op.get('desc', '—')} |")
     out["control"] = "\n".join(lines)
 
     uu = json.loads(UUIDS.read_text())
@@ -787,6 +795,88 @@ def vectors(schema):
          "record": "info",
          "hex": (encode(schema, "info", dict(protocol_major=1)) + b"\x00").hex(),
          "must_reject": "length"},
+    ]
+
+    # ---- CAN subscription table -----------------------------------------
+    EXACT = 0x1FFFFFFF
+
+    def sub(handle, cid, mask, mode, arg):
+        return dict(handle=handle, id=cid, mask=mask, mode=mode, arg=arg)
+
+    def can_list(name, desc, page, entries, **kw):
+        raw = encode(schema, "can_list_page", page) + b"".join(
+            encode(schema, "can_subscription", e) for e in entries)
+        exp_entries = []
+        for e in entries:
+            row = {f["name"]: e.get(f["name"], 0)
+                   for f in schema["records"]["can_subscription"]["fields"]}
+            known = {m["value"] for m in SCHEMA_ENUMS["sub_mode"]}
+            row["mode_known"] = row["mode"] in known
+            exp_entries.append(row)
+        c = {"name": name, "desc": desc, "record": "can_list", "hex": raw.hex(),
+             "expect": {"page": {f["name"]: page.get(f["name"], 0)
+                                 for f in schema["records"]["can_list_page"]["fields"]},
+                        "entries": exp_entries}}
+        c.update(kw)
+        return c
+
+    files["can-list.json"] = [
+        can_list("empty-table",
+                 "No subscriptions installed. total 0, count 0 -- a legal answer, "
+                 "and the state a device MUST be in after CAN_RESET or a reconnect.",
+                 dict(total=0, index=0, count=0), []),
+        can_list("one-exact-id",
+                 "A single exact-id subscription. CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK "
+                 "with mask 0x1FFFFFFF, so that is what the table reports.",
+                 dict(total=1, index=0, count=1),
+                 [sub(1, 0x0C0, EXACT, 0, 0)]),
+        can_list("mask-and-exact-overlapping",
+                 "A mask covering 0x100-0x10F alongside an exact subscription for "
+                 "0x105. Both match frame 0x105; SPEC.md 9.3 says the more specific "
+                 "one governs, and both terms are visible here so a client can work "
+                 "out which.",
+                 dict(total=2, index=0, count=2),
+                 [sub(7, 0x100, 0x1FFFFFF0, 1, 100),
+                  sub(9, 0x105, EXACT, 0, 0)]),
+        can_list("first-page-of-many",
+                 "Six entries of fourteen: the most that fit beside a page header in "
+                 "a 97-byte response at the minimum ATT MTU. The client repeats from "
+                 "index + count.",
+                 dict(total=14, index=0, count=6),
+                 [sub(h, 0x200 + h, EXACT, 3, 4) for h in range(1, 7)]),
+        can_list("later-page",
+                 "The continuation: index 6 of the same fourteen. `total` is the whole "
+                 "table, not the page.",
+                 dict(total=14, index=6, count=6),
+                 [sub(h, 0x200 + h, EXACT, 3, 4) for h in range(7, 13)]),
+        can_list("start-beyond-end",
+                 "A client asked for index 99 of a 2-entry table. Not an error: ok, "
+                 "count 0, and the true total so the client can tell it overshot.",
+                 dict(total=2, index=99, count=0), []),
+        can_list("unknown-mode-in-table",
+                 "The device reports a subscription mode from a later minor. A client "
+                 "MUST report it unknown and MUST NOT read it as every_frame.",
+                 dict(total=1, index=0, count=1),
+                 [sub(3, 0x1A0, EXACT, 200, 0)]),
+        {"name": "short-payload",
+         "desc": "5 bytes: shorter than the page header. MUST be rejected.",
+         "record": "can_list",
+         "hex": encode(schema, "can_list_page", dict(total=0, index=0, count=0))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "long-payload",
+         "desc": "One entry declared, one present, plus a trailing byte. The length "
+                 "MUST equal the header plus count entries exactly.",
+         "record": "can_list",
+         "hex": (encode(schema, "can_list_page", dict(total=1, index=0, count=1))
+                 + encode(schema, "can_subscription", sub(1, 0x0C0, EXACT, 0, 0))
+                 + b"\x00").hex(),
+         "must_reject": "length"},
+        {"name": "count-exceeds-payload",
+         "desc": "Header claims three entries, one is present. MUST be rejected.",
+         "record": "can_list",
+         "hex": (encode(schema, "can_list_page", dict(total=3, index=0, count=3))
+                 + encode(schema, "can_subscription", sub(1, 0x0C0, EXACT, 0, 0))).hex(),
+         "must_reject": "truncated-record"},
     ]
 
     # ---- Link params -----------------------------------------------------

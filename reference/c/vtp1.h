@@ -122,6 +122,37 @@ typedef struct {
 int vtp_decode_info(const uint8_t *buf, size_t len,
                     vtp_info_t *out, const char **err);
 
+/* ---- CAN subscription table ------------------------------------------ */
+
+/* SPEC.md §9.5 — one page of the installed table, as CAN_LIST returns it. */
+typedef struct {
+    uint16_t total;     /* subscriptions installed, across all pages */
+    uint16_t index;     /* table index of the first entry in this page */
+    uint8_t  count;
+    uint8_t  reserved;
+} vtp_can_list_page_t;
+
+typedef struct {
+    uint16_t handle;
+    uint32_t id;
+    uint32_t mask;      /* a set bit is a bit of id that must match */
+    uint8_t  mode;
+    uint16_t arg;
+} vtp_can_subscription_t;
+
+/* Non-zero when the mode is one this build recognises. False means UNKNOWN and
+ * MUST NOT be read as every_frame. */
+int vtp_sub_mode_known(uint8_t mode);
+
+/* Validates the whole page before yielding anything, as the CAN batch decoder
+ * does, so a truncated trailing entry rejects the response rather than
+ * half-decoding it. */
+int vtp_decode_can_list(const uint8_t *buf, size_t len,
+                        vtp_can_list_page_t *page, const char **err);
+/* Caller supplies index < page->count; the page must already be validated. */
+void vtp_can_subscription_at(const uint8_t *buf, uint8_t index,
+                             vtp_can_subscription_t *out);
+
 /* ---- Link parameters ------------------------------------------------- */
 
 /* SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response. Reporting only:

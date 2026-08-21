@@ -495,18 +495,17 @@ requests and responses can be correlated. A device MUST respond to every
 request.
 
 <!-- BEGIN GENERATED: control -->
-| Opcode | Command | Params | Notes |
-| --- | --- | --- | --- |
-| `0x01` | `CAN_RESET` | — | Clear all subscriptions and stop the CAN stream |
-| `0x02` | `CAN_SUBSCRIBE` | `id:u32, mode:u8, arg:u16` | — |
-| `0x03` | `CAN_SUBSCRIBE_MASK` | `id:u32, mask:u32, mode:u8, arg:u16` | — |
-| `0x04` | `CAN_UNSUBSCRIBE` | `id:u32` | — |
-| `0x05` | `CAN_LIST` | — | Response carries the installed subscription table |
-| `0x10` | `GPS_SET_RATE` | `hz:u16` | — |
-| `0x20` | `IMU_SET_RATE` | `hz:u16` | — |
-| `0x30` | `TIME_SYNC` | `host_t_utc_ms:i64` | Response echoes the device t_device at receipt |
-| `0x31` | `GET_LINK_PARAMS` | — | Response detail is one link_params record |
-| `0x40` | `LIST_CHANNELS` | — | Monitor role: channels the client can provide |
+| Opcode | Command | Params | Response detail | Notes |
+| --- | --- | --- | --- | --- |
+| `0x01` | `CAN_RESET` | — | — | Clear all subscriptions and stop the CAN stream |
+| `0x02` | `CAN_SUBSCRIBE` | `id:u32, mode:u8, arg:u16` | `handle:u16` | Equivalent to CAN_SUBSCRIBE_MASK with mask 0x1FFFFFFF |
+| `0x03` | `CAN_SUBSCRIBE_MASK` | `id:u32, mask:u32, mode:u8, arg:u16` | `handle:u16` | — |
+| `0x04` | `CAN_UNSUBSCRIBE` | `handle:u16` | — | Removes one subscription by the handle its install returned |
+| `0x05` | `CAN_LIST` | `start:u16` | `can_list_page record` | One page of the table, starting at index `start` |
+| `0x10` | `GPS_SET_RATE` | `hz:u16` | — | — |
+| `0x20` | `IMU_SET_RATE` | `hz:u16` | — | — |
+| `0x30` | `TIME_SYNC` | `host_t_utc_ms:i64` | `t_device:u64` | The device clock at the instant the write was received |
+| `0x31` | `GET_LINK_PARAMS` | — | `link_params record` | — |
 <!-- END GENERATED: control -->
 
 `status` values:
@@ -521,6 +520,7 @@ request.
 | 4 | `rate_exceeded` | Would exceed can_max_frames_per_s |
 | 5 | `busy` | Retry later |
 | 6 | `needs_encryption` | Link is not encrypted |
+| 7 | `unknown_handle` | No subscription with that handle |
 | *other* | *unknown* | MUST decode as unknown, never as a default |
 <!-- END GENERATED: enum:status -->
 
@@ -537,11 +537,110 @@ Subscription modes:
 <!-- END GENERATED: enum:sub_mode -->
 
 A device MUST reject a subscription that would exceed `can_subscription_slots`
-or `can_max_frames_per_s` with the corresponding status, rather than accepting it
-and silently discarding frames.
+with `table_full`, rather than accepting it and silently discarding frames.
 
-`CAN_LIST` returns the installed subscription table so a client can verify
-device state rather than assume it.
+A client MAY have several requests outstanding. A device MUST process them in
+the order received and MUST respond to each. `tag` is opaque to the device and
+MUST be echoed unchanged.
+
+### 9.2 CAN subscriptions
+
+Installing a subscription returns a **handle**. The handle identifies that
+subscription for as long as it is installed; it is assigned by the device,
+opaque to the client, and MUST NOT be reused while the subscription it names
+exists. It MAY be reused once that subscription has been removed.
+
+`CAN_SUBSCRIBE` is exactly `CAN_SUBSCRIBE_MASK` with a mask of `0x1FFFFFFF`. A
+set bit in `mask` is a bit of `id` that a frame must match; a clear bit is a
+bit that may hold anything.
+
+Installing a subscription whose `id` and `mask` equal one already installed
+MUST update that subscription's `mode` and `arg` in place and return its
+existing handle. It MUST NOT consume a second slot. A client that reprograms
+unconditionally on every connection therefore cannot exhaust the table, which
+is the strategy §4 already forces on it.
+
+`CAN_UNSUBSCRIBE` takes a handle, not an identifier. An identifier is not a
+unique name for a subscription once masks exist, and a client that cannot say
+precisely which entry it means cannot verify what it removed. A handle that
+names no installed subscription MUST be answered `unknown_handle`.
+
+Subscriptions do **not** survive disconnection. A device MUST clear its
+subscription table when the link drops, so that a client always finds a known
+state and never inherits one it did not install.
+
+### 9.3 Overlapping subscriptions
+
+A frame matching several subscriptions MUST be forwarded **at most once**, and
+the subscription that governs it is chosen as follows:
+
+1. The match whose `mask` has the most bits set — the most specific.
+2. Among equally specific matches, the lowest handle.
+
+Both terms are visible to the client through `CAN_LIST`, so which subscription
+governs a frame is something a client can determine rather than discover. A
+device MUST NOT forward one frame once per matching subscription: duplicate
+frames on one bus-arrival timestamp are indistinguishable from a bus fault.
+
+### 9.4 Rate admission
+
+`rate_exceeded` is only decidable where the subscription itself bounds the
+rate. For `periodic` and `every_nth` a device MUST refuse at admission if the
+subscription would take the installed total beyond `can_max_frames_per_s`.
+
+For `every_frame` and `on_change` it is **not** decidable: the device cannot
+know what the bus will carry. A device MUST NOT refuse such a subscription on
+rate grounds. It admits, and if the resulting load exceeds what it can forward
+it sheds — reporting the loss in `dropped` and setting `flags` bit 0 (§6.3).
+A prediction the device cannot make is not a promise the protocol should ask
+for.
+
+### 9.5 The subscription table
+
+`CAN_LIST` returns one page of the installed table, beginning at index `start`:
+
+<!-- BEGIN GENERATED: can_list_page -->
+*One page of the CAN subscription table. Followed by `count` can_subscription entries.*
+
+Total: **6 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `total` | Subscriptions installed, across all pages |
+| 2 | 2 | `u16` | `index` | Table index of the first entry in this page |
+| 4 | 1 | `u8` | `count` | Entries in this page |
+| 5 | 1 | `u8` | `reserved` | **reserved — MUST be zero** |
+<!-- END GENERATED: can_list_page -->
+
+followed by `count` entries:
+
+<!-- BEGIN GENERATED: can_subscription -->
+*One installed CAN subscription, as the device holds it.*
+
+Total: **13 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `handle` | Identifies this subscription; assigned by the device |
+| 2 | 4 | `u32` | `id` | bits 0-28 arbitration id; b29 extended |
+| 6 | 4 | `u32` | `mask` | A set bit is a bit of `id` that must match |
+| 10 | 1 | `u8` | `mode` | enum `sub_mode` |
+| 11 | 2 | `u16` | `arg` | Interpretation depends on `mode` |
+<!-- END GENERATED: can_subscription -->
+
+The table is paged because it does not fit. At the minimum ATT MTU of 100 a
+response carries 97 bytes, of which three are the opcode, tag and status and
+six are the page header, leaving six entries — while `can_subscription_slots`
+may be far larger. A client reads from `start` 0 and repeats with
+`index + count` until that total reaches `total`.
+
+`start` beyond the end of the table is not an error: the device answers `ok`
+with `count` zero and the true `total`. `total` MUST be the number of
+subscriptions installed at the moment the page was produced.
+
+A device MUST report its table exactly as installed. `CAN_LIST` exists so a
+client can verify device state rather than assume it, and a device that
+normalises, reorders or summarises here defeats its only purpose.
 
 ### 9.1 Link parameters
 
@@ -709,6 +808,7 @@ needs verifying on a bench rather than in CI.
 | `gps_fix.fix_flags` | bits 4–7 | Additional solution-quality flags |
 | `info.capabilities` | bits 8–31 | Roles and features added in a later minor |
 | `can_header.reserved` | 2 bytes | In-band CAN metadata |
+| `can_list_page.reserved` | 1 byte | Paging metadata |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
 | `imu_header.flags` | bits 2–7 | Additional sensor groups |
 | Extension types | `0x00`–`0xFF` | `0x80`–`0xFF` are reserved for vendor-private use and MUST NOT be assigned by this specification |

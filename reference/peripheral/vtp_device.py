@@ -45,10 +45,15 @@ FIX_3D = 3
 CAN_RESET, CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK = 0x01, 0x02, 0x03
 CAN_UNSUBSCRIBE, CAN_LIST = 0x04, 0x05
 GPS_SET_RATE, IMU_SET_RATE, TIME_SYNC = 0x10, 0x20, 0x30
-GET_LINK_PARAMS, LIST_CHANNELS = 0x31, 0x40
+GET_LINK_PARAMS = 0x31
 
 ST_OK, ST_UNSUPPORTED, ST_BAD_PARAMS = 0, 1, 2
 ST_TABLE_FULL, ST_RATE_EXCEEDED = 3, 4
+ST_UNKNOWN_HANDLE = 7
+
+# SPEC.md §9.2 — CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK with every id bit set.
+MASK_EXACT = 0x1FFFFFFF
+CAN_ID_BITS = 0x1FFFFFFF
 
 SUB_EVERY_FRAME, SUB_PERIODIC, SUB_ON_CHANGE, SUB_EVERY_NTH = 0, 1, 2, 3
 
@@ -130,10 +135,12 @@ class VtpDevice:
         # batch it invalidates -- wait here for the next poll to drain them.
         self._deferred = []
 
-        # id -> (mode, arg, last_emit_us, counter). Empty until a client
-        # subscribes: SPEC.md §9's CAN_RESET state is the starting state, and a
-        # device that streamed before being asked would be inventing consent.
+        # handle -> {id, mask, mode, arg, last, seen}. Empty until a client
+        # subscribes: SPEC.md §9.2 makes the cleared table the state after a
+        # reconnect, and a device that streamed before being asked would be
+        # inventing consent.
         self._subscriptions = {}
+        self._next_handle = 1
         self._link = None
 
     # -- clock ------------------------------------------------------------
@@ -313,22 +320,31 @@ class VtpDevice:
             self._next_can_flush_us = now + 100_000
         return [(c, p) for c, p in out if p is not None]
 
+    def _governing(self, cid):
+        """SPEC.md §9.3 — of the subscriptions matching `cid`, the one that
+        governs: most specific mask first, then lowest handle. A frame is
+        forwarded at most once, whatever else matches it."""
+        matches = [(h, s) for h, s in self._subscriptions.items()
+                   if (cid & s["mask"]) == (s["id"] & s["mask"])]
+        if not matches:
+            return None, None
+        return min(matches, key=lambda hs: (-bin(hs[1]["mask"]).count("1"), hs[0]))
+
     def _due_can_frames(self, now):
         for cid, rate_hz, payload in self._bus_frames(now):
-            sub = self._subscriptions.get(cid)
+            handle, sub = self._governing(cid)
             if sub is None:
                 continue
-            mode, arg, last, count = sub
             interval = round(1_000_000 / rate_hz)
-            if now - last < interval:
+            if now - sub["last"] < interval:
                 continue
-            count += 1
+            sub["seen"] += 1
             emit = True
-            if mode == SUB_PERIODIC and arg:
-                emit = (now - sub[2]) >= arg * 1000
-            elif mode == SUB_EVERY_NTH and arg:
-                emit = (count % arg) == 0
-            self._subscriptions[cid] = (mode, arg, now, count)
+            if sub["mode"] == SUB_PERIODIC and sub["arg"]:
+                emit = (now - sub["last"]) >= sub["arg"] * 1000
+            elif sub["mode"] == SUB_EVERY_NTH and sub["arg"]:
+                emit = (sub["seen"] % sub["arg"]) == 0
+            sub["last"] = now
             if emit:
                 yield {"id": cid, "payload": payload, "_t": now}
 
@@ -353,24 +369,59 @@ class VtpDevice:
             self._can_pending, self._can_batch_t0 = [], None
             return reply(ST_OK)
 
-        if opcode == CAN_SUBSCRIBE:
-            if len(params) != 7:
+        if opcode in (CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK):
+            want = 7 if opcode == CAN_SUBSCRIBE else 11
+            if len(params) != want:
                 return reply(ST_BAD_PARAMS)
-            cid, mode, arg = struct.unpack("<IBH", params)
+            if opcode == CAN_SUBSCRIBE:
+                cid, mode, arg = struct.unpack("<IBH", params)
+                mask = MASK_EXACT
+            else:
+                cid, mask, mode, arg = struct.unpack("<IIBH", params)
             if mode > SUB_EVERY_NTH:
                 return reply(ST_BAD_PARAMS)
-            if (cid not in self._subscriptions
-                    and len(self._subscriptions) >= CAN_SUBSCRIPTION_SLOTS):
+            cid &= CAN_ID_BITS
+            mask &= CAN_ID_BITS
+
+            # SPEC.md §9.2 — the same (id, mask) updates in place and keeps its
+            # handle, so a client reprogramming on every connect cannot exhaust
+            # the table.
+            for h, s in self._subscriptions.items():
+                if s["id"] == cid and s["mask"] == mask:
+                    s.update(mode=mode, arg=arg)
+                    return reply(ST_OK, struct.pack("<H", h))
+
+            if len(self._subscriptions) >= CAN_SUBSCRIPTION_SLOTS:
                 return reply(ST_TABLE_FULL)
-            self._subscriptions[cid & 0x1FFFFFFF] = (mode, arg, 0, 0)
-            return reply(ST_OK)
+            # SPEC.md §9.4 — admission is only decidable where the subscription
+            # itself bounds the rate. every_frame and on_change are admitted and
+            # shed if they overrun; refusing them would be a prediction about
+            # bus traffic the device cannot make.
+            if mode in (SUB_PERIODIC, SUB_EVERY_NTH) and arg:
+                if self._predicted_rate(mode, arg) > CAN_MAX_FRAMES_PER_S:
+                    return reply(ST_RATE_EXCEEDED)
+
+            handle = self._next_handle
+            self._next_handle = (self._next_handle % 0xFFFF) + 1
+            self._subscriptions[handle] = {
+                "id": cid, "mask": mask, "mode": mode, "arg": arg,
+                "last": 0, "seen": 0,
+            }
+            return reply(ST_OK, struct.pack("<H", handle))
 
         if opcode == CAN_UNSUBSCRIBE:
-            if len(params) != 4:
+            if len(params) != 2:
                 return reply(ST_BAD_PARAMS)
-            (cid,) = struct.unpack("<I", params)
-            self._subscriptions.pop(cid & 0x1FFFFFFF, None)
+            (handle,) = struct.unpack("<H", params)
+            if self._subscriptions.pop(handle, None) is None:
+                return reply(ST_UNKNOWN_HANDLE)
             return reply(ST_OK)
+
+        if opcode == CAN_LIST:
+            if len(params) != 2:
+                return reply(ST_BAD_PARAMS)
+            (start,) = struct.unpack("<H", params)
+            return reply(ST_OK, self._list_page(start))
 
         if opcode == GPS_SET_RATE or opcode == IMU_SET_RATE:
             if len(params) != 2:
@@ -398,11 +449,33 @@ class VtpDevice:
         if opcode == GET_LINK_PARAMS:
             return reply(ST_OK, self._link_params())
 
-        # CAN_SUBSCRIBE_MASK, CAN_LIST and LIST_CHANNELS are declined rather
-        # than guessed at. See README.md: SPEC.md names them but defines no
-        # response payload, and inventing one here would create a de facto
-        # format that no decoder in this repository can check.
         return reply(ST_UNSUPPORTED)
+
+    def _predicted_rate(self, mode, arg):
+        """Frames per second the installed table would produce, plus a
+        candidate. Only rate-bounded modes are counted, because only they can
+        be predicted at all (SPEC.md §9.4)."""
+        def rate(m, a):
+            if m == SUB_PERIODIC and a:
+                return 1000 / a
+            if m == SUB_EVERY_NTH and a:
+                return 100 / a          # against a nominal 100 Hz signal
+            return 0
+        total = sum(rate(s["mode"], s["arg"]) for s in self._subscriptions.values())
+        return total + rate(mode, arg)
+
+    def _list_page(self, start):
+        """SPEC.md §9.5. One page from `start`, sized to the notification
+        budget. A start beyond the end is ok with count 0, not an error."""
+        table = sorted(self._subscriptions.items())
+        # 3 bytes of opcode/tag/status, then the page header, then entries.
+        room = (self.notify_bytes - 3 - 6) // 13
+        page = table[start:start + max(0, room)]
+        header = {"total": len(table), "index": start,
+                  "count": len(page), "reserved": 0}
+        entries = [{"handle": h, "id": s["id"], "mask": s["mask"],
+                    "mode": s["mode"], "arg": s["arg"]} for h, s in page]
+        return enc.encode_can_list(header, entries)
 
     def _link_params(self):
         link = self._link or {}

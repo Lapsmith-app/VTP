@@ -241,6 +241,26 @@ int main(void) {
                    v.can_max_payload, v.clock_flags, v.max_notify_bytes);
             finish(enc, vtp_encode_info(&v, enc, sizeof enc));
 
+        } else if (!strcmp(record, "can_list")) {
+            vtp_can_list_page_t pg;
+            if (vtp_decode_can_list(buf, len, &pg, &err)) { reject(err); continue; }
+            vtp_can_subscription_t subs[256];
+            for (uint8_t i = 0; i < pg.count; i++)
+                vtp_can_subscription_at(buf, i, &subs[i]);
+
+            printf("{\"ok\":true,\"page\":{\"total\":%u,\"index\":%u,"
+                   "\"count\":%u,\"reserved\":%u},\"entries\":[",
+                   pg.total, pg.index, pg.count, pg.reserved);
+            for (uint8_t i = 0; i < pg.count; i++) {
+                const vtp_can_subscription_t *s = &subs[i];
+                printf("%s{\"handle\":%u,\"id\":%u,\"mask\":%u,\"mode\":%u,"
+                       "\"arg\":%u,\"mode_known\":%s}",
+                       i ? "," : "", s->handle, s->id, s->mask, s->mode, s->arg,
+                       vtp_sub_mode_known(s->mode) ? "true" : "false");
+            }
+            printf("]");
+            finish(enc, vtp_encode_can_list(&pg, subs, enc, sizeof enc));
+
         } else if (!strcmp(record, "link_params")) {
             vtp_link_params_t l;
             if (vtp_decode_link_params(buf, len, &l, &err)) { reject(err); continue; }

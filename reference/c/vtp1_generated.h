@@ -87,6 +87,21 @@
 #define VTP_IMU_SAMPLE_OFF_GY 8
 #define VTP_IMU_SAMPLE_OFF_GZ 10
 
+/* One page of the CAN subscription table. Followed by `count` can_subscription entries. */
+#define VTP_CAN_LIST_PAGE_SIZE 6
+#define VTP_CAN_LIST_PAGE_OFF_TOTAL 0
+#define VTP_CAN_LIST_PAGE_OFF_INDEX 2
+#define VTP_CAN_LIST_PAGE_OFF_COUNT 4
+#define VTP_CAN_LIST_PAGE_OFF_RESERVED 5
+
+/* One installed CAN subscription, as the device holds it. */
+#define VTP_CAN_SUBSCRIPTION_SIZE 13
+#define VTP_CAN_SUBSCRIPTION_OFF_HANDLE 0
+#define VTP_CAN_SUBSCRIPTION_OFF_ID 2
+#define VTP_CAN_SUBSCRIPTION_OFF_MASK 6
+#define VTP_CAN_SUBSCRIPTION_OFF_MODE 10
+#define VTP_CAN_SUBSCRIPTION_OFF_ARG 11
+
 /* The device's view of the negotiated link. Reported, never negotiated here. */
 #define VTP_LINK_PARAMS_SIZE 16
 #define VTP_LINK_PARAMS_OFF_VALIDITY 0
@@ -116,6 +131,7 @@ typedef enum {
     VTP_STATUS_RATE_EXCEEDED = 4,
     VTP_STATUS_BUSY = 5,
     VTP_STATUS_NEEDS_ENCRYPTION = 6,
+    VTP_STATUS_UNKNOWN_HANDLE = 7,
 } vtp_status_t;
 
 typedef enum {

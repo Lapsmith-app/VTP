@@ -154,6 +154,18 @@ def encode_info(info):
     return _pack("info", info)
 
 
+def encode_can_list(page, entries):
+    """SPEC.md §9.5. One page header followed by `count` subscription entries."""
+    if len(entries) != page.get("count", 0):
+        raise EncodeError(
+            f"can_list_page.count is {page.get('count', 0)} but "
+            f"{len(entries)} entr(ies) were supplied")
+    out = bytearray(_pack("can_list_page", page))
+    for e in entries:
+        out += _pack("can_subscription", e)
+    return bytes(out)
+
+
 def encode_link_params(link_params):
     """SPEC.md §9.1. The detail of a GET_LINK_PARAMS response."""
     return _pack("link_params", _gate("link_params", link_params))
@@ -167,4 +179,5 @@ ENCODERS = {
     "imu_batch": lambda d: encode_imu_batch(d["header"], d["samples"]),
     "info": encode_info,
     "link_params": encode_link_params,
+    "can_list": lambda d: encode_can_list(d["page"], d["entries"]),
 }
