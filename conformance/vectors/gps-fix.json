@@ -397,6 +397,44 @@
       }
     },
     {
+      "name": "dropped-saturated",
+      "desc": "dropped at its ceiling. SPEC.md 8.3: the counter saturates and MUST NOT wrap, so a receiver reads this as 'at least 65535', never as exactly that many.",
+      "record": "gps_fix",
+      "hex": "0c00ffffff0f000015cd5b0700000000007ccd2d9b010000d067b31ef8aeeaffb8880000743a0100a861000080f3ffff9600000040291c0252030000780500005a0000008c0003110900",
+      "expect": {
+        "seq": 12,
+        "dropped": 65535,
+        "validity": 4095,
+        "t_device": 123456789,
+        "t_utc": 1766000000000,
+        "lat": 515074000,
+        "lon": -1397000,
+        "alt_msl": 35000,
+        "alt_ellipsoid": 80500,
+        "vel_n": 25000,
+        "vel_e": -3200,
+        "vel_d": 150,
+        "head_mot": 35400000,
+        "h_acc": 850,
+        "v_acc": 1400,
+        "s_acc": 90,
+        "p_dop": 140,
+        "fix_type": 3,
+        "num_sv": 17,
+        "fix_flags": 9,
+        "ext_count": 0,
+        "fix_type_known": true
+      },
+      "expect_absent": [],
+      "expect_scaled": {
+        "lat": 51.5074,
+        "lon": -0.1397,
+        "head_mot": 354.0,
+        "p_dop": 1.4
+      },
+      "note": "A wrapping drop counter reads 0 after 65536 discards -- perfect health at the moment the device is losing data fastest. Saturation is the 1.1 rule applied to a counter."
+    },
+    {
       "name": "unknown-fix-type",
       "desc": "An enum value from a future minor. A decoder MUST report unknown, and MUST NOT fall back to 3D.",
       "record": "gps_fix",

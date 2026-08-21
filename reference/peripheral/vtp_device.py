@@ -123,7 +123,13 @@ class VtpDevice:
         self.imu_hz = imu_hz
         self.circuit = circuit or Circuit()
 
-        self._gps_seq = self._can_seq = self._imu_seq = 0
+        # SPEC.md §8.2 — seq counts notifications on its own characteristic and
+        # restarts at 0 per connection, so a client never has to tell a
+        # reconnection from a wrap.
+        self._seq = {"gps": 0, "can": 0, "imu": 0}
+        # SPEC.md §8.3 — items accepted and then discarded. Saturating, so a
+        # catastrophic loss can never read as perfect health.
+        self._dropped = {"gps": 0, "can": 0, "imu": 0}
         self._next_gps_us = 0
         self._next_imu_us = 0
         self._imu_pending = []
@@ -149,8 +155,39 @@ class VtpDevice:
         return (time.monotonic_ns() - self._origin_ns) // 1000
 
     def now_us(self):
-        """SPEC.md §8 — one monotonic microsecond clock for every role."""
+        """SPEC.md §8.1 — one monotonic microsecond clock for every role."""
         return self._clock()
+
+    def on_connect(self):
+        """SPEC.md §8.2 and §9.2 — a fresh connection starts from a known
+        state: sequence numbers from zero and no subscriptions inherited."""
+        self._seq = {k: 0 for k in self._seq}
+        self._dropped = {k: 0 for k in self._dropped}
+        self._subscriptions.clear()
+        self._can_pending, self._can_batch_t0 = [], None
+        self._imu_pending, self._imu_batch_t0 = [], None
+        self._deferred = []
+
+    def simulate_loss(self, stream, count):
+        """Pretend the device accepted `count` items and had to discard them.
+
+        Not decoration: a client has to handle loss, and loss on a desktop
+        peripheral otherwise never happens, so the path that reads `dropped`
+        would go untested until a real device on a real track produced some.
+        """
+        if stream not in self._dropped:
+            raise ValueError(f"unknown stream {stream!r}")
+        self._dropped[stream] += count
+
+    def _next_seq(self, stream):
+        self._seq[stream] = (self._seq[stream] + 1) & 0xFFFF
+        return self._seq[stream]
+
+    def _take_dropped(self, stream):
+        """SPEC.md §8.3 — saturates at 65535 and MUST NOT wrap."""
+        n = min(self._dropped[stream], 0xFFFF)
+        self._dropped[stream] = 0
+        return n
 
     @property
     def notify_bytes(self):
@@ -181,13 +218,13 @@ class VtpDevice:
 
     def _gps_fix(self, now):
         st = self.circuit.at(now / 1e6)
-        self._gps_seq = (self._gps_seq + 1) & 0xFFFF
+
         validity = (V_T_UTC | V_T_UTC_RESOLVED | V_POSITION | V_ALT_MSL
                     | V_VELOCITY | V_HEAD_MOT | V_H_ACC | V_V_ACC | V_S_ACC
                     | V_P_DOP | V_NUM_SV)
         return enc.encode_gps_fix({
-            "seq": self._gps_seq,
-            "dropped": 0,
+            "seq": self._next_seq("gps"),
+            "dropped": self._take_dropped("gps"),
             "validity": validity,
             "t_device": now,
             "t_utc": self._wall_origin_ms + now // 1000,
@@ -233,10 +270,9 @@ class VtpDevice:
     def _flush_imu(self):
         if not self._imu_pending:
             return None
-        self._imu_seq = (self._imu_seq + 1) & 0xFFFF
         payload = enc.encode_imu_batch({
-            "seq": self._imu_seq,
-            "dropped": 0,
+            "seq": self._next_seq("imu"),
+            "dropped": self._take_dropped("imu"),
             "t_base": self._imu_batch_t0,
             "period": self._imu_period_us,
             "count": len(self._imu_pending),
@@ -263,10 +299,9 @@ class VtpDevice:
         return max(1, (self.notify_bytes - header) // (7 + 8))
 
     def _flush_can(self, now):
-        self._can_seq = (self._can_seq + 1) & 0xFFFF
         header = {
-            "seq": self._can_seq,
-            "dropped": 0,
+            "seq": self._next_seq("can"),
+            "dropped": self._take_dropped("can"),
             "t_base": self._can_batch_t0 if self._can_pending else now,
             "count": len(self._can_pending),
             "flags": 0,

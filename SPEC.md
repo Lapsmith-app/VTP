@@ -224,8 +224,8 @@ Total: **74 bytes**. All fields little-endian.
 
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `seq` | Increments per fix produced, including dropped ones. Wraps. |
-| 2 | 2 | `u16` | `dropped` | Fixes discarded since the previous notification |
+| 0 | 2 | `u16` | `seq` | Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection |
+| 2 | 2 | `u16` | `dropped` | Fixes accepted then discarded since the previous notification; saturates, never wraps |
 | 4 | 4 | `u32` | `validity` | bitmask `gps_validity` |
 | 8 | 8 | `u64` | `t_device` | `us`; Monotonic device clock |
 | 16 | 8 | `i64` | `t_utc` | `ms`; valid when `validity` bit 0 (`t_utc`) is set; Unix epoch |
@@ -345,8 +345,8 @@ Total: **16 bytes**. All fields little-endian.
 
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `seq` | — |
-| 2 | 2 | `u16` | `dropped` | Frames the device discarded since the previous notification |
+| 0 | 2 | `u16` | `seq` | Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection |
+| 2 | 2 | `u16` | `dropped` | Frames accepted then discarded since the previous notification; excludes frames no subscription matched; saturates |
 | 4 | 8 | `u64` | `t_base` | `us`; Bus-arrival time of record 0 |
 | 12 | 1 | `u8` | `count` | — |
 | 13 | 1 | `u8` | `flags` | bit0 device is shedding load |
@@ -404,8 +404,8 @@ Total: **20 bytes**. All fields little-endian.
 
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `seq` | — |
-| 2 | 2 | `u16` | `dropped` | Samples discarded since the previous notification |
+| 0 | 2 | `u16` | `seq` | Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection |
+| 2 | 2 | `u16` | `dropped` | Samples accepted then discarded since the previous notification; saturates, never wraps |
 | 4 | 8 | `u64` | `t_base` | `us`; Timestamp of sample 0 |
 | 12 | 4 | `u32` | `period` | `us`; Interval between samples |
 | 16 | 1 | `u8` | `count` | — |
@@ -460,7 +460,12 @@ sensor anyway.
 
 ---
 
-## 8. Device clock
+## 8. Clock, sequence and loss
+
+The three bookkeeping fields every stream carries. All are cross-cutting: a
+client uses them the same way whichever characteristic they arrived on.
+
+### 8.1 The clock
 
 A device MUST maintain one monotonic microsecond clock and MUST timestamp GPS
 fixes, CAN frames and IMU samples against it. This single shared time base is
@@ -482,6 +487,48 @@ specified so that two conforming implementations agree bit for bit rather than
 by accident, which they otherwise do not — a decoder in a language with
 arbitrary-precision integers produces a different answer from one in C for the
 same bytes.
+
+### 8.2 Sequence
+
+`seq` counts **notifications sent on its own characteristic**. It increments by
+exactly one per notification, on all three streams, and wraps at 65535.
+
+A gap therefore means one thing and one thing only: notifications the device
+sent that the client did not receive. A receiver MUST NOT treat a wrap from
+65535 to 0 as a gap.
+
+`seq` restarts at 0 on the first notification sent on that characteristic after
+a connection is established. A client consequently never has to distinguish a
+reconnection from a wrap, and the protocol needs no session or boot identifier
+to make that distinction for it.
+
+Counting notifications rather than source items is what makes the field uniform.
+A CAN batch header cannot count frames the device never accepted, and an IMU
+header cannot count samples without jumping by `count` each time; only the
+notification is a thing all three streams have exactly one of.
+
+### 8.3 Loss
+
+`dropped` counts items the device **accepted and then discarded**, since the
+previous notification on that characteristic.
+
+Accepted is the load-bearing word. A CAN frame that matched no subscription was
+never accepted, and a device MUST NOT count it. `dropped` is a report of
+capacity that was exceeded, not of filtering that worked as instructed, and
+conflating the two would make the field useless for the only thing it is for.
+
+`dropped` **saturates** at 65535. It MUST NOT wrap.
+
+This is the one counter in VTP/1 that saturates, and the reason is §1.1. A
+wrapping drop counter reads 0 after exactly 65536 discards — reporting perfect
+health at the precise moment the device is losing data fastest. That is a
+plausible wrong value, and the specification spends the ceiling rather than
+allow one. A receiver MUST read 65535 as "at least 65535", never as exactly
+that many.
+
+Together the two fields separate the two ways data goes missing, and neither can
+mask the other: `seq` gaps are the transport losing what the device sent, and
+`dropped` is the device losing what the source produced.
 
 ---
 
