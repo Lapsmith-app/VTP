@@ -86,6 +86,18 @@
 #define VTP_IMU_SAMPLE_OFF_GY 8
 #define VTP_IMU_SAMPLE_OFF_GZ 10
 
+/* The device's view of the negotiated link. Reported, never negotiated here. */
+#define VTP_LINK_PARAMS_SIZE 16
+#define VTP_LINK_PARAMS_OFF_VALIDITY 0
+#define VTP_LINK_PARAMS_OFF_ATT_MTU 2
+#define VTP_LINK_PARAMS_OFF_LL_MAX_TX_OCTETS 4
+#define VTP_LINK_PARAMS_OFF_LL_MAX_RX_OCTETS 6
+#define VTP_LINK_PARAMS_OFF_CONN_INTERVAL 8
+#define VTP_LINK_PARAMS_OFF_PERIPHERAL_LATENCY 10
+#define VTP_LINK_PARAMS_OFF_SUPERVISION_TIMEOUT 12
+#define VTP_LINK_PARAMS_OFF_PHY_TX 14
+#define VTP_LINK_PARAMS_OFF_PHY_RX 15
+
 typedef enum {
     VTP_FIX_TYPE_NONE = 0,
     VTP_FIX_TYPE_DEAD_RECKON = 1,
@@ -111,6 +123,12 @@ typedef enum {
     VTP_SUB_MODE_ON_CHANGE = 2,
     VTP_SUB_MODE_EVERY_NTH = 3,
 } vtp_sub_mode_t;
+
+typedef enum {
+    VTP_PHY_LE_1M = 1,
+    VTP_PHY_LE_2M = 2,
+    VTP_PHY_LE_CODED = 3,
+} vtp_phy_t;
 
 #define VTP_GPS_VALIDITY_T_UTC (1u << 0)
 #define VTP_GPS_VALIDITY_T_UTC_RESOLVED (1u << 1)
@@ -138,5 +156,10 @@ typedef enum {
 #define VTP_CAPABILITIES_CAN_FD (1u << 5)
 #define VTP_CAPABILITIES_MASKED_SUBSCRIPTIONS (1u << 6)
 #define VTP_CAPABILITIES_ON_CHANGE_SUBSCRIPTIONS (1u << 7)
+
+#define VTP_LINK_VALIDITY_ATT_MTU (1u << 0)
+#define VTP_LINK_VALIDITY_LL_DATA_LENGTH (1u << 1)
+#define VTP_LINK_VALIDITY_CONN_PARAMS (1u << 2)
+#define VTP_LINK_VALIDITY_PHY (1u << 3)
 
 #endif /* VTP1_GENERATED_H */

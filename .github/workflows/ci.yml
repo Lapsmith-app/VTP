@@ -9,9 +9,9 @@ jobs:
   conformance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -23,6 +23,13 @@ jobs:
       # can disagree — which is the failure this repository exists to prevent.
       - name: Generated artefacts are up to date
         run: python3 tools/generate.py --check
+
+      # The drift check above covers GENERATED artefacts. This covers the
+      # hand-written prose that describes them: section cross-references that
+      # resolve, and stated corpus counts that match the corpus. Both drift
+      # silently and neither is visible to the conformance suite.
+      - name: Documentation claims match the artefacts
+        run: python3 tools/check_docs.py
 
       - name: Build C reference decoder
         run: make -C reference/c
@@ -62,3 +69,12 @@ jobs:
           cp /tmp/vtp1_encode.c.orig reference/c/vtp1_encode.c
           make -C reference/c
           echo "Seeded encoder fault correctly detected."
+
+      # The two steps above are handcrafted regression guards for specific
+      # bugs. This sweeps whole CLASSES of fault -- every encoder validity
+      # gate, every decoder field offset, every exact-length check -- and
+      # fails on any mutation the corpus does not notice. A survivor is a hole
+      # in the corpus, not a bug in the decoder. It found eight on its first
+      # run, none of which review had caught.
+      - name: Conformance suite has no coverage holes
+        run: python3 tools/mutate.py

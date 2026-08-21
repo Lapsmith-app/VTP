@@ -61,6 +61,41 @@
         "clock_flags": 3,
         "max_notify_bytes": 498
       }
+    },
+    {
+      "name": "rate-below-maximum",
+      "desc": "A device running below its ceiling: 10 Hz of a possible 25, 100 Hz of a possible 833. Current rate and maximum rate are separate fields and a client MUST NOT read one for the other.",
+      "record": "info",
+      "hex": "0100150000000a001900000000000000640041030800f400",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 21,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 25,
+        "can_subscription_slots": 0,
+        "can_max_frames_per_s": 0,
+        "imu_rate_hz": 100,
+        "imu_max_rate_hz": 833,
+        "can_max_payload": 8,
+        "clock_flags": 0,
+        "max_notify_bytes": 244
+      },
+      "note": "The only vector where the current and maximum rates differ. Without it a decoder can read gps_rate_hz from gps_max_rate_hz's offset and pass the whole corpus -- found by tools/mutate.py, not by review."
+    },
+    {
+      "name": "short-payload",
+      "desc": "23 bytes. Info is fixed-size; a truncated read MUST be rejected.",
+      "record": "info",
+      "hex": "0100000000000000000000000000000000000000000000",
+      "must_reject": "length"
+    },
+    {
+      "name": "long-payload",
+      "desc": "25 bytes. Info has no extension mechanism, so trailing bytes MUST be rejected rather than ignored.",
+      "record": "info",
+      "hex": "01000000000000000000000000000000000000000000000000",
+      "must_reject": "length"
     }
   ]
 }

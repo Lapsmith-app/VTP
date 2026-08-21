@@ -1,6 +1,17 @@
 # VTP/1 — Vehicle Telemetry Protocol over Bluetooth LE
 
-**Version 1.0 · Normative specification**
+**Normative specification · Protocol major 1 · Specification status: draft**
+
+> **This document is a draft (`v0.x`) and the wire format may change without
+> notice.** The compatibility guarantees in §11 take effect at specification
+> version 1.0 and not before. Do not ship hardware against this document yet.
+> [README.md](README.md) carries current status.
+
+Two version numbers appear in this document and they are independent.
+**Protocol major 1** is the wire identity: it fixes the service UUID family
+(§3.1) and the value of `protocol_major` (§4), and it is what "VTP/1" names.
+The **specification version** is this document's own release, and has not yet
+reached 1.0.
 
 The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
 RECOMMENDED, MAY and OPTIONAL are to be interpreted as described in
@@ -51,6 +62,8 @@ implementation MUST honour all three:
 | GATT role | Device is peripheral, host application is central |
 | Byte order | **Little-endian, every field, no exceptions** |
 | Minimum ATT MTU | 100 |
+| Link-layer payload | Largest the controller supports, up to 251 octets |
+| PHY | Device SHOULD request LE 2M; MUST function on LE 1M |
 | Connection interval | Device SHOULD request 15 ms, peripheral latency 0, while streaming |
 
 A device MUST function correctly at an ATT MTU of 100 and MUST use up to the
@@ -62,6 +75,42 @@ Revision.
 
 Signed integers are two's complement. Reserved fields MUST be written as zero
 and MUST be ignored on receive.
+
+The three subsections below are the only requirements in this specification that
+the conformance corpus cannot test, because none of them appears in any payload.
+§12.1 says what follows from that; `GET_LINK_PARAMS` (§9.1) is how a client
+checks them at run time.
+
+### 2.1 Link-layer payload
+
+A device MUST negotiate the largest link-layer payload its controller supports,
+up to `max_tx_octets` and `max_rx_octets` of 251.
+
+A large ATT MTU is not by itself a throughput figure. Sent over the 27-byte
+default link-layer payload, a 247-byte notification is fragmented across ten or
+more packets, each carrying its own header, inter-frame spacing and
+acknowledgement — roughly three times the radio airtime for the same bytes. A
+device that negotiates a large MTU without extending the link-layer payload has
+not gained the throughput the MTU implies, and takes that airtime from every
+other peripheral sharing the central's radio.
+
+### 2.2 PHY
+
+A device SHOULD request the LE 2M PHY and MUST function correctly on the LE 1M
+PHY. The 2M PHY halves the airtime of a given payload; no other part of this
+specification changes with it.
+
+### 2.3 Connection parameters
+
+The connection interval and peripheral latency are granted by the central, not
+chosen by the device. A device MUST function correctly at whatever values the
+central applies, including values it did not request and values that change
+during a connection.
+
+A device MUST NOT assume it received the interval it requested; a central
+serving several peripherals commonly grants 30 ms or more. Batch flush timing
+(§6.1, §7) MUST therefore follow the device's own clock rather than an assumed
+interval, and MUST respect the `dt` bound of §6.1 in every case.
 
 ---
 
@@ -430,6 +479,7 @@ request.
 | `0x10` | `GPS_SET_RATE` | `hz:u16` | — |
 | `0x20` | `IMU_SET_RATE` | `hz:u16` | — |
 | `0x30` | `TIME_SYNC` | `host_t_utc_ms:i64` | Response echoes the device t_device at receipt |
+| `0x31` | `GET_LINK_PARAMS` | — | Response detail is one link_params record |
 | `0x40` | `LIST_CHANNELS` | — | Monitor role: channels the client can provide |
 <!-- END GENERATED: control -->
 
@@ -466,6 +516,71 @@ and silently discarding frames.
 
 `CAN_LIST` returns the installed subscription table so a client can verify
 device state rather than assume it.
+
+### 9.1 Link parameters
+
+The detail of a successful `GET_LINK_PARAMS` response is one `link_params`
+record:
+
+<!-- BEGIN GENERATED: link_params -->
+*The device's view of the negotiated link. Reported, never negotiated here.*
+
+Total: **16 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `validity` | bitmask `link_validity` |
+| 2 | 2 | `u16` | `att_mtu` | `bytes`; valid when `validity` bit 0 (`att_mtu`) is set |
+| 4 | 2 | `u16` | `ll_max_tx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
+| 6 | 2 | `u16` | `ll_max_rx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
+| 8 | 2 | `u16` | `conn_interval` | `1.25ms`; valid when `validity` bit 2 (`conn_params`) is set |
+| 10 | 2 | `u16` | `peripheral_latency` | valid when `validity` bit 2 (`conn_params`) is set; Connection events the device may skip |
+| 12 | 2 | `u16` | `supervision_timeout` | `10ms`; valid when `validity` bit 2 (`conn_params`) is set |
+| 14 | 1 | `u8` | `phy_tx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
+| 15 | 1 | `u8` | `phy_rx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
+<!-- END GENERATED: link_params -->
+
+<!-- BEGIN GENERATED: bitmask:link_validity -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `att_mtu` | att_mtu carries the negotiated value |
+| 1 | `ll_data_length` | ll_max_tx_octets and ll_max_rx_octets are valid |
+| 2 | `conn_params` | conn_interval, peripheral_latency and supervision_timeout are all valid |
+| 3 | `phy` | phy_tx and phy_rx are valid |
+| 4+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:link_validity -->
+
+`phy_tx` and `phy_rx`:
+
+<!-- BEGIN GENERATED: enum:phy -->
+| Value | Name | Meaning |
+| --- | --- | --- |
+| 1 | `le_1m` | LE 1M |
+| 2 | `le_2m` | LE 2M |
+| 3 | `le_coded` | LE Coded |
+| *other* | *unknown* | MUST decode as unknown, never as a default |
+<!-- END GENERATED: enum:phy -->
+
+This record is **reporting only**. Nothing in it is negotiated through VTP/1,
+and a device MUST NOT change its link configuration in response to this request.
+
+Each validity bit governs the fields listed against it, under the same rule as
+§5.1: if the bit is clear the device MUST write those fields as zero and the
+receiver MUST report them absent. A device whose controller does not expose a
+given parameter MUST clear the corresponding bit rather than report a guess.
+There is no PHY value zero, so a zeroed `phy_tx` cannot be mistaken for LE 1M.
+
+A device SHOULD implement this opcode. Its purpose is to let a client verify the
+transport requirements of §2.1-§2.3, none of which a client can observe from its
+own Bluetooth stack: negotiated link-layer payload, PHY and connection interval
+are unavailable to applications on at least one major mobile platform. A client
+that finds a device reporting a link-layer payload well below its ATT MTU SHOULD
+surface that to the user as a device defect, since it costs roughly three times
+the radio airtime per byte delivered and that cost is borne by every other
+device sharing the central.
+
+A client MUST NOT treat a device that answers `unsupported_opcode` as
+non-conforming.
 
 ---
 
@@ -534,6 +649,29 @@ Each case carries `hex` and either `expect` or `must_reject`. A case with
 The corpus is generated from `schema/vtp1.yaml`. A minor version MAY add cases
 and MUST NOT modify or remove an existing case. A change that alters the expected
 decode of an existing vector is by definition not a minor version.
+
+### 12.1 What the corpus does not cover
+
+The corpus decodes bytes. Every requirement in this specification that is
+expressed as a byte layout, a validity rule, an enum value or a length check is
+therefore mechanically testable, and passing the corpus is evidence about all of
+them.
+
+The transport requirements of §2.1-§2.3 are not of that kind. Link-layer
+payload, PHY and connection parameters have no representation in any
+notification, so no vector can assert them and passing the corpus says nothing
+about whether a device honours them. They are **integration requirements**: real
+and normative, but verifiable only against hardware.
+
+`GET_LINK_PARAMS` (§9.1) exists to narrow that gap. It moves a device's own view
+of those three parameters onto the wire, where a client can check it and this
+corpus can test the reporting. It remains a report rather than a proof — a
+device that misreports cannot be caught by any means this specification
+provides — but a value a client can read and log is a considerable improvement
+on a requirement nobody can observe.
+
+An implementer SHOULD treat §2.1-§2.3 as the part of this specification that
+needs verifying on a bench rather than in CI.
 
 ---
 

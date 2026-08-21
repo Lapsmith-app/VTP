@@ -231,7 +231,130 @@ rather than replacing it.
 created the ecosystem. Any successor inherits that obligation, which is why
 SPEC.md §11 spends more words on what may never change than on what may.
 
-## 4. What VTP/1 costs
+## 4. Coexistence with other devices on the same radio
+
+A VTP/1 device is rarely the only thing a phone is talking to. A realistic
+motorsport roster adds a heart-rate strap, an OBD adapter and one or more
+action cameras whose control channel is latency-sensitive exactly while
+recording. "Higher throughput" is only an improvement if it does not buy itself
+that headroom out of everyone else's.
+
+### 4.1 The shared resource is airtime, not bytes
+
+A central serves every connection from one radio, time-division. What a
+connection consumes is **occupied radio time**, and that is a function of packet
+count as much as payload size, because every packet carries fixed overhead that
+does not shrink with its contents.
+
+On the 1M PHY a packet occupies `10 + payload` bytes on air at 8 µs per byte,
+followed by an inter-frame space, the peer's acknowledgement and a second
+inter-frame space — about 380 µs of fixed cost per packet regardless of size.
+A full 251-octet packet therefore costs ≈ 2.5 ms; a 27-octet one costs ≈ 0.7 ms
+while carrying a ninth of the data. This is the arithmetic behind SPEC §2.1, and
+it is why an ATT MTU negotiated without a matching link-layer payload is a
+throughput figure that does not exist.
+
+Taking the roles at plausible rates, encrypted, 1M PHY, link-layer payload
+extended:
+
+| Stream | Rate | Notifications/s | Share of radio time |
+| --- | --- | --- | --- |
+| GPS | 25 Hz | 25 | ~3% |
+| IMU | 200 Hz, batched | ~11 | ~3% |
+| CAN | ~400 frames/s | ~29 | ~7% |
+| CAN | 4 000 frames/s | ~286 | ~67% |
+
+The 2M PHY roughly halves the payload component of each figure, though not the
+per-packet overhead.
+
+Two things fall out of that table. GPS and IMU are irrelevant to congestion —
+together they are a rounding error, which is what §2.9 meant by calling IMU
+"effectively free". And **CAN is the entire story**, with a range spanning an
+order of magnitude between a sane subscription set and the ceiling.
+
+### 4.2 The protocol did not raise the risk; it removed a cap
+
+The previous generation was self-limiting. One frame per notification against a
+per-connection-event notification budget capped it near 270 frames per second
+(§2.4) — not by design, but as a side effect of the framing. A client could not
+congest a radio with it because it could not go fast enough to try.
+
+VTP/1 removes that accident. It does not *cause* the top row of that table; it
+*permits* it. Whether a device sits at 7% or 67% is decided by the subscription
+set the client installs, not by the wire format. That is the correct place for
+the decision to live, and it is a decision the previous generation gave nobody
+the means to make deliberately.
+
+### 4.3 What the protocol does to help
+
+Three properties make VTP/1 a better citizen than what it replaces, at equal
+data rates:
+
+**Fewer, fuller packets.** Batching is a coexistence feature before it is a
+throughput feature. The previous generation carried one frame per notification;
+the same frames delivered in a fourteenth as many notifications pay a
+fourteenth as much per-packet overhead, so batching *reduces* occupied airtime
+for a given frame rate.
+
+**Fewer links.** GPS, CAN and IMU on one connection replaces what previously
+took a BLE link for CAN and a separate transport for motion data (§2.9). Every
+concurrent link costs connection events, scheduling slots and a share of the
+central's attention whether or not it carries traffic, so removing links is a
+larger and more certain win than any per-byte efficiency. This holds regardless
+of how many connections a given central can actually sustain — a number that is
+controller-dependent, undocumented on at least one major platform, and which
+this specification therefore declines to quote.
+
+**Congestion is observable.** `dropped`, `seq` and the load-shedding flag (§2.6)
+mean a saturated link reports itself instead of quietly losing frames. A client
+that watches them can unwind subscriptions in response to measured congestion
+rather than guessing in advance.
+
+### 4.4 What the protocol deliberately does not do
+
+VTP/1 has no concept of a link budget, and `can_max_frames_per_s` is not one. It
+is a statement about what the *device* can produce; `rate_exceeded` protects the
+device's own pipeline, not the radio's schedule. The device cannot know what
+else the central is serving, so it cannot be the component that decides.
+
+That leaves the client owning the budget, with the per-id subscription modes,
+`GPS_SET_RATE` and `IMU_SET_RATE` as the instruments. Those are sufficient to
+throttle — the loop from `dropped` and the shedding flag back to a lower rate is
+closed without adding anything. What is missing is only ergonomics: there is no
+single aggregate throttle, so a client reacting to congestion unwinds
+subscriptions individually.
+
+An opcode expressing a total rate ceiling would close that, and is deliberately
+absent from 1.0 for two reasons. The right shape is not yet known, and inventing
+capacity semantics before any hardware exists is the mistake §2.8 is about. More
+importantly, a device that sheds to fit a budget has to decide *what* to shed,
+and that is policy — the client knows whether the user is watching a lap timer
+or logging a session, and the device cannot. A protocol that moves that decision
+into the device stops being a dumb pipe (§3).
+
+`GET_LINK_PARAMS` (SPEC §9.1) is the half that *was* worth adding, and it points
+the other way: not another actuator, but the one measurement a client cannot
+take for itself. Negotiated link-layer payload, PHY and connection interval are
+not exposed to applications on at least one major mobile platform, so without
+the device reporting them a client cannot tell a well-configured device from one
+quietly costing three times the airtime for the same data. Sensing was the gap;
+actuation already existed.
+
+It has no `capabilities` bit, which is a deliberate asymmetry with
+`masked_subscriptions` and `on_change_subscriptions`. Those bits earn their
+place because a client must know before it composes a subscription plan;
+learning the answer by being rejected means unwinding work already done.
+`GET_LINK_PARAMS` has no plan behind it. A bit could not carry the values, so a
+client that cares issues the opcode either way — and the response already says
+whether it is supported. The bit would save no round trip, change no behaviour,
+and introduce a second source of truth needing a precedence rule for the case
+where it disagrees with the response. For a feature whose whole purpose is
+verifying rather than assuming, an advertised claim is the wrong shape; §2.8's
+answer to the same problem was `CAN_LIST` reading real state back, not another
+bit. `control` already tells a client whether there is a control channel at all,
+which is the part worth knowing before connecting.
+
+## 5. What VTP/1 costs
 
 Stating these plainly, because a rationale that only lists benefits is marketing:
 

@@ -104,6 +104,13 @@
       }
     },
     {
+      "name": "long-payload",
+      "desc": "One sample declared, one sample present, plus a trailing byte. The length MUST equal the header plus count samples exactly.",
+      "record": "imu_batch",
+      "hex": "0500000001000000000000008813010301000200030004000500060000",
+      "must_reject": "length"
+    },
+    {
       "name": "accel-only",
       "desc": "flags bit1 clear: the device has no gyro. Gyro fields are zero and MUST be reported absent, not as zero rotation.",
       "record": "imu_batch",
