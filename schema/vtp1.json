@@ -517,7 +517,7 @@
           "type": "i32",
           "units": "mm",
           "valid_bit": "alt_ellipsoid",
-          "desc": "Altitude above the reference ellipsoid"
+          "desc": "Altitude above the WGS-84 ellipsoid"
         },
         {
           "name": "vel_n",

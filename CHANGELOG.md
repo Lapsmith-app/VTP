@@ -39,6 +39,22 @@ conformance vector.
   device asks, so one carries a per-item offset and the other one interval.
 - **Microseconds are written `µs` in the generated tables**, matching the prose,
   which always did.
+- **The datum is stated** (SPEC.md §5). `lat`, `lon` and `alt_ellipsoid` MUST
+  be referenced to WGS-84, which every implementation was already assuming and
+  none could check. A coordinate in an unstated datum is metres of silent error
+  against a map the device knows nothing about — a plausible wrong value in the
+  one place a client cannot detect one. `alt_msl` is explicitly *not* pinned to
+  a geoid model, since the receiver's model is the receiver's business and the
+  difference between the two altitude fields is the separation.
+- **`head_mot` and the velocity triple have a stated frame** (§5.4, retitled
+  "Reference frames and derived quantities"). Heading is clockwise from true
+  north, never magnetic and never a grid bearing, and the triple is a local
+  north-east-down frame at the reported position, so a climbing vehicle reports
+  a negative `vel_d`. Both were implied by §5.4's `atan2(vel_e, vel_n)` and
+  neither was said.
+- **§9.1 is where §9.1 belongs.** Link parameters were numbered first and
+  printed last, after §9.5. The text is unchanged and so is every reference to
+  it; only the reading order is fixed.
 - **Why the CAN subscription table is addressed by mask** (RATIONALE §6). The
   usual reason for masks — too few hardware acceptance filters — does not apply
   to a device that unpacks every frame anyway, and nothing said what the actual

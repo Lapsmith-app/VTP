@@ -283,7 +283,7 @@ Total: **74 bytes**. All fields little-endian.
 | 24 | 4 | `i32` | `lat` | `deg`; scale 1e-07; Latitude — positive north, negative south; valid when `validity` bit 2 (`position`) is set |
 | 28 | 4 | `i32` | `lon` | `deg`; scale 1e-07; Longitude — positive east, negative west; valid when `validity` bit 2 (`position`) is set |
 | 32 | 4 | `i32` | `alt_msl` | `mm`; Altitude above mean sea level; valid when `validity` bit 3 (`alt_msl`) is set |
-| 36 | 4 | `i32` | `alt_ellipsoid` | `mm`; Altitude above the reference ellipsoid; valid when `validity` bit 4 (`alt_ellipsoid`) is set |
+| 36 | 4 | `i32` | `alt_ellipsoid` | `mm`; Altitude above the WGS-84 ellipsoid; valid when `validity` bit 4 (`alt_ellipsoid`) is set |
 | 40 | 4 | `i32` | `vel_n` | `mm/s`; Velocity, north component; valid when `validity` bit 5 (`velocity`) is set |
 | 44 | 4 | `i32` | `vel_e` | `mm/s`; Velocity, east component; valid when `validity` bit 5 (`velocity`) is set |
 | 48 | 4 | `i32` | `vel_d` | `mm/s`; Velocity, down component — positive descending; valid when `validity` bit 5 (`velocity`) is set |
@@ -318,6 +318,17 @@ A receiver that reads those two negative rows as unsigned gets 395.7099296° and
 307.1019296° — numbers no coordinate can hold, and the reason the southern and
 western hemispheres are a sign rather than a flag somebody has to remember to
 apply.
+
+**Datum.** `lat`, `lon` and `alt_ellipsoid` MUST be referenced to WGS-84. A
+position is plotted against a map the device knows nothing about, and a
+coordinate in an unstated datum is metres of silent error: a plausible wrong
+value of exactly the kind §1.1 exists to prevent.
+
+`alt_msl` is height above mean sea level as the receiver computes it, from
+whatever geoid model it carries; this specification does not name one. The
+difference between the two altitude fields is the geoid separation at that
+position, and a client needing to know which model produced it needs the
+receiver's documentation rather than a protocol field.
 
 ### 5.1 Validity
 
@@ -374,11 +385,20 @@ measurement of zero. No field value anywhere in VTP/1 signals absence.
 | 4+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:fix_flags -->
 
-### 5.4 Derived quantities
+### 5.4 Reference frames and derived quantities
+
+The velocity triple is a local north-east-down frame at the reported position:
+`vel_n` toward true north, `vel_e` toward true east, and `vel_d` positive
+downward, so a climbing vehicle reports a negative `vel_d`.
 
 Ground speed is `hypot(vel_n, vel_e)` and is exact. A device MUST NOT report a
 separately computed scalar ground speed; the velocity vector is the only
 representation.
+
+`head_mot` is measured clockwise from **true** north — never magnetic north,
+and never a grid bearing. VTP/1 carries no magnetic declination and no magnetic
+heading, so a client that wants either derives it from the position with a
+model of its own.
 
 `head_mot` is the receiver's filtered heading of motion and MAY differ from
 `atan2(vel_e, vel_n)`. A client SHOULD prefer `head_mot` when its validity bit
@@ -808,6 +828,71 @@ A client MAY have several requests outstanding. A device MUST process them in
 the order received and MUST respond to each. `tag` is opaque to the device and
 MUST be echoed unchanged.
 
+### 9.1 Link parameters
+
+The detail of a successful `GET_LINK_PARAMS` response is one `link_params`
+record:
+
+<!-- BEGIN GENERATED: link_params -->
+*The device's view of the negotiated link. Reported, never negotiated here.*
+
+Total: **16 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `validity` | bitmask `link_validity` |
+| 2 | 2 | `u16` | `att_mtu` | `bytes`; valid when `validity` bit 0 (`att_mtu`) is set |
+| 4 | 2 | `u16` | `ll_max_tx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
+| 6 | 2 | `u16` | `ll_max_rx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
+| 8 | 2 | `u16` | `conn_interval` | `1.25ms`; valid when `validity` bit 2 (`conn_params`) is set |
+| 10 | 2 | `u16` | `peripheral_latency` | Connection events the device may skip; valid when `validity` bit 2 (`conn_params`) is set |
+| 12 | 2 | `u16` | `supervision_timeout` | `10ms`; valid when `validity` bit 2 (`conn_params`) is set |
+| 14 | 1 | `u8` | `phy_tx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
+| 15 | 1 | `u8` | `phy_rx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
+<!-- END GENERATED: link_params -->
+
+<!-- BEGIN GENERATED: bitmask:link_validity -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `att_mtu` | att_mtu carries the negotiated value |
+| 1 | `ll_data_length` | ll_max_tx_octets and ll_max_rx_octets are valid |
+| 2 | `conn_params` | conn_interval, peripheral_latency and supervision_timeout are all valid |
+| 3 | `phy` | phy_tx and phy_rx are valid |
+| 4+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:link_validity -->
+
+`phy_tx` and `phy_rx`:
+
+<!-- BEGIN GENERATED: enum:phy -->
+| Value | Name | Meaning |
+| --- | --- | --- |
+| 1 | `le_1m` | LE 1M |
+| 2 | `le_2m` | LE 2M |
+| 3 | `le_coded` | LE Coded |
+| *other* | *unknown* | MUST decode as unknown, never as a default |
+<!-- END GENERATED: enum:phy -->
+
+This record is **reporting only**. Nothing in it is negotiated through VTP/1,
+and a device MUST NOT change its link configuration in response to this request.
+
+Each validity bit governs the fields listed against it, under the same rule as
+§5.1: if the bit is clear the device MUST write those fields as zero and the
+receiver MUST report them absent. A device whose controller does not expose a
+given parameter MUST clear the corresponding bit rather than report a guess.
+There is no PHY value zero, so a zeroed `phy_tx` cannot be mistaken for LE 1M.
+
+A device SHOULD implement this opcode. Its purpose is to let a client verify the
+transport requirements of §2.1-§2.3, none of which a client can observe from its
+own Bluetooth stack: negotiated link-layer payload, PHY and connection interval
+are unavailable to applications on at least one major mobile platform. A client
+that finds a device reporting a link-layer payload well below its ATT MTU SHOULD
+surface that to the user as a device defect, since it costs roughly three times
+the radio airtime per byte delivered and that cost is borne by every other
+device sharing the central.
+
+A client MUST NOT treat a device that answers `unsupported_opcode` as
+non-conforming.
+
 ### 9.2 CAN subscriptions
 
 Installing a subscription returns a **handle**. The handle identifies that
@@ -908,71 +993,6 @@ subscriptions installed at the moment the page was produced.
 A device MUST report its table exactly as installed. `CAN_LIST` exists so a
 client can verify device state rather than assume it, and a device that
 normalises, reorders or summarises here defeats its only purpose.
-
-### 9.1 Link parameters
-
-The detail of a successful `GET_LINK_PARAMS` response is one `link_params`
-record:
-
-<!-- BEGIN GENERATED: link_params -->
-*The device's view of the negotiated link. Reported, never negotiated here.*
-
-Total: **16 bytes**. All fields little-endian.
-
-| Off | Size | Type | Field | Notes |
-| --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `validity` | bitmask `link_validity` |
-| 2 | 2 | `u16` | `att_mtu` | `bytes`; valid when `validity` bit 0 (`att_mtu`) is set |
-| 4 | 2 | `u16` | `ll_max_tx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
-| 6 | 2 | `u16` | `ll_max_rx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
-| 8 | 2 | `u16` | `conn_interval` | `1.25ms`; valid when `validity` bit 2 (`conn_params`) is set |
-| 10 | 2 | `u16` | `peripheral_latency` | Connection events the device may skip; valid when `validity` bit 2 (`conn_params`) is set |
-| 12 | 2 | `u16` | `supervision_timeout` | `10ms`; valid when `validity` bit 2 (`conn_params`) is set |
-| 14 | 1 | `u8` | `phy_tx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
-| 15 | 1 | `u8` | `phy_rx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
-<!-- END GENERATED: link_params -->
-
-<!-- BEGIN GENERATED: bitmask:link_validity -->
-| Bit | Name | Meaning |
-| --- | --- | --- |
-| 0 | `att_mtu` | att_mtu carries the negotiated value |
-| 1 | `ll_data_length` | ll_max_tx_octets and ll_max_rx_octets are valid |
-| 2 | `conn_params` | conn_interval, peripheral_latency and supervision_timeout are all valid |
-| 3 | `phy` | phy_tx and phy_rx are valid |
-| 4+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
-<!-- END GENERATED: bitmask:link_validity -->
-
-`phy_tx` and `phy_rx`:
-
-<!-- BEGIN GENERATED: enum:phy -->
-| Value | Name | Meaning |
-| --- | --- | --- |
-| 1 | `le_1m` | LE 1M |
-| 2 | `le_2m` | LE 2M |
-| 3 | `le_coded` | LE Coded |
-| *other* | *unknown* | MUST decode as unknown, never as a default |
-<!-- END GENERATED: enum:phy -->
-
-This record is **reporting only**. Nothing in it is negotiated through VTP/1,
-and a device MUST NOT change its link configuration in response to this request.
-
-Each validity bit governs the fields listed against it, under the same rule as
-§5.1: if the bit is clear the device MUST write those fields as zero and the
-receiver MUST report them absent. A device whose controller does not expose a
-given parameter MUST clear the corresponding bit rather than report a guess.
-There is no PHY value zero, so a zeroed `phy_tx` cannot be mistaken for LE 1M.
-
-A device SHOULD implement this opcode. Its purpose is to let a client verify the
-transport requirements of §2.1-§2.3, none of which a client can observe from its
-own Bluetooth stack: negotiated link-layer payload, PHY and connection interval
-are unavailable to applications on at least one major mobile platform. A client
-that finds a device reporting a link-layer payload well below its ATT MTU SHOULD
-surface that to the user as a device defect, since it costs roughly three times
-the radio airtime per byte delivered and that cost is borne by every other
-device sharing the central.
-
-A client MUST NOT treat a device that answers `unsupported_opcode` as
-non-conforming.
 
 ---
 

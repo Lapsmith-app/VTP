@@ -162,7 +162,7 @@ records:
       - {name: lat,      offset: 24, size: 4, type: i32, units: deg, scale: 1.0e-7, valid_bit: position, desc: "Latitude — positive north, negative south"}
       - {name: lon,      offset: 28, size: 4, type: i32, units: deg, scale: 1.0e-7, valid_bit: position, desc: "Longitude — positive east, negative west"}
       - {name: alt_msl,       offset: 32, size: 4, type: i32, units: mm, valid_bit: alt_msl, desc: "Altitude above mean sea level"}
-      - {name: alt_ellipsoid, offset: 36, size: 4, type: i32, units: mm, valid_bit: alt_ellipsoid, desc: "Altitude above the reference ellipsoid"}
+      - {name: alt_ellipsoid, offset: 36, size: 4, type: i32, units: mm, valid_bit: alt_ellipsoid, desc: "Altitude above the WGS-84 ellipsoid"}
       - {name: vel_n,    offset: 40, size: 4, type: i32, units: mm/s, valid_bit: velocity, desc: "Velocity, north component"}
       - {name: vel_e,    offset: 44, size: 4, type: i32, units: mm/s, valid_bit: velocity, desc: "Velocity, east component"}
       - {name: vel_d,    offset: 48, size: 4, type: i32, units: mm/s, valid_bit: velocity, desc: "Velocity, down component — positive descending"}
