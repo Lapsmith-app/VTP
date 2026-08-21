@@ -121,7 +121,7 @@ class VtpDevice:
     """
 
     def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
-                 circuit=None):
+                 circuit=None, monitor_channels=None):
         self._clock = now_us or self._monotonic_us
         self._origin_ns = time.monotonic_ns()
         self._wall_origin_ms = int(time.time() * 1000)
@@ -158,14 +158,15 @@ class VtpDevice:
 
         # SPEC.md §13 — this device has a display, so it asks the client for
         # what it cannot compute. The declaration is fixed for the connection.
-        self._monitor_channels = [
-            (0, CH_LAP_TIME), (1, CH_LAST_LAP_TIME),
-            (2, CH_DELTA_BEST), (3, CH_LAP_NUMBER),
-        ]
+        self._monitor_channels = list(enumerate(
+            monitor_channels if monitor_channels is not None else
+            (CH_LAP_TIME, CH_LAST_LAP_TIME, CH_BEST_LAP_TIME,
+             CH_DELTA_BEST, CH_LAP_NUMBER, CH_SPEED)))
         # slot -> (value, present). Absent is a state the display renders, not
         # a value it substitutes.
         self._monitor_values = {}
         self._monitor_seq = None
+        self._monitor_updates = 0
         self._link = None
 
     # -- clock ------------------------------------------------------------
@@ -190,6 +191,7 @@ class VtpDevice:
         # every slot as unavailable rather than the last connection's numbers.
         self._monitor_values.clear()
         self._monitor_seq = None
+        self._monitor_updates = 0
 
     def simulate_loss(self, stream, count):
         """Pretend the device accepted `count` items and had to discard them.
@@ -594,19 +596,29 @@ class VtpDevice:
 
         self._monitor_values.update(staged)
         self._monitor_seq = seq
+        self._monitor_updates += 1
         return None
 
+    def monitor_state(self):
+        """(slot, channel, value, present) for every channel this device asked
+        for. Structured rather than formatted: rendering is display.py's job,
+        and it must be testable without a screen."""
+        return [(slot, channel, *self._monitor_values.get(slot, (0, False)))
+                for slot, channel in self._monitor_channels]
+
+    @property
+    def monitor_seq(self):
+        return self._monitor_seq
+
+    @property
+    def monitor_updates(self):
+        return self._monitor_updates
+
     def display_lines(self):
-        """What the device's screen would show. Absent renders as '--', never
+        """A plain-text rendering, for logs. Absence renders as absence, never
         as a number nobody supplied."""
-        names = {CH_LAP_TIME: "LAP", CH_LAST_LAP_TIME: "LAST",
-                 CH_DELTA_BEST: "DELTA", CH_LAP_NUMBER: "NO."}
-        out = []
-        for slot, channel in self._monitor_channels:
-            value, present = self._monitor_values.get(slot, (0, False))
-            label = names.get(channel, f"CH{channel}")
-            out.append(f"{label}: {value if present else '--'}")
-        return out
+        from display import render_lines
+        return render_lines(self.monitor_state())
 
     def _link_params(self):
         link = self._link or {}

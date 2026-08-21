@@ -9,6 +9,44 @@ conformance vector.
 ## [Unreleased]
 
 ### Added
+- **A screen on the software peripheral** (`reference/peripheral/display.py`).
+  A Monitor device exists to display values it cannot compute, so the only way
+  to tell whether the role works end to end is to look at one. The window shows
+  the channels the device asked for and the values the client supplied.
+
+  What it makes visible is absence. A slot the client has not supplied, or has
+  marked absent, renders as `—·—` in a dimmer colour — never as `0.000`. Before
+  the first lap of a session there is no last lap time, and a display showing
+  zero for it has been told something false. That distinction is the reason
+  `monitor_value` carries a `present` bit (§13.4), and it is invisible in a log
+  of numbers.
+
+  Formatting is where the channel enum earns itself: each channel has exactly
+  one unit fixed by §13.2, so the device renders a lap time as `1:27.340` and a
+  speed as `136.8` km/h without asking the client anything.
+
+  Split like the rest of the peripheral — the formatting is pure and checked in
+  CI, and `tkinter` is imported lazily, because the interpreter CI runs does not
+  have it and must not need it. `python3 display.py` shows the screen alone with
+  no Bluetooth; `serve.py --no-display` runs headless.
+- The device's requested channel set is configurable, and it now asks for six.
+
+### Fixed
+- The display window is created **after** the server starts advertising. Tk
+  takes over the main run loop when it initialises, and CoreBluetooth needs that
+  run loop to deliver its power-on callback; creating the window first left
+  `BlessServer.start()` waiting for an event that could no longer arrive, with a
+  window up and nothing behind it.
+- `make_macos_app.sh` refuses to rebuild over an existing bundle. The bundle
+  holds only the interpreter — the scripts are read from the repository at run
+  time — so rebuilding is almost never necessary, and re-signing changes the
+  code signature, which makes macOS treat it as a different app and ask for
+  Bluetooth permission again. A peripheral hanging with nothing but `logging to`
+  in its log is waiting for that prompt. `FORCE=1` overrides.
+- Characteristic setup is logged one at a time, so a GATT call that never
+  returns can be told apart from any other. One of them did.
+
+### Added
 - **The Monitor role (SPEC.md §13).** The one part of VTP/1 that runs
   client-to-device: the client supplies values the device cannot compute, so a
   device with a display can show them. Lap time is the case that justifies it —

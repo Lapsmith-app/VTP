@@ -34,6 +34,7 @@ sys.path.insert(0, str(HERE))
 
 import vtp1  # noqa: E402
 import vtp_device as dev  # noqa: E402
+import display as disp  # noqa: E402  (pure formatting; no GUI import at module level)
 
 FAILURES = []
 
@@ -334,13 +335,15 @@ def main():
                                  + struct.pack("<H", 0))
     check(listing[2] == dev.ST_OK, "MONITOR_LIST was refused")
     table = vtp1.decode_monitor_list(listing[3:])
-    check(table["page"]["total"] == 4,
-          f"expected 4 requested channels, got {table['page']['total']}")
+    check(table["page"]["total"] == 6,
+          f"expected 6 requested channels, got {table['page']['total']}")
     check(all(e["channel_known"] for e in table["entries"]),
           "the device asked for a channel the reference decoder cannot name")
 
-    # Before anything is supplied, every slot renders unavailable.
-    check(all(line.endswith("--") for line in mon.display_lines()),
+    # Before anything is supplied, every slot is absent and renders as such.
+    check(all(not present for _, _, _, present in mon.monitor_state()),
+          "nothing has been supplied, so no slot may be present")
+    check(all(disp.ABSENT in line for line in mon.display_lines()),
           f"a device MUST NOT display a value nobody supplied: "
           f"{mon.display_lines()}")
 
@@ -353,18 +356,26 @@ def main():
          {"slot": 2, "validity": 0, "value": 0}])
     check(mon.handle_monitor_write(update) is None,
           "a well-formed monitor update was rejected")
+    state = {slot: (value, present) for slot, _, value, present
+             in mon.monitor_state()}
+    check(state[0] == (42_318, True), f"elapsed lap time not stored: {state}")
+    check(state[1] == (0, False) and state[2] == (0, False),
+          f"a slot whose present bit is clear MUST be absent and zero: {state}")
+    check(all(state[s] == (0, False) for s in (3, 4, 5)),
+          "a slot the client has not written about at all MUST stay absent, "
+          "never default to a value")
     lines = mon.display_lines()
-    check(lines[0] == "LAP: 42318", f"elapsed lap time not displayed: {lines}")
-    check(lines[1].endswith("--") and lines[2].endswith("--"),
-          f"a slot whose present bit is clear MUST render unavailable, not 0: "
-          f"{lines}")
+    check(lines[0] == "LAP: 42.318",
+          f"lap time should render as a clock, got {lines[0]!r}")
+    check(disp.ABSENT in lines[1] and disp.ABSENT in lines[2],
+          f"an absent slot MUST render as absence, not as 0: {lines}")
 
     # A cleared present bit with a stale value in the bytes: the bit governs.
     stale = menc.encode_monitor_update(
         {"seq": 2, "count": 1, "reserved": 0},
         [{"slot": 1, "validity": 0, "value": 87_340}])
     mon.handle_monitor_write(stale)
-    check(mon.display_lines()[1].endswith("--"),
+    check(disp.ABSENT in mon.display_lines()[1],
           "a stale value behind a cleared present bit MUST NOT be displayed")
 
     # A slot the device never asked for is ignored, not an error.
@@ -379,9 +390,35 @@ def main():
 
     # A reconnection starts blank rather than showing the last session.
     mon.on_connect()
-    check(all(line.endswith("--") for line in mon.display_lines()),
+    check(all(disp.ABSENT in line for line in mon.display_lines()),
           "a reconnection MUST clear the display, not inherit the previous "
           "connection's values")
+    check(mon.monitor_updates == 0,
+          "the update counter MUST reset with the connection")
+
+    # ---- Rendering, which is the only way the present bit is visible -------
+    check(disp.format_value(disp.LAP_TIME, 87_340, True) == "1:27.340",
+          "a lap time over a minute should render as minutes and seconds")
+    check(disp.format_value(disp.LAP_TIME, 42_318, True) == "42.318",
+          "a lap time under a minute should not show a leading 0:")
+    check(disp.format_value(disp.DELTA_BEST, 1_250, True) == "+1.250",
+          "a positive delta MUST show its sign, or it reads as a fast lap")
+    check(disp.format_value(disp.DELTA_BEST, -1_250, True) == "-1.250",
+          "a negative delta should render negative")
+    check(disp.format_value(disp.SPEED, 38_000, True) == "136.8",
+          "speed is mm/s on the wire and km/h on a dash")
+    for channel in (disp.LAP_TIME, disp.DELTA_BEST, disp.SPEED,
+                    disp.LAP_NUMBER, disp.SESSION_DISTANCE):
+        rendered = disp.format_value(channel, 12_345, False)
+        check(rendered == disp.ABSENT,
+              f"channel {channel} rendered {rendered!r} for an absent value; "
+              f"a cleared present bit MUST win over whatever is in the field")
+
+    # The formatter mirrors SPEC.md §13.2's enum; drift between them would show
+    # the wrong label against the right number.
+    check((disp.LAP_TIME, disp.DELTA_BEST, disp.SESSION_TIME)
+          == (dev.CH_LAP_TIME, dev.CH_DELTA_BEST, dev.CH_SESSION_TIME),
+          "display.py's channel constants have drifted from the device's")
 
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)

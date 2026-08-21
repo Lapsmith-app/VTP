@@ -24,6 +24,7 @@ streams GPS, CAN and IMU notifications.
 | --- | --- |
 | `vtp_device.py` | The device. One clock, three roles, MTU-aware batching, the control plane. **No Bluetooth dependency.** |
 | `serve.py` | The BLE transport, on [bless](https://github.com/kevincar/bless). Thin by design. |
+| `display.py` | The device's screen. Pure formatting plus a Tk window, split so CI checks the formatting without a display. |
 | `selftest.py` | Drives the device and decodes every notification with the reference decoder. |
 
 The split is the point. Everything worth testing is in the first file, so CI
@@ -84,6 +85,14 @@ each at the point that causes it:
    macOS reports that as "no usage description" rather than "cannot be
    prompted". It costs a Dock icon while running.
 
+**Do not rebuild the bundle unless you have to.** It contains only the
+interpreter; `serve.py`, `vtp_device.py` and `display.py` are read from the
+repository at run time, so editing them needs no rebuild. Re-signing changes the
+bundle's code signature, macOS treats it as a different app, and the Bluetooth
+permission must be granted again. A peripheral that hangs with nothing but
+`logging to` in the log is waiting for that prompt. `make_macos_app.sh` refuses
+to rebuild over an existing bundle for this reason; `FORCE=1` overrides.
+
 **Linux.** BlueZ advertises arbitrary Service Data, so §3.3 is reachable, and
 `btmgmt` can set the connection parameters and PHY that §2.1–§2.3 ask for and
 which no desktop API exposes to an application. A Linux VM with a USB Bluetooth
@@ -91,6 +100,44 @@ adapter is a better rig than a Pi and considerably cheaper.
 
 **Windows.** WinRT's `GattServiceProvider` is workable but the least tested of
 the three here.
+
+## The screen
+
+A Monitor device exists to display values it cannot compute, so the only way to
+tell whether the role works end to end is to look at one. `serve.py` opens a
+window showing the channels the device asked for and the values the client
+supplied:
+
+```
+LAP          LAST         BEST
+42.318       1:27.340     —·—
+
+DELTA        LAP No.      SPEED  km/h
++1.250       3            136.8
+```
+
+The thing to watch is `—·—`. A slot the client has not supplied, or has
+explicitly marked absent, renders as absence and in a dimmer colour — never as
+`0.000`. Before the first lap of a session there is no last lap time, and a
+display showing `0.000` for it has been told something false. That distinction
+is the whole reason `monitor_value` carries a `present` bit (SPEC.md §13.4), and
+it is invisible in a log of numbers.
+
+Formatting is where the channel enum earns itself. Each channel has exactly one
+unit fixed by §13.2, so the device renders a lap time as `1:27.340` and a speed
+as `136.8 km/h` without asking the client anything — no unit negotiation, no
+scale factor, no configuration.
+
+```sh
+python3 display.py          # the screen alone, no Bluetooth, for a look at it
+serve.py --no-display       # headless
+```
+
+The window is created **after** the server starts advertising, not before. Tk
+takes over the main run loop when it initialises, and CoreBluetooth needs that
+run loop to deliver its power-on callback — creating the window first leaves
+the server waiting for an event that can no longer arrive, with a window up and
+nothing behind it.
 
 ## What running it revealed
 

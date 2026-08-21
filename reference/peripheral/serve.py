@@ -38,6 +38,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 
 import vtp_device as dev  # noqa: E402
+import display as disp  # noqa: E402
 
 try:
     from bless import (BlessServer, GATTCharacteristicProperties,
@@ -61,10 +62,12 @@ def _in_app_bundle():
 
 
 class Peripheral:
-    def __init__(self, device, name="VTP Logger"):
+    def __init__(self, device, name="VTP Logger", screen=None):
         self.device = device
         self.name = name
         self.server = None
+        self.screen = screen
+        self._connected = False
         self._notify = {"gps": CHAR["gps"], "can": CHAR["can"],
                         "imu": CHAR["imu"]}
 
@@ -85,7 +88,10 @@ class Peripheral:
             if problem:
                 log.warning("rejected a monitor update: %s", problem)
             else:
-                log.info("display: %s", " | ".join(self.device.display_lines()))
+                # The screen is refreshed from the poll loop, not from here:
+                # this callback does not run on the loop that owns the window,
+                # and Tk is not thread-safe.
+                self._connected = True
             return
         if uuid != CHAR["control"].lower():
             return
@@ -122,6 +128,7 @@ class Peripheral:
         self.server.read_request_func = self.read_request
         self.server.write_request_func = self.write_request
 
+        log.info("creating service %s", SERVICE)
         await self.server.add_new_service(SERVICE)
 
         read = GATTCharacteristicProperties.read
@@ -135,26 +142,29 @@ class Peripheral:
         # read-only". Only Info may carry an initial value; anything
         # notifiable or writable must be created with None, or addService_
         # raises NSInternalInconsistencyException.
-        await self.server.add_new_characteristic(
-            SERVICE, CHAR["info"], read, self.device.info(), readable)
-        for name in ("gps", "can", "imu"):
+        # Logged one at a time: a GATT call that never returns is otherwise
+        # indistinguishable from any other, and one of them did.
+        async def add(name, props, value, perms):
+            log.info("adding characteristic %s", name)
             await self.server.add_new_characteristic(
-                SERVICE, CHAR[name], notify, None, readable)
-        await self.server.add_new_characteristic(
-            SERVICE, CHAR["control"], write | indicate, None,
-            readable | writeable)
+                SERVICE, CHAR[name], props, value, perms)
+
+        await add("info", read, self.device.info(), readable)
+        for name in ("gps", "can", "imu"):
+            await add(name, notify, None, readable)
+        await add("control", write | indicate, None, readable | writeable)
         # The client writes values here; the device only ever reads them.
-        await self.server.add_new_characteristic(
-            SERVICE, CHAR["monitor_values"], write, None, writeable)
+        await add("monitor_values", write, None, readable | writeable)
 
         await self.server.start()
         log.info("advertising %s as %r", SERVICE, self.name)
         log.info("Service Data (SPEC.md 3.3) is not advertised: the host "
                  "peripheral API does not expose it on every platform")
 
-    async def run(self, poll_hz=200):
+    async def run(self, poll_hz=200, screen_hz=20):
         interval = 1.0 / poll_hz
-        sent = 0
+        sent, ticks = 0, 0
+        every = max(1, poll_hz // screen_hz)
         while True:
             for characteristic, payload in self.device.poll():
                 char = self.server.get_characteristic(self._notify[characteristic])
@@ -163,6 +173,16 @@ class Peripheral:
                 sent += 1
                 if sent % 200 == 0:
                     log.info("%d notifications sent", sent)
+
+            ticks += 1
+            if self.screen and ticks % every == 0:
+                self.screen.update(self.device.monitor_state(),
+                                   connected=self._connected,
+                                   seq=self.device.monitor_seq,
+                                   updates=self.device.monitor_updates)
+                if not self.screen.pump():
+                    log.info("display closed; stopping")
+                    return
             await asyncio.sleep(interval)
 
     async def stop(self):
@@ -183,12 +203,26 @@ async def main_async(args):
 
     device = dev.VtpDevice(mtu=args.mtu, gps_hz=args.gps_hz,
                            imu_hz=args.imu_hz)
+
     peripheral = Peripheral(device, name=args.name)
+    screen = None
     # Launched through LaunchServices there is no stderr, so an unhandled
     # exception would vanish and look exactly like a silent exit. Everything
     # goes to the log file instead.
     try:
         await peripheral.start()
+        # The window is created only after the server is advertising. Tk takes
+        # over the main run loop when it initialises, and CoreBluetooth needs
+        # that run loop to deliver its power-on callback -- creating the window
+        # first leaves BlessServer.start() waiting for an event that can no
+        # longer arrive, with the window up and nothing behind it.
+        if not args.no_display:
+            try:
+                screen = disp.MonitorDisplay(title=f"{args.name} — display")
+                peripheral.screen = screen
+                log.info("display open; close the window to stop the peripheral")
+            except RuntimeError as exc:
+                log.warning("no display: %s", exc)
         await peripheral.run()
     except asyncio.CancelledError:
         pass
@@ -200,6 +234,8 @@ async def main_async(args):
             await peripheral.stop()
         except Exception:
             log.exception("error while stopping")
+        if screen:
+            screen.close()
         log.info("stopped")
 
 
@@ -211,6 +247,8 @@ def main():
                     help="assumed ATT MTU for batch sizing")
     ap.add_argument("--gps-hz", type=int, default=10)
     ap.add_argument("--imu-hz", type=int, default=100)
+    ap.add_argument("--no-display", action="store_true",
+                    help="run headless; do not open the device screen")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     try:
