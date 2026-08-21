@@ -17,7 +17,7 @@ the compatibility guarantees in SPEC.md §11 take effect.
   prefix that lets a client recognise an unsupported major version.
 - Machine-readable schema (`schema/vtp1.yaml`) as the source of truth, with
   generation of the spec tables, the C header and the conformance vectors.
-- Conformance corpus: 38 vectors across 5 record types, including must-reject
+- Conformance corpus: 43 vectors across 5 record types, including must-reject
   cases for truncated and over-long payloads.
 - C99 reference decoder and encoder, no dependencies, separate translation
   units so a client links only the decoder and a device only the encoder.
@@ -37,12 +37,32 @@ the compatibility guarantees in SPEC.md §11 take effect.
   application through its own Bluetooth stack on at least one major platform.
 - SPEC.md §12.1, distinguishing requirements the conformance corpus can test
   from integration requirements it structurally cannot.
+- `tools/mutate.py`: a systematic mutation sweep over the C reference. Where CI
+  already seeded two faults by hand — proving the corpus *can* fail, but saying
+  nothing about coverage — this drops every encoder validity gate, reads every
+  decoder field from a sibling's offset, and relaxes every exact-length check,
+  requiring the corpus to notice each one. A surviving mutation is a hole in
+  the corpus rather than a bug in the decoder.
+- `tools/check_docs.py`: checks hand-written prose against the artefacts it
+  describes — every `§x.y` reference resolves to a heading that exists
+  (including from source comments), and stated corpus counts match the corpus.
+  The generator's `--check` covers generated tables; this covers the sentences
+  around them, which drift just as silently.
 - Implementation-agnostic conformance runner, with two optional checks beyond
   the decode: an `absent` field set (making "absence is the bitmask's job, never
   a value" mechanically testable) and an encoder round-trip required to be
   byte-identical, or to normalise a deliberately non-canonical payload.
 
 ### Fixed during the draft
+- Eight further holes in the corpus, all found by `tools/mutate.py` on its
+  first run and none visible to review: the `gps_fix` encoder's `t_utc` and
+  `position` gates were unexercised because the only non-canonical vector left
+  both bits set; `link_params` carried a stale `peripheral_latency` of zero,
+  which tests nothing; `info` and `imu_batch` had no over-long `must_reject`
+  case, leaving their exact-length checks untested; and `info.gps_rate_hz`
+  equalled `gps_max_rate_hz` in every vector, so a decoder could read either
+  from the other's offset and pass. All fixed by adding vectors, not by
+  loosening assertions.
 - Three holes in the corpus, each found by mutation-testing rather than by
   review, and each fixed at the generator so it cannot recur case by case:
   unknown enum values were never asserted; a vector carried stale values behind

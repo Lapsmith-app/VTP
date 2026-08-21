@@ -337,6 +337,15 @@ def vectors(schema):
                   "conforming encoder normalises these bytes to zero. This is "
                   "the one vector that asserts a decoder trusts the bitmask "
                   "rather than the payload."),
+        case(schema, "gps_fix", "every-bit-cleared-values-retained",
+             dict(nominal, seq=11, validity=0),
+             "The same firmware bug as above taken to its limit: every validity bit "
+             "clear, every byte still carrying the previous fix. A decoder MUST report "
+             "all eleven gated fields absent, including position and t_utc.",
+             canonical=False,
+             note="The vector above leaves position and t_utc VALID, so it cannot "
+                  "exercise their encoder gates. Mutation testing found that hole: "
+                  "dropping the POSITION or T_UTC gate passed the entire corpus."),
         case(schema, "gps_fix", "southern-western-hemisphere",
              dict(nominal, seq=4, lat=-337_000_000, lon=1_511_000_000),
              "Negative latitude and large positive longitude; catches unsigned reads."),
@@ -487,6 +496,15 @@ def vectors(schema):
                   "Extremes on every axis; catches signed 16-bit handling.",
                   dict(seq=3, dropped=0, t_base=6_000_000, period=5000, count=1, flags=0b011),
                   [dict(ax=-32768, ay=32767, az=-32768, gx=32767, gy=-32768, gz=32767)]),
+        {"name": "long-payload",
+         "desc": "One sample declared, one sample present, plus a trailing byte. The "
+                 "length MUST equal the header plus count samples exactly.",
+         "record": "imu_batch",
+         "hex": (encode(schema, "imu_header",
+                        dict(seq=5, dropped=0, t_base=1, period=5000, count=1, flags=0b011))
+                 + encode(schema, "imu_sample", dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6))
+                 + b"\x00").hex(),
+         "must_reject": "length"},
         imu_batch("accel-only",
                   "flags bit1 clear: the device has no gyro. Gyro fields are zero and MUST "
                   "be reported absent, not as zero rotation.",
@@ -518,6 +536,28 @@ def vectors(schema):
                   can_max_payload=64, clock_flags=0b11, max_notify_bytes=498),
              "Minor 7 with a capability bit this client has never heard of. A client MUST "
              "ignore the unknown bit and use everything it does understand."),
+        case(schema, "info", "rate-below-maximum",
+             dict(protocol_major=1, protocol_minor=0,
+                  capabilities=C["gps"] | C["imu"] | C["control"],
+                  gps_rate_hz=10, gps_max_rate_hz=25, can_max_payload=8,
+                  imu_rate_hz=100, imu_max_rate_hz=833, max_notify_bytes=244),
+             "A device running below its ceiling: 10 Hz of a possible 25, 100 Hz of a "
+             "possible 833. Current rate and maximum rate are separate fields and a "
+             "client MUST NOT read one for the other.",
+             note="The only vector where the current and maximum rates differ. Without "
+                  "it a decoder can read gps_rate_hz from gps_max_rate_hz's offset and "
+                  "pass the whole corpus -- found by tools/mutate.py, not by review."),
+        {"name": "short-payload",
+         "desc": "23 bytes. Info is fixed-size; a truncated read MUST be rejected.",
+         "record": "info",
+         "hex": encode(schema, "info", dict(protocol_major=1))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "long-payload",
+         "desc": "25 bytes. Info has no extension mechanism, so trailing bytes MUST be "
+                 "rejected rather than ignored.",
+         "record": "info",
+         "hex": (encode(schema, "info", dict(protocol_major=1)) + b"\x00").hex(),
+         "must_reject": "length"},
     ]
 
     # ---- Link params -----------------------------------------------------
@@ -562,7 +602,7 @@ def vectors(schema):
                   "byte cannot pass for the most common PHY."),
         case(schema, "link_params", "stale-values-behind-cleared-bits",
              dict(validity=0, att_mtu=247, ll_max_tx_octets=251,
-                  ll_max_rx_octets=251, conn_interval=12, peripheral_latency=0,
+                  ll_max_rx_octets=251, conn_interval=12, peripheral_latency=4,
                   supervision_timeout=500, phy_tx=2, phy_rx=2),
              "A non-conforming device that clears every validity bit but leaves the "
              "previous values in the bytes. A decoder MUST report every field absent on "
