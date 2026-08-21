@@ -225,6 +225,25 @@ int vtp_phy_known(uint8_t phy);
 int vtp_decode_link_params(const uint8_t *buf, size_t len,
                            vtp_link_params_t *out, const char **err);
 
+/* SPEC.md §9 -- the envelope of every Control response. `detail` points into
+ * the caller's buffer and is non-NULL only when status is ok; its shape is
+ * decided by the opcode, and §11.3 lets a minor version add opcodes carrying
+ * anything, so this decoder carries the bytes rather than parsing them. */
+typedef struct {
+    uint8_t opcode;
+    uint8_t tag;
+    uint8_t status;
+    const uint8_t *detail;
+    size_t detail_len;
+} vtp_control_response_t;
+
+/* Non-zero when the status value is one this build recognises. A false result
+ * means UNKNOWN and MUST NOT be treated as a failure or as success. */
+int vtp_status_known(uint8_t status);
+
+int vtp_decode_control_response(const uint8_t *buf, size_t len,
+                                vtp_control_response_t *out, const char **err);
+
 #ifdef __cplusplus
 }
 #endif

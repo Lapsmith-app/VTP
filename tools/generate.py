@@ -1248,6 +1248,68 @@ def vectors(schema):
          "hex": (encode(schema, "link_params", dict(validity=all_valid)) + b"\x00").hex(),
          "must_reject": "length"},
     ]
+    # ---- Control response envelope ---------------------------------------
+    def resp(opcode, tag, status, detail=b""):
+        return bytes([opcode, tag, status]) + detail
+
+    def cr(name, desc, opcode, tag, status, detail=b"", **kw):
+        known = {m["value"] for m in schema["enums"]["status"]["members"]}
+        c = {"name": name, "desc": desc, "record": "control_response",
+             "hex": resp(opcode, tag, status, detail).hex()}
+        if "must_reject" not in kw:
+            c["expect"] = {"opcode": opcode, "tag": tag, "status": status,
+                           "status_known": status in known,
+                           "detail_hex": detail.hex()}
+        c.update(kw)
+        return c
+
+    files["control-response.json"] = [
+        cr("ok-with-detail",
+           "A successful CAN_SUBSCRIBE: three envelope bytes and the handle it "
+           "assigned. SPEC.md 9 -- detail is present because status is ok.",
+           0x02, 1, 0, struct.pack("<H", 7)),
+        cr("ok-without-detail",
+           "A successful CAN_RESET. The opcode has no response detail, so an ok "
+           "response is three bytes and that is not a truncated one.",
+           0x01, 2, 0),
+        cr("refused-is-three-bytes",
+           "CAN_SUBSCRIBE refused with bad_params. Exactly three bytes: a client "
+           "reading the five it would get on success takes a handle from a "
+           "request that failed.",
+           0x02, 3, 2),
+        cr("busy-is-not-a-refusal",
+           "busy says nothing about the request itself. SPEC.md 9 -- a client "
+           "MUST retry rather than treat it as refused, and the envelope is the "
+           "same three bytes as any other non-ok status.",
+           0x02, 4, 5),
+        cr("table-full",
+           "table_full on a subscription install. SPEC.md 9.2 -- the device is "
+           "out of slots, which is a property of the device rather than of the "
+           "request, and carries no detail.",
+           0x03, 5, 3),
+        cr("unknown-status",
+           "A status this build does not recognise. SPEC.md 11.4 -- it MUST "
+           "decode as unknown and MUST NOT be substituted for a default; in "
+           "particular it is neither ok nor a specific failure.",
+           0x02, 6, 200),
+        cr("unknown-opcode-detail-is-opaque",
+           "An ok response to an opcode this build does not implement, carrying "
+           "four bytes of detail. SPEC.md 11.3 lets a minor version add opcodes "
+           "with any payload, so the envelope decoder MUST carry the detail "
+           "rather than reject it.",
+           0x77, 7, 0, bytes.fromhex("DEADBEEF")),
+        cr("detail-on-error",
+           "bad_params carrying two bytes of detail. MUST be rejected: detail is "
+           "present if and only if status is ok, and a client that has already "
+           "decided the request succeeded would read those bytes as a handle.",
+           0x02, 8, 2, struct.pack("<H", 7), must_reject="detail-on-error"),
+        cr("short-payload",
+           "Two bytes: an opcode and a tag with no status. MUST be rejected "
+           "rather than read as a status of whatever follows.",
+           0x02, 9, 0, must_reject="length"),
+    ]
+    files["control-response.json"][-1]["hex"] = resp(0x02, 9, 0)[:2].hex()
+
     return files
 
 

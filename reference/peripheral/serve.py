@@ -145,6 +145,84 @@ def _describe_request(value):
     return f"{name} tag={tag}{detail} params={params.hex() or '-'}"
 
 
+# SPEC.md §9 — a device MUST accept at least four outstanding requests. One
+# slot beyond that exists only to carry the `busy` refusal itself: a device
+# with nothing left to answer with cannot tell a client it is out of room.
+CONTROL_QUEUE_DEPTH = 4
+
+
+class ControlQueue:
+    """Decides whether a control request can be answered, before it is applied.
+
+    SPEC.md §9.6 — a device MUST NOT apply a request it cannot answer. That
+    makes admission a decision taken *ahead* of dispatch rather than a check on
+    the way out, which is the whole point: applying first and answering second
+    is the natural order to write the code in, and it is the order that leaves
+    a client retrying a request that has already taken effect.
+
+    Holds no Bluetooth state, so the rules above are testable without a radio.
+    """
+
+    def __init__(self, depth=CONTROL_QUEUE_DEPTH):
+        self.depth = depth
+        # (tag, response) pairs awaiting delivery. Outstanding tags are read
+        # off this rather than tracked alongside it: two structures that must
+        # agree are two structures that can disagree.
+        self._out = collections.deque()
+        self.dropped = 0
+
+    def __len__(self):
+        return len(self._out)
+
+    def outstanding(self, tag):
+        return any(t == tag for t, _ in self._out)
+
+    def admit(self, tag):
+        """`apply`, `duplicate-tag`, `busy` or `full`.
+
+        Only `apply` permits the request to take effect. `duplicate-tag` and
+        `busy` are answered but not applied; `full` cannot even be answered.
+        """
+        if self.outstanding(tag):
+            return "duplicate-tag"
+        if len(self._out) < self.depth:
+            return "apply"
+        if len(self._out) == self.depth:
+            return "busy"
+        # The client was told `busy` and wrote again anyway. There is no room
+        # left to refuse it with, so the request is discarded unapplied --
+        # which is the correct half of §9.6 when the other half is impossible.
+        return "full"
+
+    def hold(self, tag, response):
+        self._out.append((tag, response))
+
+    def peek(self):
+        return self._out[0][1] if self._out else None
+
+    def delivered(self):
+        self._out.popleft()
+
+    def discard_all(self):
+        n = len(self._out)
+        self.dropped += n
+        self._out.clear()
+        return n
+
+
+# SPEC.md §10 SHOULD — the Device Information Service. It carries no protocol
+# meaning, which is exactly why it is worth exposing: when someone asks which
+# firmware is on a logger that is misbehaving, this is where every generic BLE
+# tool already looks.
+DIS_SERVICE = "0000180A-0000-1000-8000-00805F9B34FB"
+DIS_CHARS = {
+    "manufacturer": ("00002A29-0000-1000-8000-00805F9B34FB", "Lapsmith"),
+    "model":        ("00002A24-0000-1000-8000-00805F9B34FB", "VTP Reference Peripheral"),
+    "firmware":     ("00002A26-0000-1000-8000-00805F9B34FB", None),   # filled from the spec version
+    "serial":       ("00002A25-0000-1000-8000-00805F9B34FB", "SOFTWARE-0001"),
+}
+
+
 # A BLE advertisement is 31 bytes: 3 for flags, 18 for one 128-bit service UUID
 # (2 header + 16), leaving 10 for everything else — and a local name costs 2
 # bytes of header on top of its characters.
@@ -173,9 +251,15 @@ def check_advertisement_fits(name):
 class Peripheral:
     STREAM_ORDER = ("gps", "can", "imu")
 
-    def __init__(self, device, name="VTP Logger", screen=None):
+    def __init__(self, device, name="VTP Logger", screen=None,
+                 encrypt_control=True):
         self.device = device
         self.name = name
+        # SPEC.md §10 requires this. It is a switch only because macOS in the
+        # peripheral role is a thin path for Just Works pairing, and losing the
+        # interop loop to a host-stack problem would be worse than running a
+        # deliberately non-conforming device with a warning in the log.
+        self.encrypt_control = encrypt_control
         self.server = None
         self.screen = screen
         self._link = ConnectionTracker()
@@ -209,8 +293,7 @@ class Peripheral:
         # answer waits on its tag until it gives up and drops the link -- which
         # it did. Worse, the request had already been APPLIED, so the two ends
         # disagreed about the subscription table.
-        self._control_out = collections.deque()
-        self._control_dropped = 0
+        self._control = ControlQueue()
         self._notify = {"gps": CHAR["gps"], "can": CHAR["can"],
                         "imu": CHAR["imu"]}
 
@@ -241,25 +324,62 @@ class Peripheral:
         if uuid != CHAR["control"].lower():
             return
         request = bytes(value)
-        response = self.device.handle_control(request)
-        if response is not None:
-            described = _describe_request(request)
-            status = STATUSES.get(response[2], f"0x{response[2]:02X}")
-            log.info("CTRL  %s -> %s", described, status)
-            self.control_log.append(
-                (time.strftime("%H:%M:%S"), described.split(" params=")[0],
-                 status))
-        if response is None:
+        if len(request) < 2:
             # Too short to carry a tag, so there is nothing to correlate a
             # reply with. SPEC.md §9 requires a response to every *request*;
             # two bytes are the minimum that constitutes one.
             log.warning("control write of %d byte(s) is not a request",
                         len(value))
             return
+        opcode, tag = request[0], request[1]
+
+        # SPEC.md §9.6 — everything that could stop this response reaching the
+        # client is decided here, BEFORE the device sees the request.
+        subscribed = self._subscribed()
+        if subscribed is not None and "control" not in subscribed:
+            # No indications enabled: the answer has nowhere to go, so the
+            # request MUST NOT take effect. A client that writes before
+            # subscribing is violating §9.6 and would otherwise leave the two
+            # ends disagreeing about the subscription table.
+            self._note_control(request, "discarded: no indication subscriber")
+            log.warning("CTRL  %s -> DISCARDED unapplied: the client has not "
+                        "enabled indications on Control (SPEC.md 9.6)",
+                        _describe_request(request))
+            return
+
+        verdict = self._control.admit(tag)
+        if verdict == "full":
+            self._note_control(request, "discarded: queue full")
+            log.warning("CTRL  %s -> DISCARDED unapplied: %d response(s) "
+                        "already awaiting delivery and the client kept writing",
+                        _describe_request(request), len(self._control))
+            self._control.dropped += 1
+            return
+        if verdict == "duplicate-tag":
+            # SPEC.md §9 — the tag is the only means of correlation, so a
+            # second request bearing an outstanding one is refused rather than
+            # applied. The refusal necessarily echoes the same tag; that
+            # ambiguity is the client's own doing and this is what tells it so.
+            response = bytes([opcode, tag, 2])          # bad_params
+        elif verdict == "busy":
+            response = bytes([opcode, tag, 5])          # busy
+        else:
+            response = self.device.handle_control(request)
+            if response is None:
+                return
+
+        status = STATUSES.get(response[2], f"0x{response[2]:02X}")
+        log.info("CTRL  %s -> %s", _describe_request(request), status)
+        self._note_control(request, status)
         # Queued rather than sent from here: this callback does not run on the
         # loop that owns the transport, and a refused response must be retried
         # rather than dropped.
-        self._control_out.append(response)
+        self._control.hold(tag, response)
+
+    def _note_control(self, request, status):
+        self.control_log.append(
+            (time.strftime("%H:%M:%S"),
+             _describe_request(request).split(" params=")[0], status))
 
     def _subscribed(self):
         """Characteristic names a central has enabled notifications on.
@@ -365,12 +485,39 @@ class Peripheral:
             await self.server.add_new_characteristic(
                 SERVICE, CHAR[name], props, value, perms)
 
+        # SPEC.md §10 — Info MUST be readable without encryption, so a client
+        # that cannot pair can still identify what it has found and say so,
+        # rather than reporting a device that is present, advertising a VTP
+        # service and apparently broken.
         await add("info", read, self.device.info(), readable)
         for name in ("gps", "can", "imu"):
             await add(name, notify, None, readable)
-        await add("control", write | indicate, None, readable | writeable)
+
+        # SPEC.md §10 — Control MUST require an encrypted link, enforced by the
+        # GATT permission rather than an application check. The ATT layer then
+        # answers an unencrypted write with Insufficient Encryption, which
+        # every major central stack turns into a pairing attempt on its own.
+        control_perms = readable | writeable
+        if self.encrypt_control:
+            control_perms |= (perms.read_encryption_required
+                              | perms.write_encryption_required)
+        else:
+            log.warning("Control is NOT requiring encryption: this device is "
+                        "NOT conforming to SPEC.md 10 (--no-encryption)")
+        await add("control", write | indicate, None, control_perms)
         # The client writes values here; the device only ever reads them.
         await add("monitor_values", write, None, readable | writeable)
+
+        # SPEC.md §10 SHOULD.
+        log.info("creating service %s (Device Information)", DIS_SERVICE)
+        await self.server.add_new_service(DIS_SERVICE)
+        for name, (uuid, text) in DIS_CHARS.items():
+            if text is None:
+                text = (f"VTP/{dev.PROTOCOL_MAJOR}."
+                        f"{dev.PROTOCOL_MINOR} reference")
+            log.info("adding DIS characteristic %s", name)
+            await self.server.add_new_characteristic(
+                DIS_SERVICE, uuid, read, text.encode(), readable)
 
         await self.server.start()
         try:
@@ -401,12 +548,11 @@ class Peripheral:
 
             # Control responses first, and retried until they land. They are
             # the one thing on this link that is owed rather than offered.
-            while self._control_out and self._ready:
-                response = self._control_out[0]
+            while len(self._control) and self._ready:
                 control = self.server.get_characteristic(CHAR["control"])
-                control.value = response
+                control.value = self._control.peek()
                 if self.server.update_value(SERVICE, CHAR["control"]):
-                    self._control_out.popleft()
+                    self._control.delivered()
                 else:
                     self._ready = False
                     self._blocked_since = time.monotonic()
@@ -479,11 +625,10 @@ class Peripheral:
                     # nobody subscribed, which reads as a client fault.
                     self.device.on_disconnect()
                     # The client is gone; nothing is owed to it any more.
-                    if self._control_out:
-                        self._control_dropped += len(self._control_out)
+                    undelivered = self._control.discard_all()
+                    if undelivered:
                         log.warning("%d control response(s) undelivered when "
-                                    "the link dropped", len(self._control_out))
-                        self._control_out.clear()
+                                    "the link dropped", undelivered)
                     log.info("CLIENT DISCONNECTED — subscription table cleared")
 
             now = self.device.now_us() / 1e6
@@ -499,10 +644,11 @@ class Peripheral:
                          unwanted["gps"], unwanted["can"], unwanted["imu"],
                          subs,
                          ", ".join(sorted(subscribed)) if subscribed else "none")
-                if self._control_out or self._control_dropped:
-                    log.info("  control responses: %d awaiting delivery, %d "
-                             "lost to a dropped link",
-                             len(self._control_out), self._control_dropped)
+                if len(self._control) or self._control.dropped:
+                    log.info("  control responses: %d awaiting delivery "
+                             "(depth %d), %d never delivered",
+                             len(self._control), self._control.depth,
+                             self._control.dropped)
                 if self._paints:
                     log.info("  display: paint %.1f ms, pump %.1f ms, %d paints"
                              "  |  ready-callbacks %d, safety-timeouts %d",
@@ -594,7 +740,8 @@ async def main_async(args):
     device = dev.VtpDevice(mtu=args.mtu, gps_hz=args.gps_hz,
                            imu_hz=args.imu_hz)
 
-    peripheral = Peripheral(device, name=args.name)
+    peripheral = Peripheral(device, name=args.name,
+                            encrypt_control=not args.no_encryption)
     screen = None
     # Launched through LaunchServices there is no stderr, so an unhandled
     # exception would vanish and look exactly like a silent exit. Everything
@@ -640,6 +787,10 @@ def main():
     ap.add_argument("--imu-hz", type=int, default=100)
     ap.add_argument("--no-display", action="store_true",
                     help="run headless; do not open the device screen")
+    ap.add_argument("--no-encryption", action="store_true",
+                    help="do NOT require an encrypted link for Control. "
+                         "Violates SPEC.md 10; for diagnosing pairing "
+                         "problems on hosts whose peripheral role is weak")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     try:

@@ -245,6 +245,35 @@ def decode_monitor_update(buf):
     return {"header": hdr, "values": values}
 
 
+def decode_control_response(buf):
+    """SPEC.md §9 — `[opcode][tag][status]` and, only when status is `ok`, a
+    detail whose shape the opcode decides.
+
+    The conditional detail is the whole rule. A refused request is answered
+    with exactly three bytes, so a client that reads a fixed-width response
+    takes a well-formed handle 0 -- or a link_params of all zeroes -- from a
+    request that failed. Rejecting the surplus is what stops that reaching an
+    application that has already decided the request succeeded.
+    """
+    base = _size("control_response")
+    if len(buf) < base:
+        raise Reject("length")
+    resp = _unpack("control_response", buf)
+
+    known = {m["value"] for m in SCHEMA["enums"]["status"]["members"]}
+    resp["status_known"] = resp["status"] in known
+    ok = resp["status"] == 0
+
+    detail = buf[base:]
+    if detail and not ok:
+        raise Reject("detail-on-error")
+    # Opaque by design: §11.3 lets a minor version add opcodes with any
+    # payload, so the envelope decoder carries the detail rather than parsing
+    # it. Kept verbatim so a round-trip can re-emit it.
+    resp["detail_hex"] = detail.hex()
+    return resp
+
+
 def decode_link_params(buf):
     """SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response.
 
@@ -279,6 +308,7 @@ DECODERS = {
     "can_list": decode_can_list,
     "monitor_list": decode_monitor_list,
     "monitor_update": decode_monitor_update,
+    "control_response": decode_control_response,
 }
 
 

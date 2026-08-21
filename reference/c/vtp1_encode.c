@@ -310,3 +310,20 @@ int vtp_encode_link_params(const vtp_link_params_t *l, uint8_t *out, size_t cap)
          (uint8_t)gate32(l->phy_rx, v, VTP_LINK_VALIDITY_PHY);
     return VTP_LINK_PARAMS_SIZE;
 }
+
+int vtp_encode_control_response(const vtp_control_response_t *r,
+                                uint8_t *out, size_t cap) {
+    /* An encoder must not emit what its own decoder rejects. SPEC.md §9. */
+    if (r->detail_len && r->status != VTP_STATUS_OK) return -1;
+    if (r->detail_len && !r->detail) return -1;
+    const size_t needed = VTP_CONTROL_RESPONSE_SIZE + r->detail_len;
+    if (cap < needed) return -1;
+
+    out[VTP_CONTROL_RESPONSE_OFF_OPCODE] = r->opcode;
+    out[VTP_CONTROL_RESPONSE_OFF_TAG]    = r->tag;
+    out[VTP_CONTROL_RESPONSE_OFF_STATUS] = r->status;
+    if (r->detail_len) {
+        memcpy(out + VTP_CONTROL_RESPONSE_SIZE, r->detail, r->detail_len);
+    }
+    return (int)needed;
+}

@@ -111,7 +111,17 @@ transceiver. Full layouts are under
 [The synthetic CAN bus](#the-synthetic-can-bus) below.
 
 A client must send `CAN_SUBSCRIBE` for each id before any CAN arrives — the
-table is empty on every connection (SPEC.md §9.2).
+table is empty on every connection (SPEC.md §9.2), and it must **enable
+indications on Control before its first write** (SPEC.md §9.6). A write that
+arrives before then is discarded *unapplied* and logged as such: the response
+would have nowhere to go, and a device that applied it anyway would leave the
+two ends disagreeing about the table.
+
+**Control requires an encrypted link** (SPEC.md §10), enforced by the GATT
+permission, so the first connection raises a pairing prompt. If pairing is
+where a test is failing rather than what it is testing, `--no-encryption`
+removes the requirement — it makes the device deliberately non-conforming and
+says so in the log every time it starts.
 
 As a worked example, in LapSmith's pasted-channel format:
 
@@ -170,6 +180,35 @@ built and demonstrated against it.
 properties of an MCU and a radio, not of a host operating system's scheduler.
 This makes a client developable. It leaves VTP/1 unproven on hardware, which is
 still the largest gap in this repository.
+
+## Pairing
+
+Control carries the GATT encryption permission, so a central must pair before
+it can write to it or enable indications on it. Info stays readable
+unencrypted (SPEC.md §10) so a client that cannot pair can still identify the
+device rather than reporting it as broken.
+
+macOS in the *peripheral* role is a much thinner path than in the central role,
+and Just Works pairing initiated against a Mac acting as a peripheral is not
+well travelled. If a client cannot pair, or pairs and then fails to write:
+
+- Forget the device on the client first. A stale bond against a peripheral that
+  has since restarted with a new identity produces repeated authentication
+  failures that look exactly like a device fault, and it is the single most
+  common cause.
+- Then try `--no-encryption` to establish whether pairing is the problem at
+  all. If the same test passes with it, the fault is in pairing rather than in
+  anything VTP specifies.
+
+`--no-encryption` exists for that bisection. It is not a supported mode: a
+device running with it does not conform to SPEC.md §10.
+
+## Device Information Service
+
+The peripheral also exposes the standard Device Information Service (`0x180A`)
+with manufacturer, model, firmware revision and serial number, which SPEC.md
+§10 recommends. Nothing in VTP/1 reads it — it is there because it is where
+every generic BLE tool already looks when someone asks what a device is.
 
 ## Platform limits
 

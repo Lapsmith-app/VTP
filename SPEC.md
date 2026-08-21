@@ -667,7 +667,40 @@ Requests are `[opcode:u8][tag:u8][params…]`. Responses are
 
 `tag` is chosen by the client and MUST be echoed in the response so that
 requests and responses can be correlated. A device MUST respond to every
-request.
+request it applies.
+
+A client MUST NOT reuse a `tag` while a request bearing it is still
+outstanding, and a device MUST answer `bad_params` to a request whose tag
+matches one it has already accepted and not yet answered. Correlation is the
+tag's only job, and two outstanding requests sharing one produce two responses
+the client cannot tell apart — the failure is silent, and it lands on whichever
+request the client happens to match first. Detection costs a device nothing,
+because a device that may hold requests outstanding already knows which tags
+they carry.
+
+**`detail` is present if and only if `status` is `ok`.** A refused request is
+answered with exactly three bytes, and a client MUST NOT read the detail of a
+response whose status is anything else. The alternative — a fixed-width
+response with the detail zeroed on failure — puts a well-formed handle 0 or a
+well-formed `link_params` of all zeroes in front of a client that has already
+decided the request succeeded, which is the plausible-wrong-value failure §1.1
+exists to prevent.
+
+<!-- BEGIN GENERATED: control_response -->
+*The envelope of every Control response. Detail follows only when status is ok.*
+
+Total: **3 bytes + `detail`**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `opcode` | Echoed from the request |
+| 1 | 1 | `u8` | `tag` | Echoed from the request; opaque to the device |
+| 2 | 1 | `u8` | `status` | enum `status` |
+<!-- END GENERATED: control_response -->
+
+The detail's shape is decided by the opcode, and §11.3 allows a minor version
+to add opcodes carrying anything at all, so a client MUST treat the detail of
+an opcode it does not implement as opaque rather than malformed.
 
 <!-- BEGIN GENERATED: control -->
 | Opcode | Command | Params | Response detail | Notes |
@@ -691,11 +724,11 @@ request.
 | --- | --- | --- |
 | 0 | `ok` | Request accepted |
 | 1 | `unsupported_opcode` | Opcode not implemented |
-| 2 | `bad_params` | Parameters malformed or out of range |
+| 2 | `bad_params` | Parameters malformed or out of range, or the tag is already outstanding |
 | 3 | `table_full` | No free subscription slot |
 | 4 | `rate_exceeded` | Would exceed can_max_frames_per_s |
-| 5 | `busy` | Retry later |
-| 6 | `needs_encryption` | Link is not encrypted |
+| 5 | `busy` | No room for another outstanding request; retry (SPEC.md 9) |
+| 6 | `needs_encryption` | Allocated, never sent: encryption is enforced by GATT permission (SPEC.md 10) |
 | 7 | `unknown_handle` | No subscription with that handle |
 | *other* | *unknown* | MUST decode as unknown, never as a default |
 <!-- END GENERATED: enum:status -->
@@ -718,6 +751,15 @@ with `table_full`, rather than accepting it and silently discarding frames.
 A client MAY have several requests outstanding. A device MUST process them in
 the order received and MUST respond to each. `tag` is opaque to the device and
 MUST be echoed unchanged.
+
+A device MUST accept at least **four** outstanding requests, and MUST answer
+`busy` rather than silently discarding one it has no room for. Four is a fixed
+floor rather than a value advertised in Info: a client installing a table of
+subscriptions is otherwise held to one round trip per connection interval, and
+a negotiated depth would cost a field in a record that can never grow again
+(§11.2) to solve what a constant solves. A client that receives `busy` MUST
+retry rather than treat the request as refused — `busy` says nothing about the
+request itself.
 
 ### 9.2 CAN subscriptions
 
@@ -832,6 +874,54 @@ A device MUST report its table exactly as installed. `CAN_LIST` exists so a
 client can verify device state rather than assume it, and a device that
 normalises, reorders or summarises here defeats its only purpose.
 
+### 9.6 The request lifecycle
+
+**A client MUST enable indications on Control before its first write.**
+Responses arrive by indication on that characteristic, so a write that precedes
+enablement is a request whose answer has nowhere to go. Every client subscribes
+to a characteristic before using it, so this costs a client nothing to satisfy
+and removes a state a device would otherwise have to reason about.
+
+**A device MUST NOT apply a request it cannot answer.** If the response cannot
+be delivered — indications not enabled, or no room in the queue above — the
+request MUST NOT take effect, and the device MUST NOT count it as received.
+Deliverability is therefore decided *before* dispatch, not after.
+
+This is the clause the rest of the lifecycle rests on, and it is the one an
+implementation is most likely to get wrong, because applying first and
+answering second is the natural order to write the code in. A device that
+applies a request whose response is then lost leaves the client with no way to
+find out what happened: the client retries, and for any request that is not
+idempotent the retry applies it a second time. The failure was observed in
+practice before it was specified — a device applied a subscription, dropped the
+refusal it owed for a later one, and the client timed out and dropped the link
+while the device believed itself correctly configured.
+
+**Every opcode in this specification is safe to retry**, which is a property
+worth stating rather than leaving each implementer to derive:
+
+| Opcode | Why a retry is safe |
+| --- | --- |
+| `CAN_SUBSCRIBE`, `CAN_SUBSCRIBE_MASK` | §9.2 — the same `id` and `mask` update in place and return the existing handle |
+| `CAN_UNSUBSCRIBE` | A second attempt answers `unknown_handle`; the table is the same either way |
+| `CAN_RESET` | Clearing an empty table is clearing an empty table |
+| `GPS_SET_RATE`, `IMU_SET_RATE` | Setting a rate to the value it already holds |
+| `CAN_LIST`, `MONITOR_LIST`, `GET_LINK_PARAMS` | Reads |
+| `TIME_SYNC` | Each attempt is answered with a fresh reading, never a stale one |
+
+A client MAY therefore retry any request whose response it did not receive. It
+MUST NOT assume the original did not take effect — only that repeating it is
+harmless.
+
+**A client MUST discard a response whose tag it is no longer waiting on.** A
+response that arrives after the client has given up on that request is a
+measurement of a moment that has passed. This matters most for `TIME_SYNC`,
+where a late response carries a device clock reading that was true when it was
+taken and is not true now; §9.1's link parameters and the two list opcodes have
+the same property in weaker form.
+
+---
+
 ### 9.1 Link parameters
 
 The detail of a successful `GET_LINK_PARAMS` response is one `link_params`
@@ -901,8 +991,34 @@ non-conforming.
 
 ## 10. Security
 
-The Control characteristic MUST require an encrypted link. A device MUST reject
-writes on an unencrypted link with status `needs_encryption`.
+The Control characteristic MUST require an encrypted link, and a device MUST
+enforce that with the GATT encryption permission on both write and indicate —
+not with an application-level check.
+
+The two are not interchangeable, and an earlier draft of this section required
+both, which cannot be implemented. A characteristic carrying the permission is
+enforced by the ATT layer: an unencrypted write is answered `Insufficient
+Encryption` and never reaches application code, so there is nothing there to
+generate a reply from. A device that *can* reply has not set the permission.
+The delivery path settles it either way — a response travels by indication on
+Control, so on a device that has set the permission a client cannot even enable
+indications until the link is encrypted, and an application-level refusal would
+have nowhere to go.
+
+Status `needs_encryption` (6) remains allocated and MUST NOT be reused for
+anything else, but a conforming device has no occasion to send it.
+
+Enforcing at the ATT layer is also what produces the behaviour a user wants:
+every major central stack turns `Insufficient Encryption` into a pairing
+attempt on its own, so the requirement costs one prompt at first connection
+rather than an error a client has to interpret.
+
+**The Info characteristic MUST be readable on an unencrypted link.** A client
+that cannot pair — or has not yet — must still be able to identify what it has
+found and say so, rather than reporting a device that is present, advertising a
+VTP service and apparently broken. Info carries no measurement: version,
+capabilities, rates and buffer sizes, all of which the advertisement already
+hints at (§3.3).
 
 Stream characteristics MAY be readable on an unencrypted link. A device
 SHOULD require encryption for them and MUST do so if it is fitted to a vehicle
@@ -958,6 +1074,7 @@ all.
 | `monitor_value` | No — closed for major version 1 | — |
 | `can_list_page` | No — closed for major version 1 | One per CAN_LIST page |
 | `can_subscription` | No — closed for major version 1 | One per table entry |
+| `control_response` | No — closed for major version 1 | — |
 | `link_params` | No — closed for major version 1 | On request |
 <!-- END GENERATED: extensibility -->
 
