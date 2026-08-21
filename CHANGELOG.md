@@ -8,8 +8,15 @@ conformance vector.
 
 ## [Unreleased]
 
-Draft. The wire format may change without notice until `1.0.0`, at which point
-the compatibility guarantees in SPEC.md §11 take effect.
+Nothing yet.
+
+## [0.1.0] - 2026-08-21
+
+First tagged baseline. Still draft: the wire format may change without notice
+until `1.0.0`, at which point the compatibility guarantees in SPEC.md §11 take
+effect. Nothing here is a compatibility promise — a `v0.x` tag exists so that
+an implementer can say which version they built against, not so that they can
+rely on it.
 
 ### Added
 - Initial specification: GPS, CAN, IMU, Info and Control roles.
