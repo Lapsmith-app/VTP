@@ -295,6 +295,46 @@ def main():
         check("info" not in protected,
               f"the {name} posture encrypts Info; §10.2 says to leave it "
               f"readable so an unpaired client can still identify the device")
+    # ---- TIME_SYNC bounds its own error ---------------------------------
+    # SPEC.md §9.7 — two readings, and the earlier one MUST be taken when the
+    # write arrived rather than when the reply is composed. A device reading
+    # its clock once and reporting it twice looks identical on the wire to one
+    # that answered instantly, so the check drives it with a known gap.
+    tclock = [5_000_000]
+    timed = dev.VtpDevice(now_us=lambda: tclock[0], gps_hz=0, imu_hz=0)
+    timed.on_connect()
+    arrived = tclock[0]
+    tclock[0] += 1_500                      # the device spends 1.5 ms answering
+    answer = timed.handle_control(
+        bytes([dev.TIME_SYNC, 1]) + struct.pack("<q", 1_700_000_000_000),
+        t_rx=arrived)
+    check(answer[2] == dev.ST_OK, "TIME_SYNC was refused")
+    sync = vtp1.decode_time_sync(answer[3:])
+    check(sync["t_device_rx"] == arrived,
+          f"t_device_rx is {sync['t_device_rx']}, not the {arrived} at which "
+          f"the write arrived; §9.7 forbids reading the clock later")
+    check(sync["processing_us"] == 1_500,
+          f"the device took 1500 us to answer and reported "
+          f"{sync['processing_us']}; that difference is the whole point of "
+          f"the two-timestamp form")
+    check(sync["t_device_tx"] >= sync["t_device_rx"],
+          "t_device_tx MUST NOT precede t_device_rx")
+
+    # SPEC.md §5.6 — a device that knows the solution epoch says so.
+    epoch_clock = [0]
+    epoch_dev = dev.VtpDevice(now_us=lambda: epoch_clock[0], gps_hz=10, imu_hz=0)
+    epoch_dev.on_connect()
+    stamped = None
+    for _ in range(200):
+        epoch_clock[0] += 5_000
+        for characteristic, payload in epoch_dev.poll():
+            if characteristic == "gps" and stamped is None:
+                stamped = vtp1.decode_gps_fix(payload)
+    check(stamped is not None and
+          stamped["fix_flags"] & dev.FIX_FLAG_SOLUTION_EPOCH,
+          "this device computes its fix at a known instant, so t_device IS "
+          "the solution epoch and fix_flags bit 4 MUST say so")
+
     # ---- Per-connection state -------------------------------------------
     # SPEC.md §8.2 — the FIRST notification after a connection carries seq 0.
     fresh_clock = [0]
@@ -415,8 +455,12 @@ def main():
 
     resp = device.handle_control(bytes([dev.TIME_SYNC, 4])
                                  + struct.pack("<q", 1_766_000_000_000))
-    check(resp[2] == dev.ST_OK and len(resp) == 11,
-          "TIME_SYNC must answer ok and echo the device clock")
+    check(resp[2] == dev.ST_OK
+          and len(resp) == 3 + vtp1.SCHEMA["records"]["time_sync"]["size"],
+          "TIME_SYNC must answer ok with a time_sync record. This had "
+          "asserted 11 bytes, the single-timestamp form SPEC.md §9.7 "
+          "replaced, and the length is taken from the schema now so the "
+          "record cannot change under it again")
 
     resp = device.handle_control(bytes([dev.GET_LINK_PARAMS, 5]))
     check(resp[2] == dev.ST_OK, "GET_LINK_PARAMS was refused")

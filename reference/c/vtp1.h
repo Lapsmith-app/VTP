@@ -244,6 +244,16 @@ int vtp_status_known(uint8_t status);
 int vtp_decode_control_response(const uint8_t *buf, size_t len,
                                 vtp_control_response_t *out, const char **err);
 
+/* SPEC.md §9.7 -- two readings of the device clock, so a client can take the
+ * device's own processing time out of the round trip and bound its error. */
+typedef struct {
+    uint64_t t_device_rx;
+    uint64_t t_device_tx;
+} vtp_time_sync_t;
+
+int vtp_decode_time_sync(const uint8_t *buf, size_t len,
+                         vtp_time_sync_t *out, const char **err);
+
 #ifdef __cplusplus
 }
 #endif

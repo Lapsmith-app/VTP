@@ -8,6 +8,72 @@ conformance vector.
 
 ## [Unreleased]
 
+### Changed — wire format
+- **`TIME_SYNC` now answers with two readings of the device clock (§9.7).**
+  It had answered with one, and one timestamp cannot bound its own error. A
+  client knows when it wrote and when it heard back, but with a single device
+  reading it cannot separate the outbound delay from the inbound one, so its
+  estimate of the device clock is uncertain by the whole round trip — tens of
+  milliseconds over a link with a 30 ms connection interval, in an exchange
+  whose purpose is to align a microsecond clock.
+
+  The response is now a `time_sync` record carrying `t_device_rx` and
+  `t_device_tx`. With those the client computes the offset and, more usefully,
+  a `delay` it can act on:
+
+      offset ≈ ((t_device_rx − t₁) + (t_device_tx − t₄)) ÷ 2
+      delay  ≈ (t₄ − t₁) − (t_device_tx − t_device_rx)
+
+  This is NTP's exchange, for NTP's reason. §9.7 also states what it does not
+  fix: the response is queued for the next connection event, so `t_device_tx`
+  is when the device prepared the answer rather than when the radio sent it,
+  and BLE's queuing asymmetry survives. A client SHOULD sync several times and
+  keep the smallest `delay`.
+
+  A device MUST take `t_device_rx` when the write arrives, not when it starts
+  composing the reply — the gap between those is exactly the processing time
+  this exchange exists to remove, and a device reading its clock once and
+  reporting it twice looks on the wire like one that answered instantly.
+
+- **`fix_flags` bit 4 (`solution_epoch`) is assigned** from the space Appendix
+  A reserved.
+
+### Added
+- **§5.6 — when a fix is timestamped.** `t_device` MUST be the epoch of the
+  solution, not the instant the fix reached the device. A GNSS receiver
+  computes a solution for a specific moment and delivers it tens to hundreds of
+  milliseconds later; a device stamping delivery reports a position that was
+  true at one time with a timestamp naming another, and puts GPS systematically
+  late against CAN and IMU. That offset removes exactly the cross-channel
+  alignment §8.1's shared clock exists to provide, while every number continues
+  to look plausible.
+
+  Whether a receiver exposes the epoch is a property of the hardware, so a
+  device that cannot determine it clears `fix_flags` bit 4 and stamps arrival.
+  The flag is §1.1 applied to time: the honest answer is a measured epoch or an
+  admission, never a delivery time presented as a measurement.
+
+- **§7 — when an IMU sample is timestamped.** `t_base` MUST be the acquisition
+  time of sample 0, not the moment the device drained the FIFO. At 833 Hz a
+  sixteen-deep FIFO is nearly twenty milliseconds, and the error moves with the
+  buffer's occupancy so a client cannot calibrate it away. Unlike a GNSS epoch
+  this takes no flag and allows no exception: the device sets the sampling
+  schedule, so sample 0's time is the drain time less the samples behind it.
+
+  CAN had had this rule since §6.7 and the other two streams had nothing
+  equivalent — the two where acquisition-to-report latency is largest.
+
+- **`time_sync` is a conformance record**, with vectors for the ordinary case,
+  a device answering within one tick, the u64 ceiling, and the two malformed
+  cases. `t_device_tx` before `t_device_rx` is rejected by both decoders and
+  refused by both encoders: a negative round trip halved into an offset is a
+  confidently wrong clock rather than an obviously broken one.
+
+### Fixed
+- **The peripheral's own TIME_SYNC check asserted the response was 11 bytes**,
+  the single-timestamp form. It now takes the length from the schema, so the
+  record cannot change under it again.
+
 ### Fixed — the harness
 Four ways the verification tooling could pass without verifying anything. The
 pattern is worth naming, because this is the fourth time in this repository's

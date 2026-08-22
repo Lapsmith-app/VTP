@@ -1312,6 +1312,50 @@ def vectors(schema):
     ]
     files["control-response.json"][-1]["hex"] = resp(0x02, 9, 0)[:2].hex()
 
+    # ---- TIME_SYNC ------------------------------------------------------
+    def ts(name, desc, rx, tx, **kw):
+        c = {"name": name, "desc": desc, "record": "time_sync",
+             "hex": struct.pack("<QQ", rx, tx).hex()}
+        if "must_reject" not in kw:
+            c["expect"] = {"t_device_rx": rx, "t_device_tx": tx,
+                           "processing_us": tx - rx}
+        c.update(kw)
+        return c
+
+    files["time-sync.json"] = [
+        ts("typical-processing",
+           "A request answered 1.2 ms after it arrived. SPEC.md 9.7 -- the gap "
+           "is the device's own processing time, which is the term a client "
+           "takes out of the round trip to bound its error.",
+           4_000_000_000, 4_000_001_200),
+        ts("answered-immediately",
+           "Both readings equal: the device answered within one tick of its "
+           "own clock. Legal, and NOT the same as a device reporting one "
+           "timestamp twice because it never took the second.",
+           7_500_000, 7_500_000),
+        ts("clock-near-wrap",
+           "Both readings within a microsecond of the u64 ceiling. SPEC.md 8.1 "
+           "-- the clock will not reach this in half a million years, but a "
+           "decoder that sign-extends or overflows here is wrong now.",
+           (1 << 64) - 2, (1 << 64) - 1),
+        ts("tx-before-rx",
+           "The device reports finishing its answer before the request "
+           "arrived. MUST be rejected: a client computing delay from it gets a "
+           "negative round trip, and halved into an offset that is a "
+           "confidently wrong clock rather than an obviously broken one.",
+           9_000_000, 8_999_000, must_reject="tx-before-rx"),
+        ts("short-payload",
+           "Eight bytes: one timestamp where two are required. MUST be "
+           "rejected rather than read as a device that answered instantly.",
+           1, 2, must_reject="length"),
+        ts("long-payload",
+           "Seventeen bytes. time_sync is fixed-size with no extension "
+           "mechanism, so trailing bytes MUST be rejected.",
+           1, 2, must_reject="length"),
+    ]
+    files["time-sync.json"][-2]["hex"] = struct.pack("<Q", 1).hex()
+    files["time-sync.json"][-1]["hex"] = (struct.pack("<QQ", 1, 2) + b"\x00").hex()
+
     return files
 
 

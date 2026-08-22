@@ -353,6 +353,10 @@ class Peripheral:
             return
         if uuid != CHAR["control"].lower():
             return
+        # SPEC.md §9.7 — the arrival instant, read here because this callback
+        # is the closest this process gets to the write landing. Everything
+        # below happens after it.
+        t_rx = self.device.now_us()
         request = bytes(value)
         if len(request) < 2:
             # Too short to carry a tag, so there is nothing to correlate a
@@ -394,7 +398,7 @@ class Peripheral:
         elif verdict == "busy":
             response = bytes([opcode, tag, 5])          # busy
         else:
-            response = self.device.handle_control(request)
+            response = self.device.handle_control(request, t_rx=t_rx)
             if response is None:
                 return
 

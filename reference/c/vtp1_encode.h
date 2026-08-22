@@ -43,6 +43,7 @@ int vtp_encode_info(const vtp_info_t *info, uint8_t *out, size_t cap);
 /* Fields whose validity bit is clear are written as zero, as everywhere else:
  * a device that cannot determine its PHY cannot accidentally ship a stale one. */
 int vtp_encode_link_params(const vtp_link_params_t *lp, uint8_t *out, size_t cap);
+int vtp_encode_time_sync(const vtp_time_sync_t *t, uint8_t *out, size_t cap);
 int vtp_encode_control_response(const vtp_control_response_t *r,
                                 uint8_t *out, size_t cap);
 

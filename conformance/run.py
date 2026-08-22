@@ -26,7 +26,7 @@ VECTORS = ROOT / "conformance" / "vectors"
 # `core` is not optional: Info, the control response envelope and link
 # parameters are what every device answers regardless of which streams it has.
 ROLES = {
-    "core":    {"info", "control_response", "link_params"},
+    "core":    {"info", "control_response", "link_params", "time_sync"},
     "gps":     {"gps_fix"},
     "can":     {"can_batch", "can_list"},
     "imu":     {"imu_batch"},

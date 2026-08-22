@@ -362,6 +362,19 @@ int vtp_decode_control_response(const uint8_t *b, size_t len,
     return 0;
 }
 
+int vtp_decode_time_sync(const uint8_t *b, size_t len,
+                         vtp_time_sync_t *o, const char **err) {
+    if (len != VTP_TIME_SYNC_SIZE) { *err = "length"; return -1; }
+
+    o->t_device_rx = rd64(b + VTP_TIME_SYNC_OFF_T_DEVICE_RX);
+    o->t_device_tx = rd64(b + VTP_TIME_SYNC_OFF_T_DEVICE_TX);
+    /* SPEC.md §9.7 -- answering before being asked is not a late clock, it is
+     * a malformed response, and a negative round trip halved into an offset
+     * is a confidently wrong one. */
+    if (o->t_device_tx < o->t_device_rx) { *err = "tx-before-rx"; return -1; }
+    return 0;
+}
+
 int vtp_decode_link_params(const uint8_t *b, size_t len,
                            vtp_link_params_t *o, const char **err) {
     /* Fixed size, no extension mechanism: any other length is malformed. */

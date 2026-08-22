@@ -262,9 +262,14 @@
           "bit": 3,
           "name": "clock_disciplined",
           "desc": "t_device was GNSS-disciplined at this sample"
+        },
+        {
+          "bit": 4,
+          "name": "solution_epoch",
+          "desc": "t_device is the epoch of the solution; when clear it is when the fix reached the device (SPEC.md 5.6)"
         }
       ],
-      "reserved_from": 4
+      "reserved_from": 5
     },
     "capabilities": {
       "width": 4,
@@ -1050,6 +1055,29 @@
         }
       ]
     },
+    "time_sync": {
+      "access": "control",
+      "size": 16,
+      "desc": "The detail of a TIME_SYNC response. Two readings of one clock, so a client can bound its own error.",
+      "fields": [
+        {
+          "name": "t_device_rx",
+          "offset": 0,
+          "size": 8,
+          "type": "u64",
+          "units": "\u00b5s",
+          "desc": "Device clock when the request arrived"
+        },
+        {
+          "name": "t_device_tx",
+          "offset": 8,
+          "size": 8,
+          "type": "u64",
+          "units": "\u00b5s",
+          "desc": "Device clock when this answer was prepared; MUST NOT be earlier than t_device_rx"
+        }
+      ]
+    },
     "link_params": {
       "access": "control",
       "size": 16,
@@ -1184,8 +1212,8 @@
         "value": 48,
         "name": "TIME_SYNC",
         "params": "host_t_utc_ms:i64",
-        "response": "t_device:u64",
-        "desc": "The device clock at the instant the write was received"
+        "response": "time_sync record",
+        "desc": "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"
       },
       {
         "value": 49,
