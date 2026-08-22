@@ -57,6 +57,24 @@ CH_SPEED, CH_SESSION_DISTANCE, CH_SESSION_TIME = 7, 8, 9
 
 MONITOR_PRESENT = 0x01
 
+# SPEC.md §13.5 — how long each channel may be displayed without a refresh, in
+# 100 ms units; 0 never expires. Per channel because the channels differ in
+# kind: a lap time ticking up is wrong within a second of going stale, while a
+# best lap stays true until it is beaten. Several times the expected update
+# interval, because this bounds how wrong a display may be rather than how
+# often a client must talk.
+MONITOR_MAX_AGE = {
+    CH_LAP_TIME: 20,             # 2 s — ticks continuously
+    CH_PREDICTED_LAP_TIME: 20,
+    CH_SPEED: 10,                # 1 s — changes fastest
+    CH_SESSION_TIME: 20,
+    CH_SESSION_DISTANCE: 30,
+    CH_LAST_LAP_TIME: 0,         # true until the next lap ends
+    CH_BEST_LAP_TIME: 0,         # true until it is beaten
+    CH_DELTA_BEST: 20,
+    CH_LAP_NUMBER: 0,            # true until the next lap starts
+}
+
 PROTOCOL_MAJOR, PROTOCOL_MINOR = 1, 0
 # SPEC.md §2 — read from the schema rather than restated, so the one place it
 # is defined stays the only place it is defined.
@@ -213,8 +231,9 @@ class VtpDevice:
             monitor_channels if monitor_channels is not None else
             (CH_LAP_TIME, CH_LAST_LAP_TIME, CH_BEST_LAP_TIME,
              CH_DELTA_BEST, CH_LAP_NUMBER, CH_SPEED)))
-        # slot -> (value, present). Absent is a state the display renders, not
-        # a value it substitutes.
+        # slot -> (value, present, written_at). Absent is a state the display
+        # renders, not a value it substitutes -- and SPEC.md §13.5 makes an
+        # expired value another way of being absent.
         self._monitor_values = {}
         self._monitor_seq = None
         self._monitor_updates = 0
@@ -780,7 +799,8 @@ class VtpDevice:
         return enc.encode_monitor_list(
             {"total": len(self._monitor_channels), "index": start,
              "count": len(page), "reserved": 0},
-            [{"slot": s, "channel": c, "reserved": 0} for s, c in page])
+            [{"slot": s, "channel": c, "max_age": MONITOR_MAX_AGE.get(c, 20)}
+             for s, c in page])
 
     def handle_monitor_write(self, payload):
         """SPEC.md §13.4 — a client-to-device batch of values.
@@ -798,16 +818,22 @@ class VtpDevice:
             return "length"
 
         known = {slot for slot, _ in self._monitor_channels}
-        staged = {}
+        staged, seen = {}, set()
+        now = self.now_us()
         for i in range(count):
             slot, validity, value = struct.unpack_from(
                 "<BBi", payload, hsize + i * vsize)
+            # SPEC.md §13.4 — a slot twice in one write, and nothing says which
+            # wins. Rejected whole rather than resolved arbitrarily.
+            if slot in seen:
+                return "duplicate-slot"
+            seen.add(slot)
             # SPEC.md §13.1 — a slot this device never asked for is ignored,
             # not an error: the client may be a version ahead.
             if slot not in known:
                 continue
             present = bool(validity & MONITOR_PRESENT)
-            staged[slot] = (value if present else 0, present)
+            staged[slot] = (value if present else 0, present, now)
 
         self._monitor_values.update(staged)
         self._monitor_seq = seq
@@ -836,9 +862,26 @@ class VtpDevice:
     def monitor_state(self):
         """(slot, channel, value, present) for every channel this device asked
         for. Structured rather than formatted: rendering is display.py's job,
-        and it must be testable without a screen."""
-        return [(slot, channel, *self._monitor_values.get(slot, (0, False)))
-                for slot, channel in self._monitor_channels]
+        and it must be testable without a screen.
+
+        SPEC.md §13.5 — a value older than its channel's max_age is reported
+        NOT PRESENT, exactly as one whose present bit was clear. A client that
+        crashed, was backgrounded or wedged leaves the link up and simply stops
+        writing, so silence is the only symptom the device ever sees; without
+        this the screen shows a lap time from four minutes ago and the driver
+        reading it has no way to tell.
+        """
+        now = self.now_us()
+        out = []
+        for slot, channel in self._monitor_channels:
+            value, present, written_at = self._monitor_values.get(
+                slot, (0, False, None))
+            max_age = MONITOR_MAX_AGE.get(channel, 20)
+            if present and max_age and written_at is not None:
+                if now - written_at > max_age * 100_000:
+                    value, present = 0, False
+            out.append((slot, channel, value, present))
+        return out
 
     @property
     def monitor_seq(self):

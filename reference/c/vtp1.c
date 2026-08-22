@@ -279,6 +279,25 @@ int vtp_decode_monitor_list(const uint8_t *b, size_t len,
                         + (size_t)p->count * VTP_MONITOR_CHANNEL_SIZE;
     if (len < needed) { *err = "truncated-record"; return -1; }
     if (len != needed) { *err = "length"; return -1; }
+
+    /* SPEC.md §13.4 -- a declaration too large for one complete write has made
+     * its own rule unsatisfiable. */
+    if (p->total > VTP_MONITOR_MAX_CHANNELS) {
+        *err = "too-many-channels"; return -1;
+    }
+    /* SPEC.md §13.3 -- the slot is how a value is addressed, so two entries
+     * claiming one make every later update ambiguous. */
+    for (uint8_t i = 0; i < p->count; i++) {
+        const uint8_t si = b[VTP_MONITOR_PAGE_SIZE
+                             + (size_t)i * VTP_MONITOR_CHANNEL_SIZE
+                             + VTP_MONITOR_CHANNEL_OFF_SLOT];
+        for (uint8_t j = (uint8_t)(i + 1); j < p->count; j++) {
+            const uint8_t sj = b[VTP_MONITOR_PAGE_SIZE
+                                 + (size_t)j * VTP_MONITOR_CHANNEL_SIZE
+                                 + VTP_MONITOR_CHANNEL_OFF_SLOT];
+            if (si == sj) { *err = "duplicate-slot"; return -1; }
+        }
+    }
     return 0;
 }
 
@@ -288,7 +307,7 @@ void vtp_monitor_channel_at(const uint8_t *b, uint8_t index,
                      + (size_t)index * VTP_MONITOR_CHANNEL_SIZE;
     o->slot     = e[VTP_MONITOR_CHANNEL_OFF_SLOT];
     o->channel  = rd16(e + VTP_MONITOR_CHANNEL_OFF_CHANNEL);
-    o->reserved = e[VTP_MONITOR_CHANNEL_OFF_RESERVED];
+    o->max_age  = e[VTP_MONITOR_CHANNEL_OFF_MAX_AGE];
 }
 
 int vtp_decode_monitor_update(const uint8_t *b, size_t len,
@@ -302,6 +321,20 @@ int vtp_decode_monitor_update(const uint8_t *b, size_t len,
                         + (size_t)h->count * VTP_MONITOR_VALUE_SIZE;
     if (len < needed) { *err = "truncated-record"; return -1; }
     if (len != needed) { *err = "length"; return -1; }
+
+    /* SPEC.md §13.4 -- nothing says which of two values for one slot wins, so
+     * a device choosing either is choosing on every client's behalf. */
+    for (uint8_t i = 0; i < h->count; i++) {
+        const uint8_t si = b[VTP_MONITOR_HEADER_SIZE
+                             + (size_t)i * VTP_MONITOR_VALUE_SIZE
+                             + VTP_MONITOR_VALUE_OFF_SLOT];
+        for (uint8_t j = (uint8_t)(i + 1); j < h->count; j++) {
+            const uint8_t sj = b[VTP_MONITOR_HEADER_SIZE
+                                 + (size_t)j * VTP_MONITOR_VALUE_SIZE
+                                 + VTP_MONITOR_VALUE_OFF_SLOT];
+            if (si == sj) { *err = "duplicate-slot"; return -1; }
+        }
+    }
     return 0;
 }
 

@@ -271,10 +271,10 @@ int main(void) {
                    "\"count\":%u,\"reserved\":%u},\"entries\":[",
                    pg.total, pg.index, pg.count, pg.reserved);
             for (uint8_t i = 0; i < pg.count; i++) {
-                printf("%s{\"slot\":%u,\"channel\":%u,\"reserved\":%u,"
+                printf("%s{\"slot\":%u,\"channel\":%u,\"max_age\":%u,"
                        "\"channel_known\":%s}",
                        i ? "," : "", chans[i].slot, chans[i].channel,
-                       chans[i].reserved,
+                       chans[i].max_age,
                        vtp_channel_known(chans[i].channel) ? "true" : "false");
             }
             printf("]");

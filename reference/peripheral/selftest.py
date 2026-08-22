@@ -295,6 +295,59 @@ def main():
         check("info" not in protected,
               f"the {name} posture encrypts Info; §10.2 says to leave it "
               f"readable so an unpaired client can still identify the device")
+    # ---- Monitor values go stale, and say so ----------------------------
+    # SPEC.md §13.5 — silence is the ONLY symptom a device sees when a client
+    # crashes, is backgrounded or wedges: the link stays up and the writes
+    # simply stop. Without an expiry the screen keeps showing a lap time from
+    # minutes ago and the driver reading it cannot tell.
+    mclk = [0]
+    mon = dev.VtpDevice(now_us=lambda: mclk[0], gps_hz=0, imu_hz=0)
+    mon.on_connect()
+    declared = vtp1.decode_monitor_list(
+        mon.handle_control(bytes([dev.MONITOR_LIST, 1])
+                           + struct.pack("<H", 0))[3:])
+    by_slot = {e["slot"]: e for e in declared["entries"]}
+    check(declared["page"]["total"] <= vtp1.MONITOR_MAX_CHANNELS,
+          f"a device MUST NOT ask for more channels than fit in one complete "
+          f"write: {declared['page']['total']} > {vtp1.MONITOR_MAX_CHANNELS}")
+    perishable = [e for e in declared["entries"] if e["max_age"]]
+    durable = [e for e in declared["entries"] if not e["max_age"]]
+    check(perishable and durable,
+          "this device should declare both kinds of channel, or the expiry "
+          "rule is only half exercised")
+
+    slot_fast = perishable[0]["slot"]
+    slot_never = durable[0]["slot"]
+    write = (struct.pack("<HBB", 1, 2, 0)
+             + struct.pack("<BBi", slot_fast, dev.MONITOR_PRESENT, 12345)
+             + struct.pack("<BBi", slot_never, dev.MONITOR_PRESENT, 99999))
+    check(mon.handle_monitor_write(write) is None,
+          "a well-formed monitor write was rejected")
+
+    def present_at(t_us):
+        mclk[0] = t_us
+        return {slot: present for slot, _, _, present in mon.monitor_state()}
+
+    deadline = by_slot[slot_fast]["max_age"] * 100_000
+    check(present_at(deadline - 100_000)[slot_fast],
+          "a value inside its max_age MUST still be shown")
+    check(not present_at(deadline + 100_000)[slot_fast],
+          "a value past its max_age MUST be rendered unavailable, not held on "
+          "screen as though it were current")
+    check(present_at(deadline + 100_000)[slot_never],
+          "a channel declaring max_age 0 never expires, so it MUST survive a "
+          "deadline that belongs to another channel")
+    check(present_at(600_000_000)[slot_never],
+          "max_age 0 means never, not merely a long time")
+
+    # SPEC.md §13.4 — a slot twice in one write, and nothing says which wins.
+    twice = (struct.pack("<HBB", 2, 2, 0)
+             + struct.pack("<BBi", slot_fast, dev.MONITOR_PRESENT, 1)
+             + struct.pack("<BBi", slot_fast, dev.MONITOR_PRESENT, 2))
+    check(mon.handle_monitor_write(twice) == "duplicate-slot",
+          "a write naming one slot twice MUST be rejected rather than "
+          "resolved arbitrarily")
+
     # ---- TIME_SYNC bounds its own error ---------------------------------
     # SPEC.md §9.7 — two readings, and the earlier one MUST be taken when the
     # write arrived rather than when the reply is composed. A device reading

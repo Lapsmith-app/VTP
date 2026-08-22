@@ -886,11 +886,12 @@
           "enum": "channel"
         },
         {
-          "name": "reserved",
+          "name": "max_age",
           "offset": 3,
           "size": 1,
           "type": "u8",
-          "reserved": true
+          "units": "100ms",
+          "desc": "Longest this value may be shown without a refresh; 0 never expires (SPEC.md 13.5)"
         }
       ]
     },
