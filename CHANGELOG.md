@@ -8,6 +8,80 @@ conformance vector.
 
 ## [Unreleased]
 
+### Review of PR #24, second pass — interoperability
+
+- **C and Python produced different wire bytes.** `can_header.flags`,
+  `imu_header.flags` and `info.clock_flags` became schema bitmasks in the last
+  round, and the Python encoder picked them up immediately because it applies
+  the reserved-bit rule generically by walking the schema. The C encoder writes
+  it out per field — it is a separate translation unit with no reflection — and
+  three fields were never wired. Crafted input produced `0xfe/0xfb/0xfc` from C
+  against `0x00/0x03/0x00` from Python: two conforming implementations
+  disagreeing about the bytes, which is the one defect class this repository
+  exists to prevent.
+
+  The masks are added, and the corpus is changed so it cannot happen again.
+  **`conformance/produce.py` now carries a reserved-bit case for every bitmask
+  field in the schema, generated from the schema** — eight where there were
+  four hand-picked ones. A bitmask field added later gets a case automatically,
+  and each sets the *top* reserved bit, because an encoder masking at the wrong
+  width passes on the lowest and fails on the highest. Each of the three fixed
+  masks was verified to fail the suite when removed again.
+
+- **CCCDs were excluded from the fixed attribute table.** §4.1 required every
+  characteristic and its Notify/Indicate properties, then made the CCCD
+  conditional on the capability bit — and a CCCD is an attribute, so removing
+  one changes the table a central has cached, which is the whole reason the
+  table is fixed. Every CCCD is now always present. A client enables the ones
+  whose bit is set; a device MUST accept a CCCD write on an inert stream (it
+  costs a two-byte descriptor) and then simply never notifies.
+
+- **The three optional CAN bits defined nothing.** §4.1 said only that they
+  require `can`. Each now has a rule for when it is clear, in a table:
+  `can_fd` clear means never emitting an FD record and `can_max_payload` of 8
+  (64 when set); `masked_subscriptions` clear means `CAN_SUBSCRIBE_MASK`
+  answers `unsupported_opcode`; `on_change_subscriptions` clear means an
+  `on_change` subscription is refused with `bad_params` rather than silently
+  becoming `every_frame` — the difference between a channel that updates on an
+  event and one that floods, which the client would have no way to detect.
+
+  `VtpDevice` takes a capability set so both halves of each rule can be
+  demonstrated, and `selftest.py` exercises the cleared half. That immediately
+  found a second defect: `info()` reported `gps_rate_hz`, `imu_rate_hz` and the
+  CAN capacities unconditionally, so a device declaring no GPS still published
+  a GPS rate. §4.1's capacity rule had been in the encoder since the last round
+  and had never run against a build that declared anything less than
+  everything; the encoder refused it the moment one existed.
+
+- **The empty Monitor write contradicted complete snapshots.** §13.4 makes
+  every write a complete statement of what the client can currently supply,
+  while `monitor/empty-update` asserted that `count` of zero MUST be accepted —
+  and the reference peripheral rejected it. `count` of zero is now forbidden
+  and the vector is a rejection. A client with nothing to supply writes every
+  slot with the `present` bit clear, which is a complete statement and expires
+  correctly; a client with nothing to say does not write at all.
+
+### Fixed — the radio smoke test
+
+- **BlueZ reports `mtu_size` of 23** through this bleak property whatever the
+  link negotiated — it is the ATT default, not a measurement — so the floor
+  check failed every healthy Linux link. A value of exactly 23 is now reported
+  as "not measured on this backend" rather than as a failure; the
+  notification-size checks against the published ceiling still run, and they
+  are the ones that matter.
+
+- **The documented commands mixed two working directories.** Everything is run
+  from `reference/peripheral` now, so the requirements install and the script
+  agree about where they are.
+
+- **Pairing is handled explicitly.** `serve.py` requires an encrypted link by
+  default (§10). macOS pairs on demand; BlueZ and WinRT answer *Insufficient
+  Authentication* and bleak raises. The smoke test recognises that on the three
+  operations where it surfaces and prints the pairing command for the platform
+  rather than reporting a protocol fault — and says so specially when it is
+  *Info* that is encrypted, which §10.2 says to avoid precisely because a
+  client that cannot pair then cannot identify what it found.
+
 ### Review of PR #24 — checks that gave misleading results
 
 Four of these sat behind a green CI run, which is the reason they matter more

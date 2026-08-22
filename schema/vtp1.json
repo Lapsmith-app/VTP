@@ -29,7 +29,7 @@
         "cccd": "notify",
         "written_by": "device",
         "read_by": "client",
-        "inert": "no CCCD to enable; notifications are never sent",
+        "inert": "the CCCD exists; no notification is ever sent on it",
         "record": "gps_fix"
       },
       {
@@ -41,7 +41,7 @@
         "cccd": "notify",
         "written_by": "device",
         "read_by": "client",
-        "inert": "no CCCD to enable; notifications are never sent",
+        "inert": "the CCCD exists; no notification is ever sent on it",
         "record": "can_header"
       },
       {
@@ -53,7 +53,7 @@
         "cccd": "notify",
         "written_by": "device",
         "read_by": "client",
-        "inert": "no CCCD to enable; notifications are never sent",
+        "inert": "the CCCD exists; no notification is ever sent on it",
         "record": "imu_header"
       },
       {
@@ -67,7 +67,7 @@
         "write_type": "with-response",
         "written_by": "client",
         "read_by": "client",
-        "inert": "writes are rejected with an ATT error; no opcode is parsed",
+        "inert": "the CCCD exists; writes are rejected with an ATT error and no opcode is parsed",
         "record": "control_response"
       },
       {

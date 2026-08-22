@@ -176,7 +176,7 @@
     },
     {
       "name": "empty-update",
-      "desc": "count 0. Legal: nothing changed. A device MUST accept it.",
+      "desc": "count 0. MUST be rejected: SPEC.md 13.4 makes every write a COMPLETE statement of what the client can supply, and a write naming no slots is the one thing a complete statement cannot be. A client with nothing to supply writes every slot with the present bit clear; a client with nothing to say does not write at all. This vector said the opposite of the section governing it, and the reference device rejected it.",
       "record": "monitor_update",
       "hex": "04000000",
       "expect": {
@@ -186,7 +186,8 @@
           "reserved": 0
         },
         "values": []
-      }
+      },
+      "must_reject": "empty-update"
     },
     {
       "name": "short-payload",

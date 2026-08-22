@@ -352,6 +352,14 @@ def decode_monitor_update(buf):
         raise Reject("truncated-record")
     if len(buf) != hsz + hdr["count"] * esz:
         raise Reject("length")
+    # SPEC.md §13.4 — a write is a COMPLETE statement of what the client can
+    # supply, and one naming no slots is the one thing a complete statement
+    # cannot be: on a device that asked for channels it names none of them,
+    # leaving every previous value standing. A client with nothing to supply
+    # writes every slot with the present bit clear; a client with nothing to
+    # say does not write at all.
+    if hdr["count"] == 0:
+        raise Reject("empty-update")
 
     bit = {b["name"]: b["bit"]
            for b in SCHEMA["bitmasks"]["monitor_validity"]["bits"]}

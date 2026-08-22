@@ -480,13 +480,12 @@ def spec_tables(schema):
         props = ", ".join(f"`{x}`" for x in ch["properties"])
         if ch.get("write_type"):
             props += f" (write {ch['write_type']})"
-        # Conditional on the capability bit, because that is what makes an
-        # inert characteristic cost its implementer nothing: a GPS-only device
-        # exposes Control and answers writes with an ATT error, and does not
-        # implement indications for a role it does not have.
+        # A CCCD is an attribute, so it is part of the fixed table like every
+        # other one: always present, whatever the capability bit says. The
+        # column says who enables it and when, not whether it exists.
         cccd = {"none": "—",
-                "notify": "notify — client enables it when the bit is set",
-                "indicate": "indicate — client enables it when the bit is set"
+                "notify": "always present; client enables it for a set bit",
+                "indicate": "always present; client enables it for a set bit"
                 }[ch["cccd"]]
         lines.append(f"| `{ch['name']}` | {bit} | {props} | {cccd} | "
                      f"{ch['written_by']} | {ch['read_by']} | {ch['inert']} |")
@@ -801,6 +800,124 @@ def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=Non
         # bits.
         c["expect_roundtrip_hex"] = (encode(schema, record, gated) + extra).hex()
     return c
+
+
+# SPEC.md 2, in the producer direction: the reserved portion of a bitmask is
+# ZERO on transmit. Generated per bitmask FIELD rather than hand-picked.
+#
+# The hand-picked version covered four of the eight, and the C encoder then
+# shipped three unmasked fields -- can_header.flags, imu_header.flags and
+# info.clock_flags -- while Python masked them, so the two references produced
+# DIFFERENT BYTES from the same input. That is the one defect class this whole
+# repository exists to prevent, and it survived because the corpus was asking
+# about the fields somebody remembered.
+#
+# The asymmetry that caused it is permanent: the Python encoder applies the
+# rule generically by walking the schema, and the C encoder writes it out per
+# field because it is a separate translation unit with no reflection. So the
+# corpus closes it instead. A bitmask field added to the schema gets a case
+# here automatically, and an encoder that forgets to mask it fails.
+def _reserved_case(schema, record, field, value):
+    """The producer input and the bytes it MUST produce, for one field."""
+    if record == "gps_fix":
+        clean = dict(seq=1, validity=0, ext_count=0)
+        return ({"fix": dict(clean, **{field: value})},
+                encode(schema, "gps_fix", dict(clean, **{field: value})))
+    if record == "can_header":
+        clean = dict(seq=1, dropped=0, t_base=0, count=0, reserved=0)
+        return ({"header": dict(clean, **{field: value}), "records": []},
+                encode(schema, "can_header", dict(clean, **{field: value})))
+    if record == "imu_header":
+        clean = dict(seq=1, dropped=0, t_base=0, period=1000, count=1, reserved=0)
+        sample = dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6)
+        hdr = dict(clean, **{field: value})
+        # An imu_sample is gated by the presence flags, so the expected bytes
+        # depend on which of them survive the mask.
+        gated = dict(sample)
+        if not hdr["flags"] & 0x01:
+            gated.update(ax=0, ay=0, az=0)
+        if not hdr["flags"] & 0x02:
+            gated.update(gx=0, gy=0, gz=0)
+        return ({"header": hdr, "samples": [sample]},
+                encode(schema, "imu_header", hdr)
+                + encode(schema, "imu_sample", gated))
+    if record == "info":
+        clean = dict(protocol_major=1, protocol_minor=0, capabilities=1,
+                     gps_rate_hz=10, gps_max_rate_hz=10, max_notify_bytes=244)
+        return (dict(clean, **{field: value}),
+                encode(schema, "info", dict(clean, **{field: value})))
+    if record == "monitor_value":
+        hdr = dict(seq=1, count=1, reserved=0)
+        val = dict(slot=2, value=42, **{field: value})
+        # The value is gated by the present bit, exactly as on any other record.
+        gated = dict(val)
+        if not value & 0x01:
+            gated["value"] = 0
+        return ({"header": hdr, "values": [val]},
+                encode(schema, "monitor_header", hdr)
+                + encode(schema, "monitor_value", gated))
+    if record == "link_params":
+        return ({field: value}, encode(schema, "link_params", {field: value}))
+    sys.exit(f"reserved_bit_cases: no builder for record {record!r}; a bitmask "
+             f"field was added and its producer case cannot be generated")
+
+
+# Where a producer case for a record is filed, when the runner contract names
+# the batch rather than the header.
+# A bitmask whose assigned bits cannot all be set at once, and the largest
+# combination that can.
+LEGAL_ASSIGNED = {
+    "fix_flags": 0b0001_1101,   # differential, rtk_fixed, disciplined, epoch
+}
+
+
+RESERVED_CASE_RECORD = {
+    "can_header": "can_batch", "imu_header": "imu_batch",
+    "monitor_value": "monitor_update",
+}
+
+
+def reserved_bit_cases(schema):
+    """One producer case per bitmask field: set a reserved bit, require zero."""
+    cases = []
+    for rname, rec in schema["records"].items():
+        for f in rec["fields"]:
+            bm = f.get("bitmask")
+            if not bm:
+                continue
+            spec = schema["bitmasks"][bm]
+            reserved_from = spec.get("reserved_from")
+            top = spec["width"] * 8 - 1
+            if reserved_from is None or reserved_from > top:
+                continue
+            # Every assigned bit, unless the bitmask has a cross-field rule
+            # that "all of them at once" would break. fix_flags does:
+            # rtk_float and rtk_fixed are mutually exclusive (SPEC.md 5.3), so
+            # the baseline here is differential + rtk_fixed + clock_disciplined
+            # + solution_epoch, which is a real receiver's flags rather than an
+            # impossible one. The case is about the RESERVED bits, and a
+            # baseline the encoder must refuse for another reason tests nothing.
+            assigned = LEGAL_ASSIGNED.get(bm, (1 << reserved_from) - 1)
+            # The TOP reserved bit, because an encoder masking at the wrong
+            # width passes on the lowest reserved bit and fails on the highest.
+            dirty = assigned | (1 << top)
+            payload, expect = _reserved_case(schema, rname, f["name"], dirty)
+            _, clean = _reserved_case(schema, rname, f["name"], assigned)
+            cases.append({
+                "name": f"reserved-bits-{rname}-{f['name']}".replace("_", "-"),
+                "record": RESERVED_CASE_RECORD.get(rname, rname),
+                "must_refuse": False,
+                "desc": f"SPEC.md 2 -- {rname}.{f['name']} bits "
+                        f"{reserved_from}-{top} are reserved in VTP/1.0, so an "
+                        f"encoder MUST zero them rather than publish a meaning "
+                        f"this version has not assigned. Bit {top} is set "
+                        f"because an encoder masking at the wrong width passes "
+                        f"on the lowest reserved bit and fails on the highest.",
+                "input": payload,
+                "expect_hex": clean.hex(),
+            })
+            assert expect is not None
+    return cases
 
 
 def vectors(schema):
@@ -1648,8 +1765,16 @@ def vectors(schema):
                        [dict(slot=1, validity=0, value=87_340)],
                        canonical=False),
         monitor_update("empty-update",
-                       "count 0. Legal: nothing changed. A device MUST accept it.",
-                       dict(seq=4, count=0), []),
+                       "count 0. MUST be rejected: SPEC.md 13.4 makes every "
+                       "write a COMPLETE statement of what the client can "
+                       "supply, and a write naming no slots is the one thing a "
+                       "complete statement cannot be. A client with nothing to "
+                       "supply writes every slot with the present bit clear; a "
+                       "client with nothing to say does not write at all. This "
+                       "vector said the opposite of the section governing it, "
+                       "and the reference device rejected it.",
+                       dict(seq=4, count=0), [],
+                       must_reject="empty-update"),
         {"name": "short-payload",
          "desc": "3 bytes: shorter than the update header. MUST be rejected.",
          "record": "monitor_update",
@@ -2055,6 +2180,11 @@ def vectors(schema):
          "desc": "SPEC.md 13.4 -- more channels than fit in one complete write.",
          "input": {"page": dict(total=99, index=0, count=1),
                    "entries": [dict(slot=0, channel=1, max_age=10)]}},
+        {"name": "monitor-update-with-no-values",
+         "record": "monitor_update", "must_refuse": True,
+         "desc": "SPEC.md 13.4 -- an empty write is not a complete statement "
+                 "of what the client can supply.",
+         "input": {"header": dict(seq=1, count=0, reserved=0), "values": []}},
         {"name": "monitor-update-repeats-a-slot",
          "record": "monitor_update", "must_refuse": True,
          "desc": "SPEC.md 13.4 -- nothing says which of the two wins.",
@@ -2145,56 +2275,7 @@ def vectors(schema):
                        capabilities=C["gps"], gps_rate_hz=10,
                        gps_max_rate_hz=10, can_max_frames_per_s=4000,
                        max_notify_bytes=185)},
-        # SPEC.md 2, in the producer direction: reserved bits of a bitmask are
-        # ZERO on transmit. These MUST encode -- and MUST encode to bytes with
-        # the reserved bit gone. Neither reference encoder masked them.
-        {"name": "info-reserved-capability-bit",
-         "record": "info", "must_refuse": False,
-         "desc": "SPEC.md 2 -- capabilities bit 19 is reserved in VTP/1.0, so "
-                 "an encoder MUST normalise it away rather than publish a "
-                 "capability this version has not assigned.",
-         "input": dict(protocol_major=1, protocol_minor=0,
-                       capabilities=C["gps"] | (1 << 19), gps_rate_hz=10,
-                       gps_max_rate_hz=10, max_notify_bytes=244),
-         "expect_hex": encode(schema, "info",
-                              dict(protocol_major=1, protocol_minor=0,
-                                   capabilities=C["gps"], gps_rate_hz=10,
-                                   gps_max_rate_hz=10,
-                                   max_notify_bytes=244)).hex()},
-        {"name": "gps-reserved-validity-and-flag-bits",
-         "record": "gps_fix", "must_refuse": False,
-         "desc": "SPEC.md 2 -- gps_validity bit 20 and fix_flags bit 7 are "
-                 "both reserved. An encoder MUST zero both, and MUST still "
-                 "gate the fields behind the KNOWN validity bits.",
-         "input": {"fix": dict(seq=4, validity=V["position"] | (1 << 20),
-                               lat=515_074_000, lon=-1_397_000,
-                               alt_msl=35_000, fix_type=3,
-                               fix_flags=0b1000_0001, ext_count=0)},
-         "expect_hex": encode(schema, "gps_fix",
-                              dict(seq=4, validity=V["position"],
-                                   lat=515_074_000, lon=-1_397_000,
-                                   alt_msl=0, fix_type=3,
-                                   fix_flags=0b0000_0001, ext_count=0)).hex()},
-        {"name": "monitor-update-reserved-validity-bits",
-         "record": "monitor_update", "must_refuse": False,
-         "desc": "SPEC.md 2 -- monitor_validity bits 1-7 are reserved. The "
-                 "one place the protocol runs client-to-device is not an "
-                 "exception to the transmit rule.",
-         "input": {"header": dict(seq=1, count=1, reserved=0),
-                   "values": [dict(slot=2, validity=PRESENT | 0x80, value=42)]},
-         "expect_hex": (encode(schema, "monitor_header",
-                               dict(seq=1, count=1, reserved=0))
-                        + encode(schema, "monitor_value",
-                                 dict(slot=2, validity=PRESENT, value=42))).hex()},
-        {"name": "link-params-reserved-validity-bit",
-         "record": "link_params", "must_refuse": False,
-         "desc": "SPEC.md 2 -- link_validity bits 4-15 are reserved, and the "
-                 "fields behind the known bits are still gated.",
-         "input": dict(validity=L["att_mtu"] | (1 << 9), att_mtu=247,
-                       conn_interval=12, peripheral_latency=0,
-                       supervision_timeout=500, phy_tx=2, phy_rx=2),
-         "expect_hex": encode(schema, "link_params",
-                              dict(validity=L["att_mtu"], att_mtu=247)).hex()},
+        *reserved_bit_cases(schema),
         {"name": "control-detail-on-ok",
          "record": "control_response", "must_refuse": False,
          "desc": "SPEC.md 9 -- detail accompanies `ok`, and only `ok`. The "

@@ -201,12 +201,22 @@ class VtpDevice:
     rather than sleeping; the default is a real monotonic clock.
     """
 
+    # SPEC.md 4.1 -- what this build declares. Configurable rather than a
+    # constant because three of the bits change how the control plane ANSWERS,
+    # and a device that hard-codes them can only ever demonstrate one half of
+    # each rule. selftest.py builds a device without them to check the other.
+    DEFAULT_CAPABILITIES = (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
+                            | CAP_MONITOR | CAP_MASKED_SUBS
+                            | CAP_ONCHANGE_SUBS)
+
     def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
-                 circuit=None, monitor_channels=None):
+                 circuit=None, monitor_channels=None, capabilities=None):
         self._clock = now_us or self._monotonic_us
         self._origin_ns = time.monotonic_ns()
         self._wall_origin_ms = int(time.time() * 1000)
 
+        self.capabilities = (self.DEFAULT_CAPABILITIES if capabilities is None
+                             else capabilities)
         self.mtu = mtu
         # SPEC.md 4 -- the ceiling Info publishes. Fixed for the life of the
         # device: the ATT payload at the largest MTU this build will ever
@@ -444,19 +454,34 @@ class VtpDevice:
     # -- Info -------------------------------------------------------------
 
     def info(self):
+        """SPEC.md 4 and 4.1.
+
+        Every capacity follows its capability bit. A device declaring no GPS
+        that still reports gps_rate_hz has published a role it does not have,
+        and a client sizing anything from it has been told something false --
+        which is why the encoder refuses to emit one. This method used to
+        report all three groups unconditionally, and only ever ran on a build
+        that declared all three, so nothing noticed.
+        """
+        caps = self.capabilities
+        gps = bool(caps & CAP_GPS)
+        can = bool(caps & CAP_CAN)
+        imu = bool(caps & CAP_IMU)
         return enc.encode_info({
             "protocol_major": PROTOCOL_MAJOR,
             "protocol_minor": PROTOCOL_MINOR,
-            "capabilities": (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
-                             | CAP_MONITOR | CAP_MASKED_SUBS
-                             | CAP_ONCHANGE_SUBS),
-            "gps_rate_hz": self.gps_hz,
-            "gps_max_rate_hz": 25,
-            "can_subscription_slots": CAN_SUBSCRIPTION_SLOTS,
-            "can_max_frames_per_s": CAN_MAX_FRAMES_PER_S,
-            "imu_rate_hz": self.imu_hz,
-            "imu_max_rate_hz": 833,
-            "can_max_payload": 8,
+            "capabilities": caps,
+            "gps_rate_hz": self.gps_hz if gps else 0,
+            "gps_max_rate_hz": 25 if gps else 0,
+            "can_subscription_slots": CAN_SUBSCRIPTION_SLOTS if can else 0,
+            "can_max_frames_per_s": CAN_MAX_FRAMES_PER_S if can else 0,
+            "imu_rate_hz": self.imu_hz if imu else 0,
+            "imu_max_rate_hz": 833 if imu else 0,
+            # 64 when can_fd is set, 8 when it is not, and 0 when there is no
+            # CAN at all: the capability decides the capacity.
+            "can_max_payload": (0 if not can
+                                else 64 if caps & CAP_CAN_FD
+                                else 8),
             "clock_flags": 0b10,      # survives reconnect; not GNSS-disciplined
             "max_notify_bytes": self.max_notify_bytes,
         })
@@ -757,6 +782,12 @@ class VtpDevice:
             return reply(ST_OK)
 
         if opcode in (CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK):
+            # SPEC.md 4.1 -- a device that has not declared masked_subscriptions
+            # does not implement this opcode. CAN_SUBSCRIBE is unaffected: it is
+            # a separate opcode with a full mask, and every CAN device has it.
+            if (opcode == CAN_SUBSCRIBE_MASK
+                    and not self.capabilities & CAP_MASKED_SUBS):
+                return reply(ST_UNSUPPORTED)
             want = 7 if opcode == CAN_SUBSCRIBE else 11
             if len(params) != want:
                 return reply(ST_BAD_PARAMS)
@@ -766,6 +797,13 @@ class VtpDevice:
             else:
                 cid, mask, mode, arg = struct.unpack("<IIBH", params)
             if mode > SUB_EVERY_NTH:
+                return reply(ST_BAD_PARAMS)
+            # SPEC.md 4.1 -- refused, never silently substituted. Forwarding
+            # every frame where a client asked for changes only is the
+            # difference between a channel that updates on an event and one
+            # that floods, and the client would have no way to find out.
+            if (mode == SUB_ON_CHANGE
+                    and not self.capabilities & CAP_ONCHANGE_SUBS):
                 return reply(ST_BAD_PARAMS)
             # SPEC.md §6.8 — N of 0 selects no frames at all and is meaningless.
             if mode == SUB_EVERY_NTH and arg == 0:
@@ -899,6 +937,12 @@ class VtpDevice:
         seq, count = struct.unpack_from("<HB", payload, 0)
         if len(payload) != hsize + count * vsize:
             return "length"
+        # SPEC.md §13.4 — a write naming no slots is not a complete statement.
+        # This device already rejected it (the completeness check below sees a
+        # subset of size zero); saying so explicitly is what makes the reason
+        # match the rule rather than arriving as "incomplete".
+        if count == 0:
+            return "empty-update"
 
         known = {slot for slot, _ in self._monitor_channels}
         staged, seen = {}, set()

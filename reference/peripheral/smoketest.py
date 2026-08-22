@@ -16,14 +16,30 @@ repository takes — and it exercises exactly the things a fake link cannot:
   * timestamps from one device clock arriving in real time
   * a reconnection, where SPEC.md 8.2 restarts `seq`
 
-Run the peripheral on one machine and this on another:
+Run the peripheral on one machine and this on another. Both commands are from
+`reference/peripheral`, so the install and the script agree about where they
+are:
 
-    python3 reference/peripheral/serve.py                 # machine A
-    python3 reference/peripheral/smoketest.py             # machine B
+    cd reference/peripheral
 
-Needs `bleak` (a central-role library; `bless` is the peripheral one):
+    python3 serve.py --no-display                          # machine A
 
-    pip install -r reference/peripheral/requirements-client.txt
+    pip install -r requirements-client.txt                 # machine B
+    python3 smoketest.py
+
+`bleak` is a central-role library; `bless`, which serve.py uses, is the
+peripheral one. They are different roles and this needs the other end of the
+link from everything else here.
+
+**Pairing.** SPEC.md 10 lets a device require an encrypted link, and
+`serve.py` defaults to requiring it on everything except Info. macOS pairs on
+demand when an encrypted characteristic is first touched. Linux and Windows
+generally do not: BlueZ answers "Insufficient Authentication" and bleak raises
+rather than prompting, so pair the two machines FIRST --
+`bluetoothctl pair <address>` on Linux, or Windows Settings > Bluetooth &
+devices > Add device. This script says so when it sees that error rather than
+reporting a protocol fault. `serve.py --encrypt none` skips the whole question
+for a first bring-up.
 
 Exit status is 0 only if every check passed. It prints what it saw either way,
 because "it did not work" is not a useful bug report and this is the test most
@@ -62,6 +78,31 @@ def note(text):
     print(f"  ---- {text}")
 
 
+# What BlueZ, WinRT and CoreBluetooth each say when a characteristic needs an
+# encrypted link and the two machines have never paired. Matched on text
+# because none of the three raises a distinguishable exception type through
+# bleak, and reporting this as a protocol fault sends someone hunting a bug in
+# their device that is really a missing pairing.
+PAIRING_HINTS = ("insufficient authentication", "insufficient encryption",
+                 "not paired", "authentication", "0x05", "0x0f",
+                 "access denied", "gatt operation not permitted")
+
+
+def looks_like_pairing(exc):
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(hint in text for hint in PAIRING_HINTS)
+
+
+def pairing_advice(what, exc):
+    note(f"{what} failed with {exc!r}")
+    note("this reads like an unpaired link rather than a device fault. "
+         "SPEC.md 10 lets a device require encryption and serve.py does by "
+         "default; macOS pairs on demand, Linux and Windows generally do not.")
+    note("  Linux:   bluetoothctl pair <address>, then re-run")
+    note("  Windows: Settings > Bluetooth & devices > Add device")
+    note("  or, for a first bring-up: serve.py --encrypt none")
+
+
 async def collect(client, sinks, seconds):
     """Subscribe to every named stream, gather for `seconds`, then stop.
 
@@ -73,9 +114,15 @@ async def collect(client, sinks, seconds):
     sharing a wall-clock second.
     """
     for name, sink in sinks.items():
-        await client.start_notify(
-            CHAR[name],
-            lambda _h, data, sink=sink: sink.append(bytes(data)))
+        try:
+            await client.start_notify(
+                CHAR[name],
+                lambda _h, data, sink=sink: sink.append(bytes(data)))
+        except Exception as exc:                       # noqa: BLE001
+            if looks_like_pairing(exc):
+                pairing_advice(f"enabling notifications on {name}", exc)
+                raise SystemExit(1)
+            raise
     await asyncio.sleep(seconds)
     for name in sinks:
         try:
@@ -91,7 +138,19 @@ async def one_connection(BleakClient, address, args, first):
         print(f"\n[{first}] connected to {address}")
 
         # ---- Info, before anything else --------------------------------
-        raw = bytes(await client.read_gatt_char(CHAR["info"]))
+        # SPEC.md 10.2 leaves Info readable under every encryption posture, so
+        # a failure HERE is not a pairing problem -- it is a device that has
+        # protected the one characteristic that identifies it.
+        try:
+            raw = bytes(await client.read_gatt_char(CHAR["info"]))
+        except Exception as exc:                       # noqa: BLE001
+            if looks_like_pairing(exc):
+                note("Info itself is encrypted, which SPEC.md 10.2 says to "
+                     "avoid: a client that cannot pair can then not even "
+                     "identify what it found.")
+                pairing_advice("reading Info", exc)
+                raise SystemExit(1)
+            raise
         try:
             info = vtp1.decode_info(raw)
         except vtp1.Reject as exc:
@@ -113,11 +172,23 @@ async def one_connection(BleakClient, address, args, first):
                for name, bit in vtp1.CAP_BIT.items()}
 
         # ---- The MTU the stack actually negotiated ---------------------
+        #
+        # BlueZ reports 23 through this bleak property whatever the link
+        # actually negotiated -- it is the ATT default, not a measurement --
+        # so treating it as one failed every healthy Linux link. Only CoreBluetooth
+        # and WinRT give a real number here, and a value of exactly 23 is
+        # indistinguishable from "not reported" in practice: a link that had
+        # genuinely negotiated the minimum could not carry this protocol at all
+        # and would be failing everywhere else in this run.
         mtu = getattr(client, "mtu_size", None)
-        if mtu:
+        if mtu and mtu > 23:
             note(f"negotiated ATT MTU {mtu}")
             check(mtu >= 100,
                   f"negotiated ATT MTU {mtu} is below the 100 SPEC.md 2 requires")
+        elif mtu == 23:
+            note("this backend reports the ATT default (23) rather than the "
+                 "negotiated MTU — BlueZ does — so SPEC.md 2's floor is not "
+                 "checked here; the notification sizes below still are")
         else:
             note("this backend does not expose the negotiated MTU")
 
@@ -152,8 +223,14 @@ async def one_connection(BleakClient, address, args, first):
             return resp, (time.monotonic() - t0) * 1000
 
         if has["control"]:
-            await client.start_notify(
-                CHAR["control"], lambda _h, d: answers.append(bytes(d)))
+            try:
+                await client.start_notify(
+                    CHAR["control"], lambda _h, d: answers.append(bytes(d)))
+            except Exception as exc:                   # noqa: BLE001
+                if looks_like_pairing(exc):
+                    pairing_advice("enabling indications on Control", exc)
+                    raise SystemExit(1)
+                raise
 
             # TIME_SYNC: parameterless, idempotent, and the answer is a record
             # rather than an empty ok, so a wrong offset shows up immediately.

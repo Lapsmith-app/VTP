@@ -1027,6 +1027,48 @@ def main():
           "smoketest.py failed a device that reports gps_rate_hz 0 and sends "
           "no GPS, which is exactly what such a device should do")
 
+    # ---- The optional CAN capability bits, in the direction nobody runs --
+    # SPEC.md 4.1 gives each of the three a rule for when it is CLEAR, and a
+    # device that declares all three can only ever demonstrate the other half.
+    plain = dev.VtpDevice(
+        now_us=lambda: 0,
+        capabilities=dev.CAP_CAN | dev.CAP_CONTROL)   # no FD, mask or on_change
+
+    masked = plain.handle_control(
+        bytes([dev.CAN_SUBSCRIBE_MASK, 1])
+        + struct.pack("<IIBH", 0x1A0, 0x3FFFFFFF, 0, 0))
+    check(masked[2] == dev.ST_UNSUPPORTED,
+          f"without masked_subscriptions, CAN_SUBSCRIBE_MASK MUST answer "
+          f"unsupported_opcode, got status {masked[2]}")
+
+    # ...while CAN_SUBSCRIBE keeps working: it is a separate opcode that every
+    # CAN device implements, and the capability governs whether a client may
+    # CHOOSE the mask.
+    plainsub = plain.handle_control(
+        bytes([dev.CAN_SUBSCRIBE, 2]) + struct.pack("<IBH", 0x1A0, 0, 0))
+    check(plainsub[2] == dev.ST_OK,
+          f"CAN_SUBSCRIBE is unaffected by masked_subscriptions, got status "
+          f"{plainsub[2]}")
+
+    onchange = plain.handle_control(
+        bytes([dev.CAN_SUBSCRIBE, 3])
+        + struct.pack("<IBH", 0x2B0, dev.SUB_ON_CHANGE, 100))
+    check(onchange[2] == dev.ST_BAD_PARAMS,
+          f"without on_change_subscriptions, an on_change subscription MUST be "
+          f"refused with bad_params rather than silently forwarding every "
+          f"frame; got status {onchange[2]}")
+
+    # SPEC.md 4.1 -- the capability decides the capacity.
+    check(vtp1.decode_info(plain.info())["can_max_payload"] == 8,
+          "a CAN device without can_fd MUST report can_max_payload 8")
+    fd = dev.VtpDevice(now_us=lambda: 0,
+                       capabilities=dev.CAP_CAN | dev.CAP_CONTROL | dev.CAP_CAN_FD)
+    check(vtp1.decode_info(fd.info())["can_max_payload"] == 64,
+          "a CAN FD device MUST report can_max_payload 64")
+    nocan = dev.VtpDevice(now_us=lambda: 0, capabilities=dev.CAP_GPS)
+    check(vtp1.decode_info(nocan.info())["can_max_payload"] == 0,
+          "a device with no CAN MUST report can_max_payload 0 (SPEC.md 4.1)")
+
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)
     ticks = [live.now_us() for _ in range(200)]

@@ -42,6 +42,16 @@ static uint64_t gate64(uint64_t value, uint32_t validity, uint32_t bit) {
  * minor leaves the reserved region by editing the schema and nothing else. */
 #define KNOWN_BITS(value, mask) ((value) & (uint32_t)(mask))
 
+/* EVERY bitmask field on the wire goes through KNOWN_BITS. The Python encoder
+ * applies this generically in `_pack`, walking the schema; this one is written
+ * out per field because it is a separate translation unit with no reflection,
+ * and that asymmetry is exactly how three fields came to be missed --
+ * can_header.flags, imu_header.flags and info.clock_flags were transmitted
+ * verbatim while Python masked them, so the two references produced DIFFERENT
+ * BYTES from the same input. conformance/produce.py now carries a
+ * reserved-bit case for every bitmask field in the schema, generated from the
+ * schema, so a field added later cannot be forgotten here in silence. */
+
 int vtp_encode_gps_fix(const vtp_gps_fix_t *f,
                        const uint8_t *ext, size_t ext_len,
                        uint8_t *out, size_t cap) {
@@ -185,7 +195,8 @@ int vtp_encode_can_batch(const vtp_can_header_t *h,
     wr16(out + VTP_CAN_HEADER_OFF_DROPPED, h->dropped);
     wr64(out + VTP_CAN_HEADER_OFF_T_BASE, h->t_base);
     out[VTP_CAN_HEADER_OFF_COUNT] = h->count;
-    out[VTP_CAN_HEADER_OFF_FLAGS] = h->flags;
+    out[VTP_CAN_HEADER_OFF_FLAGS] =
+        (uint8_t)KNOWN_BITS(h->flags, VTP_CAN_FLAGS_KNOWN);
     /* Reserved bytes are written through rather than forced to zero: a device
      * built against a later minor may have been assigned them, and this
      * encoder must not silently erase a field it does not know about. */
@@ -231,7 +242,8 @@ int vtp_encode_imu_batch(const vtp_imu_header_t *h,
     wr64(out + VTP_IMU_HEADER_OFF_T_BASE, h->t_base);
     wr32(out + VTP_IMU_HEADER_OFF_PERIOD, h->period);
     out[VTP_IMU_HEADER_OFF_COUNT] = h->count;
-    out[VTP_IMU_HEADER_OFF_FLAGS] = h->flags;
+    out[VTP_IMU_HEADER_OFF_FLAGS] =
+        (uint8_t)KNOWN_BITS(h->flags, VTP_IMU_FLAGS_KNOWN);
     /*
      * a later minor may have been assigned these bytes. */
     wr16(out + VTP_IMU_HEADER_OFF_RESERVED, 0);   /* §2 */
@@ -297,7 +309,8 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     wr16(out + VTP_INFO_OFF_IMU_RATE_HZ, v->imu_rate_hz);
     wr16(out + VTP_INFO_OFF_IMU_MAX_RATE_HZ, v->imu_max_rate_hz);
     out[VTP_INFO_OFF_CAN_MAX_PAYLOAD] = v->can_max_payload;
-    out[VTP_INFO_OFF_CLOCK_FLAGS] = v->clock_flags;
+    out[VTP_INFO_OFF_CLOCK_FLAGS] =
+        (uint8_t)KNOWN_BITS(v->clock_flags, VTP_CLOCK_FLAGS_KNOWN);
     wr16(out + VTP_INFO_OFF_MAX_NOTIFY_BYTES, v->max_notify_bytes);
     return VTP_INFO_SIZE;
 }
@@ -348,6 +361,8 @@ int vtp_encode_monitor_update(const vtp_monitor_header_t *h,
     /* As in monitor_list: the array is checked before anything reads through
      * it, not after. */
     if (h->count && !values) return -1;
+    /* SPEC.md §13.4 -- a write with no values is not a complete statement. */
+    if (h->count == 0) return -1;
     /* SPEC.md §13.4 -- a slot twice, and nothing says which wins. */
     for (uint8_t i = 0; i < h->count; i++)
         for (uint8_t j = (uint8_t)(i + 1); j < h->count; j++)

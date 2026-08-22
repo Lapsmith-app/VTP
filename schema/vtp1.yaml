@@ -54,7 +54,7 @@ profile:
       cccd: notify
       written_by: device
       read_by: client
-      inert: "no CCCD to enable; notifications are never sent"
+      inert: "the CCCD exists; no notification is ever sent on it"
       record: gps_fix
     - name: can
       capability: can
@@ -62,7 +62,7 @@ profile:
       cccd: notify
       written_by: device
       read_by: client
-      inert: "no CCCD to enable; notifications are never sent"
+      inert: "the CCCD exists; no notification is ever sent on it"
       record: can_header
     - name: imu
       capability: imu
@@ -70,7 +70,7 @@ profile:
       cccd: notify
       written_by: device
       read_by: client
-      inert: "no CCCD to enable; notifications are never sent"
+      inert: "the CCCD exists; no notification is ever sent on it"
       record: imu_header
     - name: control
       capability: control
@@ -79,7 +79,7 @@ profile:
       write_type: with-response
       written_by: client
       read_by: client            # the answer indicates back on the same handle
-      inert: "writes are rejected with an ATT error; no opcode is parsed"
+      inert: "the CCCD exists; writes are rejected with an ATT error and no opcode is parsed"
       record: control_response
     - name: monitor_values
       capability: monitor

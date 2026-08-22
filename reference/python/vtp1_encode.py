@@ -401,6 +401,11 @@ def encode_monitor_update(header, values):
         raise EncodeError(
             f"monitor_header.count is {header.get('count', 0)} but "
             f"{len(values)} value(s) were supplied")
+    if not values:
+        raise EncodeError(
+            "monitor_update carries no values; SPEC.md §13.4 makes a write a "
+            "complete statement of what the client can supply, and a client "
+            "with nothing to supply clears the present bit on every slot")
     slots = [v["slot"] for v in values]
     if len(set(slots)) != len(slots):
         raise EncodeError(

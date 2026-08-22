@@ -329,6 +329,20 @@
       }
     },
     {
+      "name": "monitor-update-with-no-values",
+      "record": "monitor_update",
+      "must_refuse": true,
+      "desc": "SPEC.md 13.4 -- an empty write is not a complete statement of what the client can supply.",
+      "input": {
+        "header": {
+          "seq": 1,
+          "count": 0,
+          "reserved": 0
+        },
+        "values": []
+      }
+    },
+    {
       "name": "monitor-update-repeats-a-slot",
       "record": "monitor_update",
       "must_refuse": true,
@@ -507,44 +521,116 @@
       }
     },
     {
-      "name": "info-reserved-capability-bit",
+      "name": "reserved-bits-info-capabilities",
       "record": "info",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- capabilities bit 19 is reserved in VTP/1.0, so an encoder MUST normalise it away rather than publish a capability this version has not assigned.",
+      "desc": "SPEC.md 2 -- info.capabilities bits 8-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
         "protocol_major": 1,
         "protocol_minor": 0,
-        "capabilities": 524289,
+        "capabilities": 2147483903,
         "gps_rate_hz": 10,
         "gps_max_rate_hz": 10,
         "max_notify_bytes": 244
       },
-      "expect_hex": "0100010000000a000a00000000000000000000000000f400"
+      "expect_hex": "0100ff0000000a000a00000000000000000000000000f400"
     },
     {
-      "name": "gps-reserved-validity-and-flag-bits",
+      "name": "reserved-bits-info-clock-flags",
+      "record": "info",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- info.clock_flags bits 2-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 1,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "max_notify_bytes": 244,
+        "clock_flags": 131
+      },
+      "expect_hex": "0100010000000a000a00000000000000000000000003f400"
+    },
+    {
+      "name": "reserved-bits-gps-fix-validity",
       "record": "gps_fix",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- gps_validity bit 20 and fix_flags bit 7 are both reserved. An encoder MUST zero both, and MUST still gate the fields behind the KNOWN validity bits.",
+      "desc": "SPEC.md 2 -- gps_fix.validity bits 12-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
         "fix": {
-          "seq": 4,
-          "validity": 1048580,
-          "lat": 515074000,
-          "lon": -1397000,
-          "alt_msl": 35000,
-          "fix_type": 3,
-          "fix_flags": 129,
+          "seq": 1,
+          "validity": 2147487743,
           "ext_count": 0
         }
       },
-      "expect_hex": "040000000400000000000000000000000000000000000000d067b31ef8aeeaff000000000000000000000000000000000000000000000000000000000000000000000000000003000100"
+      "expect_hex": "01000000ff0f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
     },
     {
-      "name": "monitor-update-reserved-validity-bits",
+      "name": "reserved-bits-gps-fix-fix-flags",
+      "record": "gps_fix",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- gps_fix.fix_flags bits 5-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "fix": {
+          "seq": 1,
+          "validity": 0,
+          "ext_count": 0,
+          "fix_flags": 157
+        }
+      },
+      "expect_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001d00"
+    },
+    {
+      "name": "reserved-bits-can-header-flags",
+      "record": "can_batch",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- can_header.flags bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "header": {
+          "seq": 1,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 0,
+          "reserved": 0,
+          "flags": 129
+        },
+        "records": []
+      },
+      "expect_hex": "01000000000000000000000000010000"
+    },
+    {
+      "name": "reserved-bits-imu-header-flags",
+      "record": "imu_batch",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- imu_header.flags bits 3-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "header": {
+          "seq": 1,
+          "dropped": 0,
+          "t_base": 0,
+          "period": 1000,
+          "count": 1,
+          "reserved": 0,
+          "flags": 135
+        },
+        "samples": [
+          {
+            "ax": 1,
+            "ay": 2,
+            "az": 3,
+            "gx": 4,
+            "gy": 5,
+            "gz": 6
+          }
+        ]
+      },
+      "expect_hex": "010000000000000000000000e803000001070000010002000300040005000600"
+    },
+    {
+      "name": "reserved-bits-monitor-value-validity",
       "record": "monitor_update",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- monitor_validity bits 1-7 are reserved. The one place the protocol runs client-to-device is not an exception to the transmit rule.",
+      "desc": "SPEC.md 2 -- monitor_value.validity bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
         "header": {
           "seq": 1,
@@ -554,28 +640,22 @@
         "values": [
           {
             "slot": 2,
-            "validity": 129,
-            "value": 42
+            "value": 42,
+            "validity": 129
           }
         ]
       },
       "expect_hex": "0100010002012a000000"
     },
     {
-      "name": "link-params-reserved-validity-bit",
+      "name": "reserved-bits-link-params-validity",
       "record": "link_params",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- link_validity bits 4-15 are reserved, and the fields behind the known bits are still gated.",
+      "desc": "SPEC.md 2 -- link_params.validity bits 4-15 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 15 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
-        "validity": 513,
-        "att_mtu": 247,
-        "conn_interval": 12,
-        "peripheral_latency": 0,
-        "supervision_timeout": 500,
-        "phy_tx": 2,
-        "phy_rx": 2
+        "validity": 32783
       },
-      "expect_hex": "0100f700000000000000000000000000"
+      "expect_hex": "0f000000000000000000000000000000"
     },
     {
       "name": "control-detail-on-ok",

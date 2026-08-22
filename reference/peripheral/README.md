@@ -118,14 +118,38 @@ cannot reach.
 It needs **two machines**, because a host adapter cannot usefully scan for a
 peripheral it is itself presenting.
 
+Both commands are run from **this directory**, so the install and the script
+agree about where they are:
+
 ```sh
+cd reference/peripheral
+
 # machine A — the device
 python3 serve.py --no-display
 
 # machine B — the client
 pip install -r requirements-client.txt      # bleak, the central-role library
-python3 reference/peripheral/smoketest.py
+python3 smoketest.py
 ```
+
+**Pair the two machines first on Linux and Windows.** `serve.py` defaults to
+requiring an encrypted link on everything except Info (SPEC.md §10). macOS
+pairs on demand when an encrypted characteristic is first touched; BlueZ and
+WinRT do not — they answer *Insufficient Authentication* and bleak raises. So:
+
+```sh
+bluetoothctl pair <address>     # Linux
+# Windows: Settings > Bluetooth & devices > Add device
+```
+
+`smoketest.py` recognises that error and says this rather than reporting a
+protocol fault. For a first bring-up, `serve.py --encrypt none` removes the
+question entirely.
+
+Note that `mtu_size` on BlueZ reports the ATT default of 23 rather than the
+negotiated value, so the smoke test says the MTU floor went unchecked on Linux
+instead of failing a healthy link. The notification-size checks still run, and
+they are the ones that matter.
 
 What it checks, and why each one needs hardware:
 

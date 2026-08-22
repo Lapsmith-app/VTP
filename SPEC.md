@@ -301,10 +301,10 @@ last column says exactly what inert means for it.
 | Characteristic | Capability | Properties | CCCD | Written by | Read by | When the capability bit is clear |
 | --- | --- | --- | --- | --- | --- | --- |
 | `info` | — always present | `read` | — | device | client | never; Info is always meaningful |
-| `gps` | bit 0 (`gps`) | `notify` | notify — client enables it when the bit is set | device | client | no CCCD to enable; notifications are never sent |
-| `can` | bit 1 (`can`) | `notify` | notify — client enables it when the bit is set | device | client | no CCCD to enable; notifications are never sent |
-| `imu` | bit 2 (`imu`) | `notify` | notify — client enables it when the bit is set | device | client | no CCCD to enable; notifications are never sent |
-| `control` | bit 4 (`control`) | `write`, `indicate` (write with-response) | indicate — client enables it when the bit is set | client | client | writes are rejected with an ATT error; no opcode is parsed |
+| `gps` | bit 0 (`gps`) | `notify` | always present; client enables it for a set bit | device | client | the CCCD exists; no notification is ever sent on it |
+| `can` | bit 1 (`can`) | `notify` | always present; client enables it for a set bit | device | client | the CCCD exists; no notification is ever sent on it |
+| `imu` | bit 2 (`imu`) | `notify` | always present; client enables it for a set bit | device | client | the CCCD exists; no notification is ever sent on it |
+| `control` | bit 4 (`control`) | `write`, `indicate` (write with-response) | always present; client enables it for a set bit | client | client | the CCCD exists; writes are rejected with an ATT error and no opcode is parsed |
 | `monitor_values` | bit 3 (`monitor`) | `write` (write with-response) | — | client | device | writes are rejected with an ATT error and change nothing |
 <!-- END GENERATED: profile:attributes -->
 
@@ -321,10 +321,17 @@ not parse opcodes, does not implement indications, and never answers
 have. The same goes for `monitor_values`. A GPS-only build is a service
 declaration, four inert attributes and one notify path.
 
-The CCCD column is conditional for the same reason. A client enables
-notifications on `gps` when the `gps` bit is set, and a device implements the
-CCCD for a stream it implements. Nothing has to be built for a role nobody
-claimed.
+**A CCCD is an attribute, so it is part of the fixed table too.** Every
+notifying and indicating characteristic above carries its Client Characteristic
+Configuration descriptor whatever the capability bit says, for exactly the
+reason the characteristics themselves are always present: removing one changes
+the attribute table a central has cached.
+
+A client enables the CCCD for a role whose bit is set, and leaves the others
+alone. A device MUST accept a CCCD write on an inert stream — it costs a
+two-byte descriptor and a stored value nothing reads — and then simply never
+notifies, which is what "inert" already means. A device MUST NOT reject a CCCD
+write on the grounds that the capability is absent.
 
 The alternative — omitting the characteristics a device does not implement —
 fails for a reason that has nothing to do with elegance. Central stacks
@@ -366,6 +373,26 @@ Control is advertising a role no client can use.
 `can_fd`, `masked_subscriptions` and `on_change_subscriptions` require `can`
 for the same reason: each qualifies how CAN subscriptions behave, and qualifies
 nothing at all on a device with no CAN.
+
+**Each of the three says what a device does when it is clear**, because a
+capability bit that only says "supported" leaves the other half to the reader
+and a client cannot plan around it:
+
+| Bit | Set | Clear |
+| --- | --- | --- |
+| `can_fd` | `can_max_payload` MUST be 64; the device MAY emit records with the FD bit set | The device MUST NOT emit a record with the FD bit set, and `can_max_payload` MUST be 8 |
+| `masked_subscriptions` | `CAN_SUBSCRIBE_MASK` is accepted | `CAN_SUBSCRIBE_MASK` MUST answer `unsupported_opcode` |
+| `on_change_subscriptions` | `on_change` is accepted as a subscription mode | A subscription naming `on_change` MUST be refused with `bad_params` |
+
+`CAN_SUBSCRIBE` is unaffected by `masked_subscriptions`: §9.2 defines it as
+`CAN_SUBSCRIBE_MASK` with a full mask, but it is a separate opcode and every
+CAN device implements it. The capability governs whether a client may choose
+the mask, not whether masking exists.
+
+A device without `on_change_subscriptions` refuses the mode rather than
+silently substituting `every_frame`. Quietly forwarding every frame where a
+client asked for changes only is the difference between a channel that updates
+on an event and one that floods, and the client would have no way to find out.
 
 **Capacity fields follow the bit.** Every field in the third column MUST be
 zero when its capability bit is clear. This is what makes "a capacity of zero
@@ -2006,6 +2033,18 @@ state that silently diverges when an app is backgrounded and resumed.
 A slot MUST appear at most once in a write. A device MUST reject a write
 containing a slot twice, because nothing in this specification says which of
 the two wins and a device choosing either is choosing for every client.
+
+**`count` MUST NOT be zero**, and a device MUST reject a write that carries no
+values. An empty write is the one thing a complete statement cannot be: on a
+device that asked for channels it names none of them, which is not "nothing
+changed" but "I can supply nothing" said in a way that leaves every previous
+value standing. A client with nothing to supply says so by writing every slot
+with the `present` bit clear, which is a complete statement and expires
+correctly (§13.5). A client with nothing to say does not write at all, and
+§13.5's deadlines take care of the rest.
+
+A device that asked for no channels (§13.5) has no complete write to receive,
+so a client MUST NOT write to it at all.
 
 A device MUST NOT ask for more channels than fit in a single write at the
 minimum ATT MTU of §2: with a 4-byte header and 6 bytes per value that is
