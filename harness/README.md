@@ -220,6 +220,14 @@ the one that matters:
   in the registry having never once been observed to fail, including the one
   covering §13.3's declaration format — which is exactly the shape of defect a
   device that predates a spec change ships.
+- **No excuse may outlive its reason.** An entry in `NOT_SEEDED` claims no
+  fault can make that check fail, which is a statement about the whole suite,
+  so every fault run is checked against it: if an excused check fails, the
+  excuse is already false and the run says so. A fault that breaks the
+  conversation rather than one rule — `no_tag_echo` leaves nothing
+  correlatable, so every check awaiting a response fails — belongs in
+  `selftest.CASCADING` and is exempt, because "it failed while the envelope was
+  broken" is not evidence that the check works.
 
 The clean run is also held to an **expected-skip baseline**
 (`selftest.EXPECTED_SKIPS`). A skip is the harness saying nothing, and a check

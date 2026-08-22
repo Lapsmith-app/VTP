@@ -168,6 +168,16 @@ jobs:
         run: |
           perl -pi -e 's/^    "info_major_wrong": "info.major",\n//' harness/selftest.py
           perl -pi -e 's/^    "info_major_wrong": .*\n//' harness/vtp1_harness/transport.py
+          # The substitutions above are anchored to the exact shape of two data
+          # lines, so a reformat would silently leave both files untouched --
+          # and this step would then report "the selftest passed with info.major
+          # uncovered" when nothing had been uncovered at all. Prove the seeding
+          # took before drawing any conclusion from the run.
+          if grep -q info_major_wrong harness/selftest.py harness/vtp1_harness/transport.py; then
+            echo "::error::the seeding substitution did not apply, so this guard tested nothing"
+            git checkout -- harness/selftest.py harness/vtp1_harness/transport.py
+            exit 1
+          fi
           if PYTHONPATH=harness python3 harness/selftest.py; then
             echo "::error::the selftest passed with info.major uncovered and unexcused"
             git checkout -- harness/selftest.py harness/vtp1_harness/transport.py

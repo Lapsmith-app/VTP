@@ -34,7 +34,15 @@ def _force_include():
     try:
         import tomllib
     except ModuleNotFoundError:                      # Python 3.10
-        import tomli as tomllib
+        try:
+            import tomli as tomllib
+        except ModuleNotFoundError:
+            # pyproject.toml supports 3.10, where tomllib does not exist and
+            # tomli is not a dependency of anything here. Say so, rather than
+            # handing a traceback to somebody the README has just sent here.
+            raise SystemExit(
+                "reading pyproject.toml needs tomllib (Python 3.11+) or tomli. "
+                "On Python 3.10: pip install tomli") from None
     with open(ROOT / "pyproject.toml", "rb") as fh:
         config = tomllib.load(fh)
     return (config["tool"]["hatch"]["build"]["targets"]

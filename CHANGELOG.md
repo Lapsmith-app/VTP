@@ -33,10 +33,21 @@ one, and one of the two defects really would have passed.
 
   The selftest now asserts both directions. A MUST or SHOULD must have a seeded
   fault or an entry in `NOT_SEEDED` stating why none is possible; the two lists
-  must be exhaustive and disjoint. Sixteen new faults were written to satisfy
-  it, taking coverage from 25 to 41 — including `monitor_paged_declaration`,
-  the reported defect, and `timesync_unsupported`. The 26 remaining entries are
+  must be exhaustive and disjoint. Twenty new faults were written to satisfy
+  it, taking coverage from 25 to 45 — including `monitor_paged_declaration`,
+  the reported defect, and `timesync_unsupported`. The 21 remaining entries are
   debts with reasons attached, not dispensations.
+
+  An excuse is a claim about the whole fault suite rather than any one run, so
+  it is checked where the suite runs: a fault that makes an excused check fail
+  proves the excuse false, whatever check that fault was aimed at. This found
+  four more the moment it existed — `info.rate_ceiling`, `control.rate_ceiling`,
+  `can.list_beyond_end` and `gatt.inert_control_rejects_writes` were each
+  broken by a fault written for something else — and all four now have faults
+  of their own instead of a reason. A fault that breaks the conversation rather
+  than a rule (`no_tag_echo` leaves nothing correlatable, so every check
+  awaiting a response fails) is listed in `CASCADING` and exempt, because
+  "failed while the envelope was broken" is not evidence a check works.
 
 - **A skip said nothing, and nothing was watching which ones.** A check that
   quietly stops reaching what it tests — a renamed state key, a capability

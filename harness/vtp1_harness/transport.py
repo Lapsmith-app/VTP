@@ -308,6 +308,10 @@ FAULTS = {
     "clock_steps_backwards": "SPEC.md §8.1 — the device clock jumps backwards while connected",
     "stream_truncated": "SPEC.md §5 — a notification is shorter than the record it carries",
     "seq_survives_reconnect": "SPEC.md §8.2 — sequence numbers continue rather than restarting at 0",
+    "list_beyond_end_errors": "SPEC.md §9.5 — a CAN_LIST start past the end is an error rather than an empty page",
+    "rate_ceiling_ignored": "SPEC.md §9.4 — a rate above the declared maximum is accepted, not refused rate_exceeded",
+    "info_rate_above_ceiling": "SPEC.md §4 — Info publishes a current rate above its own maximum",
+    "inert_control_accepts_writes": "SPEC.md §4.1 — a device that has not declared Control answers writes to it",
 }
 
 
@@ -500,6 +504,14 @@ class LoopbackTransport(Transport):
                         struct.pack_into(
                             "<H", info, refdec.offset("info", fields[-1]), 0)
                         break
+            if "info_rate_above_ceiling" in self.faults:
+                # SPEC.md §4 — a ceiling below the rate the same record says is
+                # running. Both numbers are the device's own, so one of them is
+                # false and a client sizing a buffer from either may be wrong.
+                struct.pack_into(
+                    "<H", info, refdec.offset("info", "gps_max_rate_hz"),
+                    max(0, struct.unpack_from(
+                        "<H", info, refdec.offset("info", "gps_rate_hz"))[0] - 1))
             if "info_truncated" in self.faults:
                 # Last, so it truncates whatever the faults above wrote rather
                 # than being overwritten by an offset past its own end.
@@ -553,7 +565,13 @@ class LoopbackTransport(Transport):
         # and parses no opcode: answering would need the response path a device
         # without the capability does not have.
         if not self._capabilities() & (1 << refdec.CAPABILITIES["control"]):
-            raise DeviceRefused("control capability not declared")
+            if "inert_control_accepts_writes" not in self.faults:
+                raise DeviceRefused("control capability not declared")
+            # The fault: the write is taken rather than refused. Answering is
+            # not required to break the rule -- §4.1 is about the ATT error a
+            # device without the capability owes every write -- and a device
+            # that accepts silently is the harder half to notice.
+            return
         # SPEC.md §9.6 -- deliverability is decided BEFORE dispatch. With
         # indications disabled the answer has nowhere to go, so the request MUST
         # NOT take effect and MUST NOT be counted as received.
@@ -620,6 +638,10 @@ class LoopbackTransport(Transport):
         wrong thing is told it sent the right thing, and finds out from the
         behaviour rather than from the answer.
         """
+        if len(request) < 2:
+            # Not addressable: there is no tag to echo, so the device model
+            # answers nothing at all and this must not get there first.
+            return request
         name = refdec.OPCODE_NAME.get(request[0])
         wanted = refdec.OPCODE_PARAM_SIZE.get(name)
         if wanted is None:
@@ -647,6 +669,23 @@ class LoopbackTransport(Transport):
             return bytearray(response[:3]
                              + struct.pack("<HHBB", count, 0, count, 0)
                              + entries)
+        if "list_beyond_end_errors" in self.faults and \
+                opcode == refdec.OPCODE["CAN_LIST"] and status == 0 and \
+                len(response) >= 3 + refdec.size("can_list_page") and \
+                response[3 + refdec.offset("can_list_page", "count")] == 0:
+            # §9.5 — a start past the end is ok with count zero, not an error.
+            # A client walking the table cannot then tell "you have read it
+            # all" from "that request was wrong", and the detail goes with the
+            # refusal because §9 allows one only on ok.
+            return bytearray(response[:2]
+                             + bytes([refdec.STATUS_VALUE["bad_params"]]))
+        if "rate_ceiling_ignored" in self.faults and opcode in (
+                refdec.OPCODE["GPS_SET_RATE"], refdec.OPCODE["IMU_SET_RATE"]) \
+                and status == refdec.STATUS_VALUE["rate_exceeded"]:
+            # §9.4 — the ceiling Info publishes, accepted past. The device then
+            # runs at a rate it told the client it could not reach, and every
+            # buffer the client sized from that ceiling is too small.
+            response[2] = refdec.STATUS_VALUE["ok"]
         if "unallocated_opcode_ok" in self.faults and \
                 request[0] not in refdec.OPCODE_NAME and \
                 status == refdec.STATUS_VALUE["unsupported_opcode"]:
