@@ -114,7 +114,41 @@ Specification text is normative and terse; RFC 2119 keywords in capitals, and
 only where a requirement is genuinely being stated. Reasoning goes in
 RATIONALE.md, not in SPEC.md.
 
+## The compatibility baseline
+
+`conformance/baseline.json` records what every existing vector means. SPEC.md
+§12 promises that an existing case never changes within a major version, and
+the corpus is generated — so without a baseline a schema edit can quietly
+change what a vector expects and every other check still passes, because the
+generator, the decoders and the runner all agree about the new answer.
+
+After adding vectors, record them and commit the result:
+
+```sh
+python3 tools/check_baseline.py     # verifies, and records new cases
+```
+
+CI runs `--check`, which never writes and fails both when an existing case has
+changed and when a case exists that the baseline does not cover.
+
+If you have deliberately changed what an existing vector means, that is not a
+minor version (§11.1) and the service UUID changes with it. Before 1.0 this is
+ordinary; say so in the changelog and run:
+
+```sh
+python3 tools/check_baseline.py --accept
+```
+
+Only descriptions are exempt. The baseline hashes what an implementation must
+*do* — bytes, expected decode, reject reason — so prose can be improved freely,
+and a tripped check always means something real.
+
 ## Licence
 
 Contributions are accepted under the repository's licences: CC BY 4.0 for
 specification text, Apache License 2.0 for code.
+
+The split has an unresolved problem, recorded in README.md: the patent grant
+that motivated Apache-2.0 for code is absent from the licence covering the
+specification an implementer actually builds from. It needs legal advice rather
+than a pull request.

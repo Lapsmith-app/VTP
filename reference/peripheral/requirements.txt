@@ -1,0 +1,6 @@
+# The software peripheral only. Nothing in the specification, the reference
+# decoders or CI depends on these -- CI runs the peripheral's selftest, which
+# is deliberately free of any Bluetooth import (see selftest.py).
+#
+# Needs a real radio and, on macOS, an app bundle: see README.md here.
+bless==0.3.0

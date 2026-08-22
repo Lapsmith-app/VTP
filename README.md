@@ -117,6 +117,26 @@ Apache-2.0 rather than MIT deliberately: it carries an express patent grant, and
 a protocol specification without one is a specification a commercial vendor's
 legal review stops at before an engineer ever reads it.
 
+> **Unresolved, and known.** That reasoning argues for a patent grant on the
+> *specification*, and the specification is the half that does not have one.
+> CC BY 4.0 grants copyright permissions and
+> [expressly withholds patent rights](https://creativecommons.org/licenses/by/4.0/legalcode).
+> An implementer builds a device from SPEC.md and `schema/`, so the patent
+> exposure sits exactly where the licence is silent, while `reference/` — which
+> nobody has to ship — carries Apache-2.0 §3.
+>
+> `schema/` compounds it: listed here as specification text under CC BY, it is
+> also the source `tools/generate.py` turns into `reference/c/vtp1_generated.h`
+> and the conformance corpus, both of which live under Apache-2.0. Generated
+> artefacts crossing a licence boundary is a question in its own right.
+>
+> The options, none of which should be chosen without advice: apply Apache-2.0
+> to the whole repository; keep CC BY for prose and move `schema/` under
+> Apache-2.0; or add a separate patent non-assertion covenant covering
+> implementations of the specification, which is what several standards bodies
+> do. **This needs a lawyer, not an opinion** — it is recorded here so that
+> nobody mistakes the current split for a settled decision.
+
 ## Prior art
 
 VTP/1 exists because of [RaceChrono's DIY BLE

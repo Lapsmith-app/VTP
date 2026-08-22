@@ -9,6 +9,54 @@ conformance vector.
 ## [Unreleased]
 
 ### Added
+- **A compatibility baseline (`conformance/baseline.json`).** SPEC.md §12
+  promises that an existing vector never changes meaning within a major
+  version, and nothing enforced it. The corpus is *generated*, so a schema edit
+  can quietly change what an existing case expects and every other check in
+  this repository still passes — the generator, both decoders and the runner
+  would simply agree with each other about the new answer. The corpus is
+  compared against itself; a baseline is the only thing that compares it
+  against what it used to say.
+
+  `tools/check_baseline.py` hashes what an implementation must *do* — bytes,
+  expected decode, reject reason — and deliberately not the prose, so
+  descriptions can be improved without tripping it and a trip always means
+  something real. CI runs `--check`, which never writes and fails both on a
+  changed case and on a case the baseline does not yet cover: a mode that
+  records additions would pass in CI by discarding the write, leaving the
+  baseline protecting only the cases it started with while appearing to cover
+  them all.
+
+  Verified against all three failure modes: an altered expectation and a
+  removed case both fail; a reworded description does not.
+
+- **Pinned dependency manifests.** CI ran `pip install pyyaml` unpinned. The
+  YAML parser sits upstream of every generated artefact in the repository — the
+  spec tables, the C header, the corpus — so a silent change in how it orders
+  mappings or coerces scalars lands in output that CI then compares against
+  itself and finds consistent. `requirements.txt` pins it; CI installs from it.
+  `reference/peripheral/requirements.txt` covers the software peripheral, which
+  nothing else depends on.
+
+### Documented
+- **The licence split has an unresolved patent problem, and now says so.**
+  README already explained that Apache-2.0 was chosen over MIT for its express
+  patent grant, because "a protocol specification without one is a
+  specification a commercial vendor's legal review stops at". That reasoning
+  argues for a grant on the *specification* — and the specification is the half
+  that does not have one. CC BY 4.0 grants copyright permissions and expressly
+  withholds patent rights, so the exposure sits exactly where the licence is
+  silent, while `reference/`, which nobody has to ship, carries Apache-2.0 §3.
+
+  `schema/` compounds it: listed as specification text under CC BY, it is also
+  the source that generates a C header and the corpus, both under Apache-2.0.
+
+  Recorded rather than resolved. The options — Apache-2.0 throughout, moving
+  `schema/` under it, or a separate patent non-assertion covenant — are a
+  question for a lawyer, and the note exists so nobody mistakes the current
+  split for a settled decision.
+
+### Added
 - **§7.1 — IMU axes and signs.** The sensor frame is the device's own and
   vehicle alignment stays the client's job, but how to *read* the numbers was
   never stated and a client cannot infer any of it. The frame is right-handed;
