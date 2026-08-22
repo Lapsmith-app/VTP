@@ -9,24 +9,48 @@ conformance vector.
 ## [Unreleased]
 
 ### Changed — wire format
-- **§10's encryption requirement could not be implemented as written.** It
-  required both that Control require an encrypted link *and* that a device
+- **§10 no longer requires any device to encrypt anything, and requires every
+  client to support a device that does.** The requirement had been on Control
+  alone, which protects the wrong half: Control carries commands, from which an
+  eavesdropper learns little, while the streams carry the measurement —
+  position included — and were left in the clear. It guarded who may
+  reconfigure a device while leaving what the device reports readable by anyone
+  in range.
+
+  Requiring encryption costs a device author real work: bond storage, a bond
+  table that fills, and a mismatch after reflashing that presents as a broken
+  device. That cost lands hardest on the small implementations this protocol
+  needs, in exchange — under the old split — for protecting the part with
+  nothing to reveal. Supporting encryption costs a client almost nothing, since
+  every major central stack turns `Insufficient Encryption` into a pairing
+  attempt on its own.
+
+  So the obligation moved to the side that can bear it. A device MAY protect
+  any characteristic, all of them, or none; a client MUST cope with each. A
+  device that protects anything SHOULD protect the streams and not only
+  Control, and one on a bus carrying more than powertrain telemetry SHOULD
+  protect everything — but both are now SHOULD, not MUST.
+
+  §10 also states plainly what Just Works pairing buys, which it did not
+  before: protection from a passive listener, and none from an active
+  man-in-the-middle.
+
+- **§10's requirement could not have been implemented as written in any case.**
+  It required both that Control require an encrypted link *and* that a device
   reject unencrypted writes with status `needs_encryption`. Those are mutually
   exclusive: a characteristic carrying the GATT encryption permission has its
   unencrypted writes answered by the ATT layer, so nothing reaches application
   code to generate a reply from, and a device that can reply has not set the
-  permission. The delivery path settles it either way — responses travel by
-  indication on Control, so on a device that has set the permission a client
-  cannot enable indications until the link is encrypted.
+  permission.
 
-  The GATT permission is now the normative enforcement. Status
-  `needs_encryption` (6) stays allocated and MUST NOT be reused, but a
+  §10.1 now requires the GATT permission of any device that chooses to encrypt.
+  Status `needs_encryption` (6) stays allocated and MUST NOT be reused, but a
   conforming device has no occasion to send it.
 
-- **Info MUST now be readable on an unencrypted link (§10).** A client that
-  cannot pair, or has not yet, must still be able to identify what it has found
-  and say so, rather than reporting a device that is present, advertising a VTP
-  service and apparently broken. Info carries no measurement.
+- **Info SHOULD be readable on an unencrypted link whatever a device
+  protects (§10.2).** A client that cannot pair, or has not yet, can then still
+  identify what it has found and say so, rather than reporting a device that is
+  present, advertising a VTP service and apparently broken.
 
 - **`detail` is present if and only if `status` is `ok` (§9).** A refused
   request is three bytes. Nothing had said so, and the peripheral already
@@ -70,9 +94,12 @@ conformance vector.
   status, an unknown opcode's opaque detail, and both malformed cases. Removing
   the detail-on-error check now fails a vector.
 
-- **The peripheral exposes the Device Information Service (`0x180A`)**, which
-  §10 now recommends — manufacturer, model, firmware revision and serial.
-  Nothing in VTP/1 reads it; it is where every generic BLE tool already looks.
+- **§3.4 — the Device Information Service (`0x180A`) is now a SHOULD**:
+  manufacturer, model and firmware revision at least. Nothing in VTP/1 reads
+  it, which is the point — it is where every generic Bluetooth tool already
+  looks, so it answers "which firmware is on the logger that is misbehaving"
+  without the asker knowing anything about this protocol. The peripheral
+  exposes it.
 
 ### Fixed
 - **The peripheral applied control requests it could not answer, and queued
@@ -81,11 +108,18 @@ conformance vector.
   ahead of dispatch by a queue that holds no Bluetooth state, so the rules are
   covered by the selftest without a radio.
 
-- **The peripheral did not require encryption on Control.** It now sets the
-  GATT permission. `--no-encryption` removes it for bisecting pairing problems
-  on hosts whose peripheral role is weak — macOS in particular — and logs a
-  warning every time it starts, because a device running with it does not
-  conform.
+- **The peripheral can now present each of the three encryption postures §10
+  permits**, because the interesting question is not whether a device encrypts
+  but whether a *client* still works against one that does. `--encrypt all`
+  (the default) protects everything but Info, `control` reproduces the
+  incoherent arrangement §10.2 warns about, and `none` protects nothing. A
+  client that passes all three supports encryption without requiring it, which
+  is what §10 asks of it.
+
+  Verified against LapSmith on iOS at the `control` posture: it raised a
+  pairing prompt, paired, enabled indications on Control and installed three
+  subscriptions. Just Works pairing initiated against a Mac in the peripheral
+  role does work, which was the platform risk worth settling.
 
 ### Changed — wire format
 - **A CAN subscription now identifies a frame by its format as well as its

@@ -210,7 +210,7 @@ class ControlQueue:
         return n
 
 
-# SPEC.md §10 SHOULD — the Device Information Service. It carries no protocol
+# SPEC.md §3.4 SHOULD — the Device Information Service. It carries no protocol
 # meaning, which is exactly why it is worth exposing: when someone asks which
 # firmware is on a logger that is misbehaving, this is where every generic BLE
 # tool already looks.
@@ -251,15 +251,19 @@ def check_advertisement_fits(name):
 class Peripheral:
     STREAM_ORDER = ("gps", "can", "imu")
 
-    def __init__(self, device, name="VTP Logger", screen=None,
-                 encrypt_control=True):
+    def __init__(self, device, name="VTP Logger", screen=None, encrypt="all"):
         self.device = device
         self.name = name
-        # SPEC.md §10 requires this. It is a switch only because macOS in the
-        # peripheral role is a thin path for Just Works pairing, and losing the
-        # interop loop to a host-stack problem would be worse than running a
-        # deliberately non-conforming device with a warning in the log.
-        self.encrypt_control = encrypt_control
+        # SPEC.md §10 leaves this to the device, and requires every client to
+        # cope with whatever the device chose. This peripheral's job is to
+        # exercise that client obligation, so it defaults to the demanding end:
+        # "all" protects every characteristic except Info, which §10.2 says to
+        # leave readable so a client that cannot pair can still identify what
+        # it found. "control" is the common-but-incoherent arrangement §10.2
+        # warns about, kept so a client can be tested against it. "none" is a
+        # device that protects nothing, which §10 equally permits.
+        assert encrypt in ("all", "control", "none")
+        self.encrypt = encrypt
         self.server = None
         self.screen = screen
         self._link = ConnectionTracker()
@@ -485,30 +489,30 @@ class Peripheral:
             await self.server.add_new_characteristic(
                 SERVICE, CHAR[name], props, value, perms)
 
-        # SPEC.md §10 — Info MUST be readable without encryption, so a client
+        # SPEC.md §10.1 — a device that requires encryption enforces it with
+        # the GATT permission, never an application check. The ATT layer then
+        # answers with Insufficient Encryption, which every major central stack
+        # turns into a pairing attempt on its own.
+        crypt = perms.read_encryption_required | perms.write_encryption_required
+        stream_crypt = crypt if self.encrypt == "all" else 0
+        control_crypt = crypt if self.encrypt in ("all", "control") else 0
+        log.info("encryption posture: %s (SPEC.md 10 leaves this to the "
+                 "device; a client MUST support all of them)", self.encrypt)
+
+        # SPEC.md §10.2 — Info stays readable whatever the posture, so a client
         # that cannot pair can still identify what it has found and say so,
         # rather than reporting a device that is present, advertising a VTP
         # service and apparently broken.
         await add("info", read, self.device.info(), readable)
         for name in ("gps", "can", "imu"):
-            await add(name, notify, None, readable)
-
-        # SPEC.md §10 — Control MUST require an encrypted link, enforced by the
-        # GATT permission rather than an application check. The ATT layer then
-        # answers an unencrypted write with Insufficient Encryption, which
-        # every major central stack turns into a pairing attempt on its own.
-        control_perms = readable | writeable
-        if self.encrypt_control:
-            control_perms |= (perms.read_encryption_required
-                              | perms.write_encryption_required)
-        else:
-            log.warning("Control is NOT requiring encryption: this device is "
-                        "NOT conforming to SPEC.md 10 (--no-encryption)")
-        await add("control", write | indicate, None, control_perms)
+            await add(name, notify, None, readable | stream_crypt)
+        await add("control", write | indicate, None,
+                  readable | writeable | control_crypt)
         # The client writes values here; the device only ever reads them.
-        await add("monitor_values", write, None, readable | writeable)
+        await add("monitor_values", write, None,
+                  readable | writeable | stream_crypt)
 
-        # SPEC.md §10 SHOULD.
+        # SPEC.md §3.4 SHOULD.
         log.info("creating service %s (Device Information)", DIS_SERVICE)
         await self.server.add_new_service(DIS_SERVICE)
         for name, (uuid, text) in DIS_CHARS.items():
@@ -741,7 +745,7 @@ async def main_async(args):
                            imu_hz=args.imu_hz)
 
     peripheral = Peripheral(device, name=args.name,
-                            encrypt_control=not args.no_encryption)
+                            encrypt=args.encrypt)
     screen = None
     # Launched through LaunchServices there is no stderr, so an unhandled
     # exception would vanish and look exactly like a silent exit. Everything
@@ -787,10 +791,15 @@ def main():
     ap.add_argument("--imu-hz", type=int, default=100)
     ap.add_argument("--no-display", action="store_true",
                     help="run headless; do not open the device screen")
-    ap.add_argument("--no-encryption", action="store_true",
-                    help="do NOT require an encrypted link for Control. "
-                         "Violates SPEC.md 10; for diagnosing pairing "
-                         "problems on hosts whose peripheral role is weak")
+    ap.add_argument("--encrypt", choices=("all", "control", "none"),
+                    default="all",
+                    help="which characteristics require an encrypted link. "
+                         "all (default) protects everything except Info, which "
+                         "SPEC.md 10.2 says to leave readable; control "
+                         "protects only Control; none protects nothing. All "
+                         "three conform -- SPEC.md 10 leaves the choice to the "
+                         "device and requires every client to support each of "
+                         "them")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     try:

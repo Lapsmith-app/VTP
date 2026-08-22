@@ -117,11 +117,10 @@ arrives before then is discarded *unapplied* and logged as such: the response
 would have nowhere to go, and a device that applied it anyway would leave the
 two ends disagreeing about the table.
 
-**Control requires an encrypted link** (SPEC.md §10), enforced by the GATT
-permission, so the first connection raises a pairing prompt. If pairing is
-where a test is failing rather than what it is testing, `--no-encryption`
-removes the requirement — it makes the device deliberately non-conforming and
-says so in the log every time it starts.
+**By default every characteristic except Info requires an encrypted link**, so
+the first connection raises a pairing prompt. SPEC.md §10 leaves that choice to
+the device and requires every *client* to support all of them, so `--encrypt`
+selects which posture this device presents — see [Pairing](#pairing).
 
 As a worked example, in LapSmith's pasted-channel format:
 
@@ -181,33 +180,52 @@ properties of an MCU and a radio, not of a host operating system's scheduler.
 This makes a client developable. It leaves VTP/1 unproven on hardware, which is
 still the largest gap in this repository.
 
-## Pairing
+## Pairing, and the three encryption postures
 
-Control carries the GATT encryption permission, so a central must pair before
-it can write to it or enable indications on it. Info stays readable
-unencrypted (SPEC.md §10) so a client that cannot pair can still identify the
-device rather than reporting it as broken.
+SPEC.md §10 requires no device to encrypt anything, and requires every client
+to cope with one that does. So the interesting thing to test is not whether a
+*device* encrypts — it is whether a **client** still works against each posture
+a device is allowed to present. This peripheral can present all three:
 
-macOS in the *peripheral* role is a much thinner path than in the central role,
-and Just Works pairing initiated against a Mac acting as a peripheral is not
-well travelled. If a client cannot pair, or pairs and then fails to write:
+| `--encrypt` | Protected | What it tests |
+| --- | --- | --- |
+| `all` *(default)* | Everything but Info | The client pairs and then works on every characteristic |
+| `control` | Control only | The common-but-incoherent arrangement §10.2 warns about |
+| `none` | Nothing | The client does not *require* encryption either |
 
-- Forget the device on the client first. A stale bond against a peripheral that
-  has since restarted with a new identity produces repeated authentication
-  failures that look exactly like a device fault, and it is the single most
-  common cause.
-- Then try `--no-encryption` to establish whether pairing is the problem at
-  all. If the same test passes with it, the fault is in pairing rather than in
-  anything VTP specifies.
+A client that passes all three supports encryption without requiring it, which
+is what §10 asks of it. Info stays readable in every posture (§10.2) so a
+client that cannot pair can still identify the device rather than reporting it
+as broken.
 
-`--no-encryption` exists for that bisection. It is not a supported mode: a
-device running with it does not conform to SPEC.md §10.
+Run each in turn:
+
+```bash
+open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt all
+open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt control
+open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt none
+```
+
+The log names the posture at startup, and `notify-subscribed:` names the
+characteristics the client actually got onto — which is how you tell "the
+client paired and proceeded" from "the client was stopped at the gate".
+
+If a client cannot pair at all, forget the device on it first. A stale bond
+against a peripheral that has since restarted with a new identity produces
+repeated authentication failures that look exactly like a device fault, and it
+is the single most common cause. `--encrypt none` then establishes whether
+pairing is the problem or something else is.
+
+macOS in the *peripheral* role is a much thinner path than in the central role.
+Just Works pairing initiated against a Mac acting as a peripheral does work —
+verified against LapSmith on iOS, which raised a prompt, paired, and then wrote
+to Control successfully.
 
 ## Device Information Service
 
 The peripheral also exposes the standard Device Information Service (`0x180A`)
 with manufacturer, model, firmware revision and serial number, which SPEC.md
-§10 recommends. Nothing in VTP/1 reads it — it is there because it is where
+§3.4 recommends. Nothing in VTP/1 reads it — it is there because it is where
 every generic BLE tool already looks when someone asks what a device is.
 
 ## Platform limits

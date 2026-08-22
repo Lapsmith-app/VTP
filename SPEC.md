@@ -158,6 +158,23 @@ Service Data is advisory. A client MUST NOT rely on it in place of reading the
 Info characteristic, and MUST re-read Info on every connection regardless of
 what the advertisement said.
 
+### 3.4 Device Information
+
+A device SHOULD expose the standard Bluetooth Device Information Service
+(`0x180A`) with at least a manufacturer name, model number and firmware
+revision.
+
+Nothing in VTP/1 reads it, which is the point: it is where every generic
+Bluetooth tool already looks, so it is what answers "which firmware is on the
+logger that is misbehaving" without the asker needing to know anything about
+this protocol. Info (§4) is the protocol's own self-description and remains the
+only thing a client parses; the two do not overlap and neither substitutes for
+the other.
+
+It is a SHOULD rather than a MUST because it carries no protocol meaning: a
+device that omits it is fully usable, and requiring it would add a conformance
+surface that no client behaviour depends on.
+
 ---
 
 ## 4. Info characteristic — READ
@@ -991,40 +1008,74 @@ non-conforming.
 
 ## 10. Security
 
-The Control characteristic MUST require an encrypted link, and a device MUST
-enforce that with the GATT encryption permission on both write and indicate —
-not with an application-level check.
+**Encryption is the device's decision, not this specification's.** A device MAY
+require an encrypted link on any characteristic, on all of them, or on none. No
+characteristic is required to be encrypted, and none is forbidden from being
+so.
+
+**A client MUST support encryption on every characteristic.** A client that
+meets `Insufficient Encryption` or `Insufficient Authentication` on any read,
+write or subscription MUST initiate pairing and retry, and MUST NOT report the
+device as faulty or absent. This is the obligation that makes the device's
+freedom safe to grant: a device author choosing to protect their link must not
+thereby become unreadable by conforming clients.
+
+The obligation is one-sided on purpose. Requiring encryption costs the device
+author real work — bond storage, a bond table that fills, and a mismatch after
+reflashing that presents as a broken device — and that cost lands hardest on
+exactly the small implementations this protocol needs. Supporting encryption
+costs a client almost nothing: every major central stack turns `Insufficient
+Encryption` into a pairing attempt on its own. Putting the requirement on the
+side that can bear it leaves each device free to choose its own posture without
+fragmenting what clients can talk to.
+
+### 10.1 How a device requires it
+
+A device that requires encryption MUST enforce that with the GATT encryption
+permission, not with an application-level check.
 
 The two are not interchangeable, and an earlier draft of this section required
 both, which cannot be implemented. A characteristic carrying the permission is
 enforced by the ATT layer: an unencrypted write is answered `Insufficient
 Encryption` and never reaches application code, so there is nothing there to
 generate a reply from. A device that *can* reply has not set the permission.
-The delivery path settles it either way — a response travels by indication on
-Control, so on a device that has set the permission a client cannot even enable
-indications until the link is encrypted, and an application-level refusal would
-have nowhere to go.
+The delivery path settles it for Control either way — a response travels by
+indication on that characteristic, so on a device that has set the permission a
+client cannot even enable indications until the link is encrypted, and an
+application-level refusal would have nowhere to go.
 
 Status `needs_encryption` (6) remains allocated and MUST NOT be reused for
 anything else, but a conforming device has no occasion to send it.
 
-Enforcing at the ATT layer is also what produces the behaviour a user wants:
-every major central stack turns `Insufficient Encryption` into a pairing
-attempt on its own, so the requirement costs one prompt at first connection
-rather than an error a client has to interpret.
+### 10.2 What to protect, and what it buys
 
-**The Info characteristic MUST be readable on an unencrypted link.** A client
-that cannot pair — or has not yet — must still be able to identify what it has
-found and say so, rather than reporting a device that is present, advertising a
-VTP service and apparently broken. Info carries no measurement: version,
-capabilities, rates and buffer sizes, all of which the advertisement already
-hints at (§3.3).
+A device SHOULD leave the Info characteristic readable on an unencrypted link.
+A client that cannot pair — or has not yet — can then still identify what it
+has found and say so, rather than reporting a device that is present,
+advertising a VTP service and apparently broken. Info carries no measurement:
+version, capabilities, rates and buffer sizes, all of which the advertisement
+already hints at (§3.3).
 
-Stream characteristics MAY be readable on an unencrypted link. A device
-SHOULD require encryption for them and MUST do so if it is fitted to a vehicle
-bus carrying anything beyond powertrain telemetry.
+A device that protects anything SHOULD protect the streams and not only
+Control. Control carries commands — which identifiers to forward, at what rate
+— and an eavesdropper learns little from them. The streams carry the
+measurement, including position, and that is the part with something to reveal.
+Encrypting Control alone is a common arrangement and an incoherent one: it
+guards who may reconfigure the device while leaving what the device reports in
+the clear.
 
-LE Secure Connections is REQUIRED. Just Works pairing is acceptable.
+A device fitted to a vehicle bus carrying anything beyond powertrain telemetry
+SHOULD require encryption on every characteristic. A modern bus carries far
+more than the engine — location, identifiers, and door and lock activity among
+them — and a device with access to it is handling personal data whatever it
+was built to measure.
+
+When pairing does occur, LE Secure Connections is REQUIRED. Just Works pairing
+is acceptable, and an implementer should know what it does and does not
+provide: LE Secure Connections protects against a passive listener even under
+Just Works, but Just Works has no authentication step, so it does not protect
+against an active man-in-the-middle. Encryption here is a defence against
+eavesdropping, not against an attacker who is willing to interpose.
 
 ---
 
