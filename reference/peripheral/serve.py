@@ -298,6 +298,10 @@ class Peripheral:
         self.refused = {"gps": 0, "can": 0, "imu": 0}
         self.unwanted = {"gps": 0, "can": 0, "imu": 0}
         self.rate = {"gps": 0.0, "can": 0.0, "imu": 0.0}
+        # Monitor updates the device refused. Accepted ones are counted by the
+        # device itself, because whether an update was applied is device truth;
+        # only the refusal is observed out here.
+        self._monitor_rejected = 0
         self.control_log = collections.deque(maxlen=8)
         self.started = time.monotonic()
         self._turn = 0
@@ -344,12 +348,23 @@ class Peripheral:
             # SPEC.md §13.4 — the one direction that runs client-to-device.
             problem = self.device.handle_monitor_write(bytes(value))
             if problem:
+                self._monitor_rejected += 1
                 log.warning("rejected a monitor update: %s", problem)
-            else:
-                # The screen is refreshed from the poll loop, not from here:
-                # this callback does not run on the loop that owns the window,
-                # and Tk is not thread-safe.
-                pass
+            elif self.device.monitor_updates == 1:
+                # Only the FIRST accepted update is logged, and it is logged in
+                # full. A client may write at its own display rate, so a line
+                # per update would bury the control conversation -- but "has
+                # this client ever written anything at all" is the question an
+                # empty Monitor panel raises, and nothing here answered it: an
+                # accepted write was silent, so a client that sent nothing and
+                # a client that sent something looked identical in the log.
+                # One line settles it. The running count is in the status line.
+                log.info("MONITOR  first update from this client: seq=%s  |  %s",
+                         self.device.monitor_seq,
+                         "  ".join(self.device.display_lines()))
+            # The screen is refreshed from the poll loop, not from here: this
+            # callback does not run on the loop that owns the window, and Tk is
+            # not thread-safe.
             return
         if uuid != CHAR["control"].lower():
             return
@@ -752,6 +767,24 @@ class Peripheral:
                              "  |  ready-callbacks %d, safety-timeouts %d",
                              self._paint_ms, self._pump_ms, self._paints,
                              self._ready_callbacks, self._timeouts)
+                monitor_state = self.device.monitor_state()
+                if monitor_state or self._monitor_rejected:
+                    supplied = sum(1 for *_, present in monitor_state if present)
+                    log.info("  monitor: %d channel(s) requested | updates "
+                             "accepted=%d rejected=%d | seq=%s | %d of %d "
+                             "slot(s) supplied",
+                             len(monitor_state), self.device.monitor_updates,
+                             self._monitor_rejected,
+                             "—" if self.device.monitor_seq is None
+                             else self.device.monitor_seq,
+                             supplied, len(monitor_state))
+                    if (self._link.connected and monitor_state
+                            and self.device.monitor_updates == 0):
+                        log.info("    this client has written nothing to "
+                                 "monitor_values, so every slot on the display "
+                                 "reads absent: on Monitor the device asks and "
+                                 "the CLIENT supplies (SPEC.md 13.1). Check it "
+                                 "read MONITOR_LIST and has values to send.")
                 if subs and subscribed is not None and "can" not in subscribed:
                     log.warning(
                         "  %d CAN id(s) are installed but no central has "
