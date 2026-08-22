@@ -8,6 +8,47 @@ conformance vector.
 
 ## [Unreleased]
 
+### A busy radio was being reported as a device losing data
+
+Reported from the field: the peripheral shedding at `every_frame` and a client
+stepping down to sampling, on a 72 f/s bus it had sustained with no gaps.
+
+The cause was not capacity. CAN flushes a partial batch every 100 ms, so at
+72 f/s a batch carries about eight frames — well inside what one notification
+holds at any ATT MTU, and the batch size never binds. What bound was the
+transmit queue saying "not now":
+
+- **A refused notification was discarded and its frames counted as loss.** The
+  pump handed the payload to `record_refused` and deleted it, so one full
+  transmit queue cost a whole batch and reported it under §8.3 — which counts
+  items the device **accepted and then discarded**, and a queue that is busy
+  for a moment is neither. `_deliver` had already been written for the other
+  answer: it stamps `seq` and commits only on acceptance, precisely so the same
+  number can go out on the next attempt (§8.2). There was no next attempt. The
+  payload now stays pending and is retried; at most one per stream is held and
+  a newer one still supersedes it, so nothing accumulates and a stall costs
+  latency rather than data.
+
+- **Recovery waited 250 ms for a callback it did not need.** CoreBluetooth
+  reports a drained queue on a callback this process does not own, so there has
+  always been a fallback timeout — set at 250 ms, which is two and a half CAN
+  flush periods. A single missed callback therefore guaranteed that two or
+  three batches were built, superseded and counted before anything could be
+  sent again. `update_value` answers the same question on demand, so the
+  fallback is now 10 ms and the callback remains the fast path.
+
+- **The discretionary flush now defers while a batch is undelivered.**
+  §6.2's partial-batch timer exists so a quiet bus still delivers; running it
+  while the transport still holds the previous batch only builds one to
+  supersede the other. The bounded flushes are unaffected — §6.1 caps a batch
+  at what `dt` can span and capacity at what fits in one notification, and
+  neither is optional.
+
+Both are covered in `transport_selftest.py`, which drives the real pump against
+a fake refusing link, and both tests were confirmed to fail without the fix.
+The fake's own comment had said "the pump is expected to hold the payload and
+retry" since it was written.
+
 ### The harness proved less than it claimed
 
 Reported from the field: a device answering `MONITOR_LIST` in the superseded

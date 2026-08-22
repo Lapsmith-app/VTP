@@ -97,6 +97,23 @@ STATUSES = {
 }
 CHAR_NAMES = {}
 
+#: How long to wait after a refused notification before trying again anyway.
+#:
+#: CoreBluetooth answers "ready to update subscribers" on a callback, and that
+#: remains the fast path -- but it is a callback this process does not own, and
+#: waiting on it alone once wedged the device, so there has always been a
+#: fallback. The fallback was 0.25 s, which is two and a half CAN flush periods
+#: (vtp_device flushes a partial batch every 100 ms): a single missed callback
+#: therefore guaranteed that two or three batches were built, superseded and
+#: counted as loss before anything could be sent again. It was the difference
+#: between "the radio was busy for a moment" and "the device is shedding".
+#:
+#: `update_value` reports the queue state itself on every attempt, so the cost
+#: of trying early is one call that returns False. At 200 Hz this retries
+#: within two ticks, and a stall shorter than one flush period now costs
+#: nothing at all.
+RETRY_BLOCKED_S = 0.01
+
 
 class ConnectionTracker:
     """Edge detection over "a central is being served".
@@ -850,7 +867,8 @@ class Peripheral:
             # supersedes the first, and the superseded one is loss and is
             # counted as such. Holding more would deliver a backlog, which
             # SPEC.md §8.3 is explicit is the wrong answer.
-            for characteristic, payload in self.device.poll():
+            for characteristic, payload in self.device.poll(
+                    undelivered=tuple(self._pending)):
                 if subscribed is not None and characteristic not in subscribed:
                     unwanted[characteristic] += 1
                     continue
@@ -860,9 +878,14 @@ class Peripheral:
                     refused[characteristic] += 1
                 self._pending[characteristic] = payload
 
-            # A refusal we never got a callback for must not wedge the device.
+            # Try again without waiting for a callback that may not come. This
+            # used to be a 250 ms last resort against a wedged device; it is
+            # now the ordinary path, because `update_value` answers the same
+            # question the callback does and answers it on demand. See
+            # RETRY_BLOCKED_S for why the difference between 250 ms and 10 ms
+            # is the difference between shedding and not.
             if (not self._ready and self._blocked_since
-                    and time.monotonic() - self._blocked_since > 0.25):
+                    and time.monotonic() - self._blocked_since > RETRY_BLOCKED_S):
                 self._ready = True
                 self._blocked_since = None
                 self._timeouts += 1
@@ -882,8 +905,21 @@ class Peripheral:
                     if self._deliver(characteristic, payload, sent, refused):
                         del self._pending[characteristic]
                     else:
-                        self.device.record_refused(characteristic, payload)
-                        del self._pending[characteristic]
+                        # SPEC.md §8.3 — a refusal is the transmit queue being
+                        # full for a moment, not the device being overrun, so
+                        # the payload STAYS pending and is retried. It used to
+                        # be discarded here and its records counted as loss,
+                        # which threw away a whole batch every time the stack
+                        # said "not now" -- and `_deliver` had already been
+                        # written for the other answer: it stamps seq and
+                        # commits only on acceptance, precisely so the same
+                        # number can go out on the next attempt (§8.2). There
+                        # was no next attempt.
+                        #
+                        # Nothing accumulates: at most one payload per stream
+                        # is held, and a newer one supersedes it above and IS
+                        # counted. So a stall costs latency, and only a stall
+                        # long enough to be overtaken costs data.
                         break
 
             # A rate is what tells a stalled stream from a slow one, and a
@@ -916,7 +952,7 @@ class Peripheral:
                              self._control.dropped)
                 if self._paints:
                     log.info("  display: paint %.1f ms, pump %.1f ms, %d paints"
-                             "  |  ready-callbacks %d, safety-timeouts %d",
+                             "  |  ready-callbacks %d, unprompted retries %d",
                              self._paint_ms, self._pump_ms, self._paints,
                              self._ready_callbacks, self._timeouts)
                 if subs and subscribed is not None and "can" not in subscribed:

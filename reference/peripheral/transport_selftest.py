@@ -16,6 +16,7 @@ Usage:
 """
 import asyncio
 import pathlib
+import struct
 import sys
 
 sys.dont_write_bytecode = True
@@ -100,6 +101,76 @@ def main():
               f"{name}: first delivered seq after backpressure is {got[:1]}")
         check(got == list(range(len(got))),
               f"{name}: delivered sequence has a gap or a jump: {got[:8]}")
+
+    # ---- A refusal alone loses nothing ----------------------------------
+    # SPEC.md §8.3 -- `dropped` counts items the device ACCEPTED AND THEN
+    # DISCARDED, and a full transmit queue is neither. The pump used to hand
+    # the refused payload to record_refused and delete it, so one "not now"
+    # from the stack cost a whole batch and was reported to the client as the
+    # device being overrun. `_deliver` had already been written for the other
+    # answer -- it stamps seq and commits only on acceptance, precisely so the
+    # same number can go out on the next attempt (§8.2) -- but no next attempt
+    # was ever made.
+    #
+    # A stall short enough that nothing newer is produced must therefore cost
+    # nothing at all: same payload, same number, delivered late.
+    peripheral, server, _ = build(gps_hz=10)
+    server.connect(subscribe=("gps",))
+    run(peripheral, 60)                      # three fixes at 5 ms per tick
+    before = len(server.sent("gps"))
+    check(before > 0, "the run before the stall should have delivered")
+    server.stall()
+    run(peripheral, 25)                      # one fix produced, and refused
+    check(server.refusals > 0, "the stall should have refused a notification")
+    check(len(server.sent("gps")) == before,
+          "nothing may reach the wire while the queue is full")
+    server.drain()
+    run(peripheral, 10)
+    after = seqs(server.sent("gps"), "gps")
+    check(len(after) > before,
+          f"the refused notification must be retried and land, not be "
+          f"discarded: {before} before the stall, {len(after)} after")
+    check(after == list(range(len(after))),
+          f"a retried notification must carry the number it was stamped with, "
+          f"leaving no gap: {after[:8]}")
+    dropped = [vtp1.decode_gps_fix(p)["dropped"] for p in server.sent("gps")]
+    check(sum(dropped) == 0,
+          f"a refusal is the radio being busy, not the device discarding "
+          f"anything, so §8.3's counter must stay at zero: {dropped}")
+
+    # ---- A batch is not built while the last one is undelivered ---------
+    # SPEC.md §6.2's partial-batch timer is a convenience: it exists so a quiet
+    # bus still delivers. Running it while the transport is still holding the
+    # previous batch only builds one to supersede the other, and a superseded
+    # batch IS loss (§8.3). The bounded flushes are not discretionary and still
+    # run -- §6.1 caps a batch at what `dt` can span, and capacity at what fits
+    # in one notification.
+    clock_box = [0]
+    device = dev.VtpDevice(now_us=lambda: clock_box[0], gps_hz=0, imu_hz=0)
+    device.on_connect()
+    installed = device.handle_control(
+        bytes([0x02, 0x01]) + struct.pack("<IBH", 0x0C0, 0, 0))
+    check(installed[2] == 0, "the probe subscription should have installed")
+    clock_box[0] += 200_000                  # two flush periods of frames
+    held = [p for c, p in device.poll() if c == "can"]
+    check(len(held) == 1, f"one batch should be due, got {len(held)}")
+    clock_box[0] += 200_000
+    while_blocked = [p for c, p in device.poll(undelivered=("can",))
+                     if c == "can"]
+    check(not while_blocked,
+          f"the discretionary flush must be held back while the transport has "
+          f"not taken the last batch, got {len(while_blocked)}")
+    clock_box[0] += 10_000
+    freed = [p for c, p in device.poll() if c == "can"]
+    check(len(freed) == 1,
+          f"and must resume the moment it can, got {len(freed)}")
+    check(device.pending_dropped()["can"] == 0,
+          f"holding frames back is latency, not loss (§8.3): "
+          f"{device.pending_dropped()}")
+    carried = vtp1.decode_can_batch(freed[0])["header"]["count"]
+    check(carried > vtp1.decode_can_batch(held[0])["header"]["count"] // 2,
+          f"the deferred batch should carry what accumulated meanwhile, "
+          f"got {carried} frame(s)")
 
     # ---- A reconnection inherits nothing --------------------------------
     peripheral, server, _ = build()
