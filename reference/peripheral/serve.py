@@ -728,6 +728,13 @@ class Peripheral:
                 # subscriptions and sequence numbers into the next connection,
                 # which is exactly what §9.2 forbids.
                 self.device.on_connect()
+                # The device zeroes its accepted-update count here, so this
+                # one has to be zeroed alongside it. The two are printed side
+                # by side in the status line, and a lifetime counter next to a
+                # per-connection one reads as a comparison when it is not: the
+                # previous client's malformed writes would be reported against
+                # the client that has just arrived.
+                self._monitor_rejected = 0
                 log.info("CLIENT CONNECTED — sequence numbers restarted, "
                          "subscription table cleared")
             elif event == "disconnected":
@@ -780,11 +787,26 @@ class Peripheral:
                              supplied, len(monitor_state))
                     if (self._link.connected and monitor_state
                             and self.device.monitor_updates == 0):
-                        log.info("    this client has written nothing to "
-                                 "monitor_values, so every slot on the display "
-                                 "reads absent: on Monitor the device asks and "
-                                 "the CLIENT supplies (SPEC.md 13.1). Check it "
-                                 "read MONITOR_LIST and has values to send.")
+                        # Silence and refusal look identical on the display --
+                        # every slot absent -- and they are opposite faults.
+                        # Saying "written nothing" to a client that has written
+                        # 147 times and had every one refused sends the reader
+                        # to look at MONITOR_LIST and at session state, which
+                        # are the two things that are not wrong.
+                        if self._monitor_rejected:
+                            log.info("    every update this client has written "
+                                     "was refused, so every slot on the display "
+                                     "reads absent: the client IS writing and "
+                                     "the device will not take it. The warnings "
+                                     "above name the reason; check the payload "
+                                     "against SPEC.md 13.4, not MONITOR_LIST.")
+                        else:
+                            log.info("    this client has written nothing to "
+                                     "monitor_values, so every slot on the "
+                                     "display reads absent: on Monitor the "
+                                     "device asks and the CLIENT supplies "
+                                     "(SPEC.md 13.1). Check it read "
+                                     "MONITOR_LIST and has values to send.")
                 if subs and subscribed is not None and "can" not in subscribed:
                     log.warning(
                         "  %d CAN id(s) are installed but no central has "
