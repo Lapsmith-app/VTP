@@ -950,11 +950,15 @@ class Peripheral:
                              "(depth %d), %d never delivered",
                              len(self._control), self._control.depth,
                              self._control.dropped)
+                # How the transmit queue is behaving. NOT gated on the panel:
+                # these two describe the link, and hiding them behind the
+                # display meant they vanished from exactly the run somebody
+                # starts with --no-display to find out why throughput is bad.
+                log.info("  delivery: ready-callbacks %d, unprompted retries %d",
+                         self._ready_callbacks, self._timeouts)
                 if self._paints:
-                    log.info("  display: paint %.1f ms, pump %.1f ms, %d paints"
-                             "  |  ready-callbacks %d, unprompted retries %d",
-                             self._paint_ms, self._pump_ms, self._paints,
-                             self._ready_callbacks, self._timeouts)
+                    log.info("  display: paint %.1f ms, pump %.1f ms, %d paints",
+                             self._paint_ms, self._pump_ms, self._paints)
                 if subs and subscribed is not None and "can" not in subscribed:
                     log.warning(
                         "  %d CAN id(s) are installed but no central has "

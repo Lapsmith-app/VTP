@@ -205,6 +205,34 @@ per paint and a slower rate batches it into fewer, longer stalls.
 panel for watching a client work, where 15/s is ample. The status line reports
 the panel's own cost every ten seconds so the trade stays visible.
 
+### What that looks like from the client
+
+The same build, same Mac, same iPhone, four CAN-subscribed streams, differing
+only in whether the panel was open:
+
+| | panel open | `--no-display` |
+| --- | --- | --- |
+| CAN notifications refused by the stack | **40%** of attempts | **2%** |
+| batches/s the client received | 9.1–9.4 | 9.7–9.8 |
+| frames/s the client received | 58–63 | **71–72** |
+| frames per batch | 6.4–6.7 | 7.3–7.4 |
+
+The frame rate is the part worth understanding, because it is not loss:
+`dropped` was 0 and there were no sequence gaps in either column. The bus here
+is synthetic and `_due_can_frames` emits per poll, so a 74 ms stall in the loop
+produces one 50 Hz frame where three were due. Frames never generated are never
+accepted, so §8.3 correctly does not count them — the panel does not make the
+device lose data, it makes the device *have less data*, and a client cannot
+tell those apart from the wire.
+
+**This is also how a panel stall used to reach a client as a fault.** Until the
+pump retried a refused notification instead of discarding it, each of those
+refusals threw a whole batch away and counted its frames under §8.3 — so the
+same run reported 26% of frames dropped and a client stepped down from
+`every_frame` to sampling. The panel was the congestion; the discard was what
+turned congestion into reported loss. Both are fixed, and the 2% column is what
+the link was always capable of.
+
 ---
 
 ## Checking it works
