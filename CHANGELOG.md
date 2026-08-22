@@ -8,6 +8,68 @@ conformance vector.
 
 ## [Unreleased]
 
+### Changed — wire format
+Normative closure, from a second external review. **Four existing conformance
+vectors changed meaning**, which `tools/check_baseline.py` caught and which was
+accepted deliberately: this is not a minor version. Pre-1.0 that is ordinary,
+and it is the first time the baseline added in the previous release earned its
+place.
+
+- **`TIME_SYNC` is parameterless, and its timestamps have units.** The request
+  carried the host's UTC time in milliseconds; the response carries device
+  microseconds; and §9.7's equations subtracted one from the other. A
+  millisecond count since 1970 cannot be subtracted from a microsecond count
+  since the device booted, so the exchange as specified was not implementable —
+  and the reference peripheral validated the field's length and then discarded
+  it, which was the only thing it could do.
+
+  All four timestamps are now **microseconds on a monotonic clock**: *t₁* and
+  *t₄* on the client's, `t_device_rx` and `t_device_tx` on the device's.
+  Neither is UTC and neither has to be; mapping the client's clock to wall time
+  is a host concern, and a fix's `t_utc` remains the separate mechanism for
+  relating the *device* to wall time. **`offset` is stated as device minus
+  client**, because the sign is the half an implementer cannot check against
+  reality — get it backwards and every timestamp is wrong by twice the offset
+  and looks entirely ordinary.
+
+- **§5.6's GPS rule is conditional, not two contradictory MUSTs.** It required
+  `t_device` to be the solution epoch *and* required a device that cannot
+  determine the epoch to stamp arrival. Both were unconditional. `fix_flags`
+  bit 4 now decides: set means solution epoch, clear means arrival time, and
+  `t_utc` refers to the solution epoch either way. The flag exists precisely
+  because the requirement cannot be unconditional.
+
+- **Record 0's `dt` MUST be zero, and is now enforced.** §6.1 has always
+  defined `t_base` as record 0's arrival time, which makes its offset zero by
+  definition — and four vectors carried first offsets of 5, 1, 20 and 2 while
+  both reference decoders accepted them. That is how a definitional rule
+  survives as prose without ever becoming a rule. `t-base-near-wrap` gained a
+  second record to keep testing the wrap it was written for.
+
+- **Rate admission is gone (§9.4).** A device MUST NOT refuse a CAN
+  subscription on rate grounds; it admits and sheds. The prediction could not
+  be made in three separate ways: never for `every_frame` or `on_change`, which
+  was acknowledged from the start; `every_nth` with N of 1 selects exactly what
+  `every_frame` selects, so the same subscription was accepted or refused
+  according to spelling; and a masked subscription schedules per matching
+  identifier (§6.8), so a `periodic` mask over ten identifiers produces ten
+  times the rate its `arg` names. The rule was removed rather than patched a
+  third time. `rate_exceeded` survives for `GPS_SET_RATE` and `IMU_SET_RATE`,
+  where the limit is the device's own and the answer is a fact.
+
+- **`max_age` of zero no longer means immortal (§13.5).** It means the value
+  has no deadline of its own. A device MUST declare a non-zero `max_age` on at
+  least one channel, and the largest it declares is a **liveness bound**: when
+  no write at all arrives within that, every value goes unavailable including
+  the zero-`max_age` ones. "Never expires" otherwise defeated the rule it sat
+  beside — if the client is gone, a best lap from a session that has ended is
+  as wrong as a stopped lap timer, and only less obviously so.
+
+- **A grouped validity bit MUST NOT be set unless every field it governs is
+  known (§9.1).** `conn_params` covers three values and `phy` covers two, and a
+  device knowing one of a pair has not learned the other. Half a group is the
+  same state as none of it, and a clear bit is the honest encoding of it.
+
 ### Added
 - **A compatibility baseline (`conformance/baseline.json`).** SPEC.md §12
   promises that an existing vector never changes meaning within a major

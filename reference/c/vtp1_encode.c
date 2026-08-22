@@ -110,6 +110,8 @@ static int vtp_fd_len_ok(uint8_t n) {
 int vtp_encode_can_batch(const vtp_can_header_t *h,
                          const vtp_can_frame_t *frames,
                          uint8_t *out, size_t cap) {
+    /* SPEC.md §6.1 -- record 0's dt is zero by t_base's own definition. */
+    if (h->count && frames[0].dt != 0) return -1;
     size_t needed = VTP_CAN_HEADER_SIZE;
     for (uint8_t i = 0; i < h->count; i++) {
         /* An encoder must not emit a frame its own decoder rejects: a device

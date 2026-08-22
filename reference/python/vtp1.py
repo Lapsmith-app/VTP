@@ -120,6 +120,12 @@ def decode_can_batch(buf):
         r = _unpack("can_record", buf, off)
         if off + rsz + r["len"] > len(buf):
             raise Reject("truncated-record")
+        # SPEC.md §6.1 — t_base IS record 0's arrival time, so its dt is zero by
+        # definition. A non-zero one means the sender and the receiver disagree
+        # about what t_base is, and the receiver cannot tell which reading to
+        # trust.
+        if not records and r["dt"] != 0:
+            raise Reject("first-dt-nonzero")
         raw = r["id"]
         extended = bool(raw & (1 << 29))
         fd, rtr = bool(raw & (1 << 30)), bool(raw & (1 << 31))

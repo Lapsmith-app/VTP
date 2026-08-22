@@ -714,13 +714,13 @@ class VtpDevice:
 
             if len(self._subscriptions) >= CAN_SUBSCRIPTION_SLOTS:
                 return reply(ST_TABLE_FULL)
-            # SPEC.md §9.4 — admission is only decidable where the subscription
-            # itself bounds the rate. every_frame and on_change are admitted and
-            # shed if they overrun; refusing them would be a prediction about
-            # bus traffic the device cannot make.
-            if mode in (SUB_PERIODIC, SUB_EVERY_NTH) and arg:
-                if self._predicted_rate(mode, arg) > CAN_MAX_FRAMES_PER_S:
-                    return reply(ST_RATE_EXCEEDED)
+            # SPEC.md §9.4 — no rate admission. A device cannot predict the load
+            # a subscription adds: not for every_frame or on_change, which
+            # depend on the bus; not across every_nth with N of 1, which selects
+            # exactly what every_frame does; and not for a masked subscription,
+            # which keeps its schedule per matching identifier (§6.8) and so
+            # produces one rate per identifier rather than the one its arg
+            # names. It admits, and sheds what it cannot forward.
 
             handle = self._allocate_handle()
             if handle is None:
@@ -767,7 +767,10 @@ class VtpDevice:
             return reply(ST_OK)
 
         if opcode == TIME_SYNC:
-            if len(params) != 8:
+            # SPEC.md §9.7 — parameterless. It used to carry the host's UTC
+            # milliseconds, which the equations could not use and this device
+            # discarded.
+            if params:
                 return reply(ST_BAD_PARAMS)
             # SPEC.md §9.7 — two readings: when it arrived, and now. The
             # client subtracts the difference from its own round trip and is
@@ -786,19 +789,6 @@ class VtpDevice:
             return reply(ST_OK, self._monitor_page(start))
 
         return reply(ST_UNSUPPORTED)
-
-    def _predicted_rate(self, mode, arg):
-        """Frames per second the installed table would produce, plus a
-        candidate. Only rate-bounded modes are counted, because only they can
-        be predicted at all (SPEC.md §9.4)."""
-        def rate(m, a):
-            if m == SUB_PERIODIC and a:
-                return 1000 / a
-            if m == SUB_EVERY_NTH and a:
-                return 100 / a          # against a nominal 100 Hz signal
-            return 0
-        total = sum(rate(s["mode"], s["arg"]) for s in self._subscriptions.values())
-        return total + rate(mode, arg)
 
     def _list_page(self, start):
         """SPEC.md §9.5. One page from `start`, sized to the notification
@@ -894,14 +884,27 @@ class VtpDevice:
         reading it has no way to tell.
         """
         now = self.now_us()
+        # SPEC.md §13.5 — the liveness bound: the largest max_age declared. No
+        # write at all within it means the client is gone, and then NOTHING
+        # survives, including channels whose own max_age is zero. A best lap
+        # from a session that ended is as wrong as a stopped lap timer and only
+        # less obviously so.
+        bound = max((MONITOR_MAX_AGE.get(c, 20)
+                     for _, c in self._monitor_channels), default=0)
+        last = max((w for _, _, w in self._monitor_values.values()
+                    if w is not None), default=None)
+        client_gone = (bound and last is not None
+                       and now - last > bound * 100_000)
+
         out = []
         for slot, channel in self._monitor_channels:
             value, present, written_at = self._monitor_values.get(
                 slot, (0, False, None))
             max_age = MONITOR_MAX_AGE.get(channel, 20)
-            if present and max_age and written_at is not None:
-                if now - written_at > max_age * 100_000:
-                    value, present = 0, False
+            expired = (present and max_age and written_at is not None
+                       and now - written_at > max_age * 100_000)
+            if client_gone or expired:
+                value, present = 0, False
             out.append((slot, channel, value, present))
         return out
 

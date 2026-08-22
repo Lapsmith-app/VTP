@@ -156,6 +156,10 @@ def encode_can_batch(header, records):
     # `reserved` is written through rather than forced to zero: a device built
     # against a later minor may have been assigned those bytes, and an encoder
     # must not silently erase a field it does not know about.
+    if records and records[0].get("dt", 0) != 0:
+        raise EncodeError(
+            f"can_record[0].dt is {records[0]['dt']}; t_base is record 0's "
+            f"arrival time, so its offset from t_base is zero (SPEC.md §6.1)")
     out = bytearray(_pack("can_header", header))
     for r in records:
         # An encoder must not emit a frame its own decoder rejects. SPEC.md

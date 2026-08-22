@@ -352,7 +352,9 @@ def main():
           "this device should declare both kinds of channel, or the expiry "
           "rule is only half exercised")
 
-    slot_fast = perishable[0]["slot"]
+    # The SHORTEST perishable channel, so its own deadline falls inside the
+    # liveness bound and the two rules can be told apart.
+    slot_fast = min(perishable, key=lambda e: e["max_age"])["slot"]
     slot_never = durable[0]["slot"]
     write = (struct.pack("<HBB", 1, 2, 0)
              + struct.pack("<BBi", slot_fast, dev.MONITOR_PRESENT, 12345)
@@ -373,8 +375,18 @@ def main():
     check(present_at(deadline + 100_000)[slot_never],
           "a channel declaring max_age 0 never expires, so it MUST survive a "
           "deadline that belongs to another channel")
-    check(present_at(600_000_000)[slot_never],
-          "max_age 0 means never, not merely a long time")
+    # SPEC.md §13.5 — max_age 0 is "no deadline of its own", not immortal. The
+    # liveness bound is the largest max_age declared, and past it nothing
+    # survives: a best lap from a session that ended is as wrong as a stopped
+    # lap timer, and only less obviously so.
+    bound = max(e["max_age"] for e in declared["entries"]) * 100_000
+    check(present_at(bound - 100_000)[slot_never],
+          "inside the liveness bound a max_age 0 channel MUST still be shown")
+    after = present_at(bound + 100_000)
+    check(not any(after.values()),
+          f"past the liveness bound NOTHING may still be shown, including "
+          f"max_age 0 channels; still present: "
+          f"{sorted(s for s, p in after.items() if p)}")
 
     # SPEC.md §13.4 — a slot twice in one write, and nothing says which wins.
     twice = (struct.pack("<HBB", 2, 2, 0)
@@ -394,9 +406,7 @@ def main():
     timed.on_connect()
     arrived = tclock[0]
     tclock[0] += 1_500                      # the device spends 1.5 ms answering
-    answer = timed.handle_control(
-        bytes([dev.TIME_SYNC, 1]) + struct.pack("<q", 1_700_000_000_000),
-        t_rx=arrived)
+    answer = timed.handle_control(bytes([dev.TIME_SYNC, 1]), t_rx=arrived)
     check(answer[2] == dev.ST_OK, "TIME_SYNC was refused")
     sync = vtp1.decode_time_sync(answer[3:])
     check(sync["t_device_rx"] == arrived,
@@ -542,8 +552,11 @@ def main():
           "a rate above gps_max_rate_hz MUST be refused with rate_exceeded, "
           "not accepted and silently clamped")
 
-    resp = device.handle_control(bytes([dev.TIME_SYNC, 4])
-                                 + struct.pack("<q", 1_766_000_000_000))
+    resp = device.handle_control(bytes([dev.TIME_SYNC, 4]))
+    check(device.handle_control(bytes([dev.TIME_SYNC, 5])
+                                + struct.pack("<q", 0))[2] == dev.ST_BAD_PARAMS,
+          "SPEC.md §9.7 — TIME_SYNC is parameterless; the host UTC field it "
+          "used to carry could not be used by the equations and was discarded")
     check(resp[2] == dev.ST_OK
           and len(resp) == 3 + vtp1.SCHEMA["records"]["time_sync"]["size"],
           "TIME_SYNC must answer ok with a time_sync record. This had "

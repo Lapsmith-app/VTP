@@ -432,10 +432,12 @@ All three are now specified, and this device implements them:
 - **Overlap has a rule** (§9.3): most specific mask, then lowest handle, and a
   frame is forwarded at most once. Both terms are visible through `CAN_LIST`,
   so a client can determine which subscription governs rather than discover it.
-- **`rate_exceeded` is only claimed where it is decidable** (§9.4). For
-  `every_frame` and `on_change` the device cannot know future bus traffic, so
-  it admits and sheds, reporting loss in `dropped`. A prediction the device
-  cannot make is not a promise the protocol should ask for.
+- **CAN subscriptions are never refused on rate grounds** (§9.4). The device
+  cannot predict the load one adds — not from bus traffic, not across modes
+  that select identically, and not for a mask that schedules per identifier —
+  so it admits and sheds, reporting loss in `dropped`. `rate_exceeded` survives
+  only for `GPS_SET_RATE` and `IMU_SET_RATE`, where the limit is the device's
+  own and the answer is a fact rather than a forecast.
 
 **`LIST_CHANNELS` was removed** rather than specified. It belonged to the
 Monitor role, which had a UUID and a capability bit but no characteristic

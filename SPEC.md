@@ -455,9 +455,22 @@ rejected.
 
 ### 5.6 When a fix is timestamped
 
-`t_device` MUST be the device clock at the **epoch of the solution** — the
-instant the reported position was true — and not the instant the fix reached
-the device.
+**`fix_flags` bit 4 (`solution_epoch`) says which instant `t_device` names**:
+
+| Bit 4 | `t_device` is |
+| --- | --- |
+| set | the **epoch of the solution** — the instant the reported position was true |
+| clear | the instant the fix **reached the device** |
+
+A device MUST set the bit when it can determine the solution epoch, and MUST
+clear it otherwise. `t_utc`, when its validity bit is set, always refers to the
+epoch of the solution whichever way bit 4 reads — it comes from the receiver's
+own solution and is not a reading of the device clock at all.
+
+An earlier draft stated the epoch as an unconditional requirement *and* gave
+the fallback, which are two rules that cannot both hold. The conditional form
+is the one that was meant: the flag exists precisely because the requirement
+cannot be unconditional.
 
 The two are far apart. A GNSS receiver computes a solution for a specific
 instant and delivers it over a serial link some tens to some hundreds of
@@ -469,13 +482,10 @@ single shared clock exists to provide, and a systematic offset on one of the
 three channels removes it while leaving every number looking entirely
 plausible.
 
-A device that **cannot** determine the solution epoch MUST clear `fix_flags`
-bit 4 (`solution_epoch`) and stamp the best time it has, which is when the fix
-arrived. A device that can MUST set it. Whether the receiver exposes the epoch
-— through a timing message, or a PPS edge the device can latch — is a property
-of the hardware, not of this protocol, and a specification that required what
-some hardware cannot do would be met by devices setting a timestamp they cannot
-justify.
+Whether the receiver exposes the epoch — through a timing message, or a PPS
+edge the device can latch — is a property of the hardware, not of this
+protocol, and a specification that required what some hardware cannot do would
+be met by devices setting a timestamp they cannot justify.
 
 The flag exists so a client can tell which it has. §1.1 applies exactly as it
 does to a validity bit: the honest answer to "when was this true?" is either a
@@ -550,8 +560,16 @@ the time the notification was queued or sent.
 anything: it does not start at zero when the connection opens, and it does not
 accumulate from batch to batch. Every notification carries its own `t_base`,
 and every `dt` is measured from the `t_base` in the same notification — not
-from the record before it, and not from the previous batch. Record 0's `dt` is
-consequently zero, `t_base` being its arrival time.
+from the record before it, and not from the previous batch. **Record 0's `dt`
+MUST be zero**, `t_base` being its arrival time by definition, and a receiver
+MUST reject a batch whose first record says otherwise.
+
+The rule follows from `t_base`'s own definition, so a non-zero first `dt` means
+the sender and the receiver disagree about what `t_base` is — and a receiver
+that accepts it has no way to tell which of the two readings it should trust.
+Four vectors in this repository carried non-zero first offsets while this
+sentence said they could not, and both reference decoders accepted them, which
+is how a definitional rule survives as prose without ever becoming a rule.
 
 A batch whose `t_base` is 12 345 678 000 and whose `count` is 3:
 
@@ -999,7 +1017,7 @@ an opcode it does not implement as opaque rather than malformed.
 | `0x05` | `CAN_LIST` | `start:u16` | `can_list_page record` | One page of the table, starting at index `start` |
 | `0x10` | `GPS_SET_RATE` | `hz:u16` | — | — |
 | `0x20` | `IMU_SET_RATE` | `hz:u16` | — | — |
-| `0x30` | `TIME_SYNC` | `host_t_utc_ms:i64` | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
+| `0x30` | `TIME_SYNC` | `—` | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
 | `0x31` | `GET_LINK_PARAMS` | — | `link_params record` | — |
 | `0x40` | `MONITOR_LIST` | `start:u16` | `monitor_page record` | One page of the channels this device asks the client to supply |
 <!-- END GENERATED: control -->
@@ -1096,7 +1114,15 @@ and a device MUST NOT change its link configuration in response to this request.
 
 Each validity bit governs the fields listed against it, under the same rule as
 §5.1: if the bit is clear the device MUST write those fields as zero and the
-receiver MUST report them absent. A device whose controller does not expose a
+receiver MUST report them absent.
+
+**A bit governing several fields MUST NOT be set unless every one of them is
+known.** `conn_params` covers three values and `phy` covers two, and a device
+that knows one of a pair has not learned the other: setting the bit and filling
+the remainder with a zero, or with a copy of the field it does have, publishes
+a guess with a validity bit asserting it is a measurement. Half a group is the
+same state as none of it, and the honest encoding of that state is a clear
+bit. A device whose controller does not expose a
 given parameter MUST clear the corresponding bit rather than report a guess.
 There is no PHY value zero, so a zeroed `phy_tx` cannot be mistaken for LE 1M.
 
@@ -1168,18 +1194,39 @@ governs a frame is something a client can determine rather than discover. A
 device MUST NOT forward one frame once per matching subscription: duplicate
 frames on one bus-arrival timestamp are indistinguishable from a bus fault.
 
-### 9.4 Rate admission
+### 9.4 Load
 
-`rate_exceeded` is only decidable where the subscription itself bounds the
-rate. For `periodic` and `every_nth` a device MUST refuse at admission if the
-subscription would take the installed total beyond `can_max_frames_per_s`.
+**A device MUST NOT refuse a CAN subscription on rate grounds.** It admits, and
+if the resulting load exceeds what it can forward it sheds — reporting the loss
+in `dropped` and setting `flags` bit 0 (§6.3). `can_max_frames_per_s` (§4)
+describes what the device can forward; it is not a budget the device polices at
+admission.
 
-For `every_frame` and `on_change` it is **not** decidable: the device cannot
-know what the bus will carry. A device MUST NOT refuse such a subscription on
-rate grounds. It admits, and if the resulting load exceeds what it can forward
-it sheds — reporting the loss in `dropped` and setting `flags` bit 0 (§6.3).
-A prediction the device cannot make is not a promise the protocol should ask
-for.
+An earlier draft asked a device to predict the load a subscription would add
+and refuse with `rate_exceeded` beyond that budget. The prediction cannot be
+made, in three separate ways, and the rule was removed rather than patched a
+third time:
+
+- It was never decidable for `every_frame` or `on_change`, because the device
+  cannot know what the bus will carry. That was acknowledged from the start and
+  those two modes were exempted, which already left the rule covering half the
+  cases.
+- `every_nth` with N of 1 selects exactly what `every_frame` selects. One was
+  rate-admitted and the other exempt, so the same subscription was accepted or
+  refused according to which way the client spelled it.
+- A masked subscription keeps its schedule per matching identifier (§6.8), so a
+  `periodic` subscription over a mask covering ten identifiers produces ten
+  times the rate its `arg` names. The arithmetic was written for a single
+  identifier and has been wrong for masked subscriptions since masks existed.
+
+Shedding is the honest mechanism and the device has it already: it is
+observable by the client, it degrades rather than fails, and it needs no
+prediction. A subscription that turns out to be too much is discovered by the
+device in the only way it can be — by trying.
+
+`rate_exceeded` remains for `GPS_SET_RATE` and `IMU_SET_RATE`, where the device
+knows its own `gps_max_rate_hz` and `imu_max_rate_hz` and the answer is a fact
+rather than a forecast.
 
 ### 9.5 The subscription table
 
@@ -1296,12 +1343,33 @@ Total: **16 bytes**. All fields little-endian.
 when the device finished preparing this answer. `t_device_tx` MUST NOT be
 earlier than `t_device_rx`.
 
-With the two the client already has — *t₁* when it wrote and *t₄* when the
-response arrived, both on its own clock — it can compute both the offset
-between the clocks and its own uncertainty about that offset:
+**The request carries no parameters.** An earlier draft had it carry the host's
+UTC time in milliseconds, which the equations below then could not use: they
+subtract client timestamps from device ones, and a millisecond count since 1970
+cannot be subtracted from a microsecond count since the device booted. The
+device ignored the field, which was the only thing it could do with it.
+
+**Units and clocks.** All four timestamps are **microseconds on a monotonic
+clock**. *t₁* and *t₄* are readings of the **client's** monotonic clock — taken
+as it issues the write and as the indication arrives — and `t_device_rx` and
+`t_device_tx` are readings of the **device's** (§8.1). The two clocks share
+neither an origin nor a rate, which is the entire reason for the exchange; what
+they must share is a unit, and this paragraph is where that is said.
+
+Neither clock is UTC and neither is required to relate to it. Mapping the
+client's monotonic clock to wall time is the client's own problem, solved on
+the client with facilities this protocol does not need to supply; a GPS fix's
+`t_utc` (§5) is the separate mechanism for relating the *device* to wall time.
 
     offset ≈ ((t_device_rx − t₁) + (t_device_tx − t₄)) ÷ 2
     delay  ≈ (t₄ − t₁) − (t_device_tx − t_device_rx)
+
+**`offset` is the device clock minus the client clock**, so a device timestamp
+is converted to client time by subtracting it and a client timestamp to device
+time by adding it. The sign is stated because it is the half of this exchange
+an implementer cannot check against reality: a client that has it backwards
+produces timestamps that are wrong by twice the offset and look entirely
+ordinary.
 
 This is the exchange NTP uses, for the reason NTP uses it. **One timestamp
 cannot bound its own error.** A client that knows only when it asked, when it
@@ -1704,7 +1772,21 @@ honestly, and the device is the one with the screen.
 Each channel in the declaration carries `max_age`, in units of 100 ms. **A
 device MUST render a value as unavailable once `max_age` has passed since the
 write that last carried it**, exactly as it renders one whose `present` bit is
-clear. A `max_age` of zero means the value never expires.
+clear.
+
+`max_age` of zero means the value has **no deadline of its own** — not that it
+is immortal. A device MUST declare a non-zero `max_age` on at least one
+channel, and the largest `max_age` it declares is its **liveness bound**: when
+no write at all has arrived within that, **every** value becomes unavailable,
+including those whose own `max_age` is zero.
+
+Without that, "never expires" defeats the rule it sits beside. If the client is
+gone, a best lap time is as wrong as a lap timer — the session it belonged to
+has ended, and the screen is asserting otherwise. It is merely less obviously
+wrong, which makes it worse rather than better. The liveness bound costs no
+field: a device that declares any perishable channel has already said how long
+it is willing to wait, and a client keeping that channel fresh keeps everything
+else alive as a side effect.
 
 The client MUST refresh before then. A client SHOULD still write only when
 something it can supply has changed — but "nothing has changed" is not a reason
