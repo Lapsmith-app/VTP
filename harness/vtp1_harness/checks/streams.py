@@ -490,12 +490,24 @@ async def can_forwarded_once(s):
         raise Skip("no CAN frame was observed, so there is nothing to overlap")
     target = sorted(seen_ids)[0]
 
-    # A second subscription that also matches `target`, deliberately less
-    # specific than the exact one, so both cover the same frame.
-    overlap = await c.subscribe_can(target, mask=refdec.MASK_EXACT)
+    # Deliberately LESS specific than an exact subscription, and different from
+    # the catch-all: clearing one arbitration bit still matches `target` and
+    # cannot equal anything already installed. An exact mask here would be
+    # identical to what --can-id installs, and SPEC.md §9.2 requires a device to
+    # update that in place and return its existing handle -- so no second
+    # subscription would exist, no frame could be forwarded twice, and this
+    # would report a pass having never created the condition it tests.
+    overlap = await c.subscribe_can(target, mask=refdec.MASK_EXACT & ~0x1)
     if not overlap.ok:
         raise Skip(f"could not install an overlapping subscription: "
                    f"{overlap.status_name}")
+    handle = struct.unpack("<H", overlap.detail)[0]
+    if handle in set(s.state.get("installed", {}).values()):
+        # The device merged it into a subscription that already existed, so
+        # only one still governs the frame and there is nothing to overlap.
+        raise Skip(f"the device returned existing handle {handle} for a "
+                   f"distinct id and mask, so no second subscription was "
+                   f"installed and no frame can match two")
     mark = len(s.streams["can"])
     await asyncio.sleep(2.0)
 

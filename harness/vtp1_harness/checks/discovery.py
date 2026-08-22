@@ -38,11 +38,15 @@ async def adv_name(s):
     if s.advert is None:
         raise Skip("connected to an address rather than a scan result")
     name = s.advert.name
-    # A 128-bit service UUID takes 18 of the 31 advertising bytes and the flags
-    # take 3. A long name does not truncate: the stack drops a whole element,
-    # and if what it drops is the service UUID the device becomes invisible to
-    # every client scanning for it.
-    budget = 31 - 3 - 18 - 2
+    # The budget comes from the peripheral, which already names every term of
+    # it. Restating the arithmetic here would let the two disagree silently --
+    # the peripheral refusing a name this accepts, or the reverse -- and
+    # nothing in CI compares constants the way check_docs.py compares section
+    # references.
+    budget = _advertisement_budget()
+    if budget is None:
+        raise Skip("the peripheral's advertisement constants are not importable "
+                   "from here, and this check will not restate them")
     if name and len(name.encode()) > budget:
         raise Fail(
             f"the local name is {len(name.encode())} bytes and only {budget} fit "
@@ -51,6 +55,24 @@ async def adv_name(s):
             name=name)
     raise Observe(f"advertised as {name!r}" if name else "no local name advertised",
                   name=name, rssi=s.advert.rssi)
+
+
+def _advertisement_budget():
+    """Bytes left for a local name beside a 128-bit service UUID.
+
+    A long name does not truncate: the stack drops a whole advertising element,
+    and if what it drops is the service UUID the device becomes invisible to
+    every client scanning for it.
+    """
+    import sys
+    path = str(refdec.ROOT / "reference" / "peripheral")
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    try:
+        import serve
+    except Exception:                               # noqa: BLE001
+        return None
+    return serve.MAX_NAME_CHARS
 
 
 @check(id="gatt.service", section="3.1", phase="gatt", severity="MUST",
@@ -209,19 +231,43 @@ async def security_posture(s):
     # fail -- but which characteristics enforce it is worth putting in a report,
     # because a device that requires it on some and not others is usually
     # reporting an oversight rather than a policy.
-    refused = []
+    #
+    # What can be probed from here is narrow, and this reports what it did
+    # rather than generalising from it. Under §4.1 only Info carries `read`, so
+    # a direct read probes exactly one attribute. Subscribing to the declared
+    # streams has already happened and would have failed if their CCCDs needed
+    # an encrypted link, so that is evidence rather than a probe. The
+    # write-only characteristics cannot be probed at all without writing to
+    # them, and a reassuring blanket sentence covering all three would be a
+    # green tick for something nothing asserted.
+    read_probed, refused = [], []
     for name, uuid in refdec.CHAR.items():
         ch = s.chars.get(uuid)
         if ch is None or "read" not in ch.properties:
             continue
+        read_probed.append(name)
         try:
             await s.transport.read(uuid)
         except DeviceRefused:
             refused.append(name)
         except TransportError as exc:
             raise Skip(f"the link failed while probing: {exc}")
+    subscribed = sorted(name for name in s.STREAMS
+                        if s.has(name) and s.streams[name].subscribed_at)
+    unprobed = sorted(name for name, spec in refdec.PROFILE_CHARS.items()
+                      if "write" in spec["properties"])
+    if unprobed:
+        s.note(
+            f"SPEC.md §10 lets a device require an encrypted link on any "
+            f"characteristic. This run read {', '.join(read_probed) or 'nothing'} "
+            f"and subscribed to {', '.join(subscribed) or 'no stream'}; it did "
+            f"not probe {', '.join(unprobed)}, because the only way to find out "
+            f"is to write to them. Their encryption posture is unverified.")
     if refused:
-        raise Observe(f"an encrypted link was required for: {', '.join(refused)}",
-                      refused=refused)
-    raise Observe("every readable characteristic was readable on this link "
-                  "without additional authentication")
+        raise Observe(f"an encrypted link was required to read: "
+                      f"{', '.join(refused)}", refused=refused)
+    raise Observe(
+        f"read {', '.join(read_probed) or 'nothing'} and subscribed to "
+        f"{', '.join(subscribed) or 'no stream'} without additional "
+        f"authentication; {', '.join(unprobed) or 'nothing'} not probed",
+        read_probed=read_probed, subscribed=subscribed, unprobed=unprobed)

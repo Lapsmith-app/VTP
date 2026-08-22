@@ -6,7 +6,7 @@ import traceback
 
 from . import refdec
 from .checks import PHASES, Fail, Observe, Result, Skip, Status, load_all
-from .session import ControlTimeout, Session, StreamLog
+from .session import ControlEchoMismatch, ControlTimeout, Session, StreamLog
 from .transport import TransportError
 
 
@@ -68,6 +68,14 @@ class Runner:
             await self._run(session, target, report)
         except TransportError as exc:
             report.aborted = str(exc)
+        except Exception as exc:                    # noqa: BLE001
+            # Everything already found has to survive. A run that reaches the
+            # reconnect phase has sixty results in it, and losing them to one
+            # unexpected error -- in a backend call this transport does not
+            # wrap, or in teardown -- costs the whole session and tells the
+            # user nothing about their device.
+            report.aborted = (f"{type(exc).__name__}: {exc}\n"
+                              + traceback.format_exc(limit=6))
         finally:
             report.duration_s = time.monotonic() - began
             try:
@@ -153,12 +161,13 @@ class Runner:
             return finish(Status.SKIP, exc.reason, exc.evidence)
         except Observe as exc:
             return finish(Status.OBSERVE, exc.message, exc.evidence)
-        except ControlTimeout as exc:
-            # SPEC.md §9 -- a device MUST respond to every request it applies, so
-            # a timeout is a finding about the device rather than a harness
-            # failure, whichever check happened to provoke it.
-            return finish(check.failure_status, str(exc),
-                          {"orphans": [r.raw.hex() for r in exc.orphans]})
+        except (ControlTimeout, ControlEchoMismatch) as exc:
+            # SPEC.md §9 -- a device MUST respond to every request it applies
+            # and MUST echo the opcode and tag. Both are MUSTs regardless of
+            # the severity of the check that happened to provoke them:
+            # implementing GET_LINK_PARAMS is a SHOULD, answering it is not.
+            return finish(Status.FAIL, str(exc),
+                          getattr(exc, "evidence", {}))
         except TransportError:
             raise
         except Exception as exc:                    # noqa: BLE001

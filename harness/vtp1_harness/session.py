@@ -26,6 +26,24 @@ class ControlTimeout(Exception):
         self.orphans = list(orphans)
 
 
+class ControlEchoMismatch(Exception):
+    """A response carried the right tag and the wrong opcode.
+
+    SPEC.md §9 makes the device echo both. Correlation only needs the tag, so
+    nothing downstream would notice a mangled opcode -- every check reads
+    `status` and `detail` and none of them re-reads the echo. Raised here so the
+    one guard covers all ten opcodes rather than each check testing its own.
+    """
+
+    def __init__(self, sent, response):
+        super().__init__(
+            f"wrote {refdec.OPCODE_NAME.get(sent, hex(sent))} and the response "
+            f"carrying that tag echoed "
+            f"{refdec.OPCODE_NAME.get(response.opcode, hex(response.opcode))}. "
+            f"§9 requires the opcode to be echoed from the request")
+        self.evidence = {"sent": f"0x{sent:02x}", "response": response.raw.hex()}
+
+
 @dataclasses.dataclass
 class Response:
     raw: bytes
@@ -185,7 +203,10 @@ class ControlClient:
 
     async def request(self, opcode, params=b"", tag=None, timeout=None):
         tag, future = await self.send(opcode, params, tag)
-        return await self.await_response(opcode, tag, future, timeout)
+        response = await self.await_response(opcode, tag, future, timeout)
+        if response.opcode != opcode:
+            raise ControlEchoMismatch(opcode, response)
+        return response
 
     # -- typed helpers ----------------------------------------------------
 
