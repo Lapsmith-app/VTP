@@ -287,6 +287,27 @@ FAULTS = {
     "opcode_capability_late": "SPEC.md §9 — an unowned opcode answered bad_params, not unsupported_opcode",
     "rate_not_applied": "SPEC.md §9.8 — a rate answered ok and never applied",
     "info_reserved_nonzero": "SPEC.md §4 — a reserved byte of Info is not zero",
+    # Everything below is a defect a device could be shipping today and this
+    # harness would have said nothing about, because no seeded fault ever made
+    # the check that covers it fail. See harness/selftest.py: the reverse
+    # coverage gate is what turned each of these from an untested claim into a
+    # tested one.
+    "timesync_unsupported": "SPEC.md §9.7 — TIME_SYNC answered unsupported_opcode, an opcode with no owning capability",
+    "monitor_paged_declaration": "SPEC.md §13.3 — MONITOR_LIST answers the superseded paged declaration",
+    "monitor_accepts_bad_length": "SPEC.md §13.4 — a write whose length contradicts its count is accepted",
+    "monitor_rejects_unknown_slot": "SPEC.md §13.1 — a value for an undeclared slot is refused rather than ignored",
+    "params_ignored": "SPEC.md §9 — wrong-length parameters are parsed leniently and answered ok",
+    "unallocated_opcode_ok": "SPEC.md §9 — an opcode this version does not define is answered ok",
+    "info_truncated": "SPEC.md §4 — Info is shorter than the record it must be",
+    "info_major_wrong": "SPEC.md §4 — protocol_major disagrees with the service UUID's major",
+    "notify_bytes_below_min": "SPEC.md §4 — max_notify_bytes is below what the minimum ATT MTU carries",
+    "capacity_zero": "SPEC.md §4.1 — a declared role publishes a capacity of zero",
+    "advert_no_service_uuid": "SPEC.md §3.3 — the advertisement omits the VTP/1 service UUID",
+    "advert_caps_disagree": "SPEC.md §3.3 — advertised Service Data contradicts Info",
+    "link_mtu_disagrees": "SPEC.md §9.1 — the device reports an ATT MTU the host did not negotiate",
+    "clock_steps_backwards": "SPEC.md §8.1 — the device clock jumps backwards while connected",
+    "stream_truncated": "SPEC.md §5 — a notification is shorter than the record it carries",
+    "seq_survives_reconnect": "SPEC.md §8.2 — sequence numbers continue rather than restarting at 0",
 }
 
 
@@ -322,17 +343,24 @@ class LoopbackTransport(Transport):
         self._subs = {}
         self._connected = False
         self._stale_subs = {}
+        self._seen_a_connection = False
 
     # -- lifecycle --------------------------------------------------------
 
     async def scan(self, timeout):
         minor = refdec.SCHEMA["protocol"]["minor"]
         caps = self._capabilities() & 0xFF
+        if "advert_caps_disagree" in self.faults:
+            # SPEC.md §3.3 — the scan list is built from this byte, so a device
+            # whose advertisement and Info disagree is labelled wrong in the
+            # one place a user chooses between devices.
+            caps ^= 1 << refdec.CAPABILITIES["gps"]
         return [Advert(
             address="00:00:00:00:00:01",
             name="VTP",
             rssi=-40,
-            service_uuids=[refdec.SERVICE_UUID],
+            service_uuids=([] if "advert_no_service_uuid" in self.faults
+                           else [refdec.SERVICE_UUID]),
             service_data={refdec.SERVICE_UUID: bytes([minor, caps, 0x01])},
         )]
 
@@ -371,6 +399,13 @@ class LoopbackTransport(Transport):
             # device that keeps it hands the next client state it never
             # installed and cannot account for.
             self.device._subscriptions.update(self._stale_subs)
+        if "seq_survives_reconnect" in self.faults and self._seen_a_connection:
+            # SPEC.md §8.2 — a device whose counters are global rather than
+            # per-connection. A client then cannot tell a reconnection from a
+            # wrap, which is the whole reason this protocol needs no session
+            # identifier.
+            self.device._seq = {k: 100 for k in self.device._seq}
+        self._seen_a_connection = True
         if "stream_before_subscribe" in self.faults:
             # A device that streams what nobody asked for: one subscription
             # matching every identifier, installed by the device itself.
@@ -445,6 +480,30 @@ class LoopbackTransport(Transport):
                                  self._capabilities())
             if "info_reserved_nonzero" in self.faults:
                 info[refdec.offset("info", "reserved_20")] = 1
+            if "info_major_wrong" in self.faults:
+                info[refdec.offset("info", "protocol_major")] = \
+                    refdec.PROTOCOL_MAJOR + 1
+            if "notify_bytes_below_min" in self.faults:
+                struct.pack_into("<H", info,
+                                 refdec.offset("info", "max_notify_bytes"),
+                                 refdec.MIN_NOTIFY_BYTES - 1)
+            if "capacity_zero" in self.faults:
+                # SPEC.md §4.1 — a capacity of zero means none, not
+                # unspecified, so this is a device that declares a role and
+                # then publishes that it can do nothing in it. Which field is
+                # left to the schema's capability/capacity pairing rather than
+                # named here, so it follows a later minor that adds one.
+                declared = {name for name, b in refdec.CAPABILITIES.items()
+                            if self._capabilities() & (1 << b)}
+                for capability, fields in refdec.CAPACITY_FIELDS.items():
+                    if capability in declared:
+                        struct.pack_into(
+                            "<H", info, refdec.offset("info", fields[-1]), 0)
+                        break
+            if "info_truncated" in self.faults:
+                # Last, so it truncates whatever the faults above wrote rather
+                # than being overwritten by an offset past its own end.
+                return bytes(info[:-1])
             return bytes(info)
         for name, char_uuid in refdec.DIS_CHARS.items():
             if uuid == char_uuid:
@@ -460,8 +519,17 @@ class LoopbackTransport(Transport):
         raise DeviceRefused(f"not writable: {uuid}")
 
     def _monitor_write(self, data):
+        if "monitor_rejects_unknown_slot" in self.faults and \
+                self._carries_undeclared_slot(data):
+            # SPEC.md §13.1 — the client that is one minor ahead of the device.
+            # Refusing its write is the failure mode that clause exists to
+            # prevent: the device loses every value in the batch, not just the
+            # one it did not recognise.
+            raise DeviceRefused("unknown-slot")
         reason = self.device.handle_monitor_write(data)
         if reason == "duplicate-slot" and "monitor_accepts_duplicate_slot" in self.faults:
+            return
+        if reason == "length" and "monitor_accepts_bad_length" in self.faults:
             return
         if reason and reason.startswith("incomplete") and "monitor_accepts_partial" in self.faults:
             return
@@ -470,6 +538,15 @@ class LoopbackTransport(Transport):
             # device MUST reject any other. At the GATT layer, rejecting is an
             # error response and nothing else.
             raise DeviceRefused(reason)
+
+    def _carries_undeclared_slot(self, data):
+        """True when a well-formed write names a slot the device never asked for."""
+        hsize, vsize = refdec.size("monitor_header"), refdec.size("monitor_value")
+        if len(data) < hsize or (len(data) - hsize) % vsize:
+            return False
+        declared = {slot for slot, _ in self.device._monitor_channels}
+        return any(data[hsize + i * vsize] not in declared
+                   for i in range((len(data) - hsize) // vsize))
 
     async def _control_write(self, request):
         # SPEC.md §4.1 -- an inert Control rejects every write with an ATT error
@@ -484,6 +561,8 @@ class LoopbackTransport(Transport):
             return
         t_rx = self.device.now_us()
         self._rates_before = (self.device.gps_hz, self.device.imu_hz)
+        if "params_ignored" in self.faults:
+            request = self._parse_leniently(request)
 
         # SPEC.md §9 -- a client has at most ONE request outstanding, and a
         # device meeting one that pipelines anyway answers `busy` and MUST NOT
@@ -532,8 +611,49 @@ class LoopbackTransport(Transport):
         if cb is not None:
             cb(response, asyncio.get_running_loop().time())
 
+    def _parse_leniently(self, request):
+        """SPEC.md §9 — the device that takes what it was given and copes.
+
+        Trailing bytes dropped, a short block padded, and every request then
+        answered ok. It is the most natural way to write a parser and the
+        reason `control.malformed_params` exists: a client that sends the
+        wrong thing is told it sent the right thing, and finds out from the
+        behaviour rather than from the answer.
+        """
+        name = refdec.OPCODE_NAME.get(request[0])
+        wanted = refdec.OPCODE_PARAM_SIZE.get(name)
+        if wanted is None:
+            return request
+        params = request[2:2 + wanted].ljust(wanted, b"\x00")
+        return bytes(request[:2]) + params
+
     def _corrupt_response(self, response, request):
         opcode, status = response[0], response[2]
+        if "timesync_unsupported" in self.faults and \
+                opcode == refdec.OPCODE["TIME_SYNC"]:
+            # A device that never implemented §9.7 at all, which is what a
+            # client meets on firmware predating it. The detail goes with it:
+            # §9 allows one only on ok.
+            return bytearray(response[:2]
+                             + bytes([refdec.STATUS_VALUE["unsupported_opcode"]]))
+        if "monitor_paged_declaration" in self.faults and \
+                opcode == refdec.OPCODE["MONITOR_LIST"] and status == 0:
+            # The superseded shape: a six-byte page header where §13.3 now
+            # defines a two-byte declaration. Every byte after it is unchanged,
+            # which is exactly what makes it worth seeding -- the entries still
+            # decode, and only the length arithmetic gives it away.
+            entries = bytes(response[3 + refdec.size("monitor_declaration"):])
+            count = response[3]
+            return bytearray(response[:3]
+                             + struct.pack("<HHBB", count, 0, count, 0)
+                             + entries)
+        if "unallocated_opcode_ok" in self.faults and \
+                request[0] not in refdec.OPCODE_NAME and \
+                status == refdec.STATUS_VALUE["unsupported_opcode"]:
+            # §9 — an opcode this version does not define, answered ok. A
+            # client cannot then tell a device that implements a later minor's
+            # command from one that ignored it.
+            response[2] = refdec.STATUS_VALUE["ok"]
         if "no_tag_echo" in self.faults:
             response[1] = (response[1] + 1) & 0xFF
         if "detail_on_error" in self.faults and status != 0:
@@ -553,6 +673,14 @@ class LoopbackTransport(Transport):
             struct.pack_into("<H", response, base, validity)
             response[base + refdec.offset("link_params", "phy_tx")] = 1
             response[base + refdec.offset("link_params", "phy_rx")] = 0
+        if "link_mtu_disagrees" in self.faults and \
+                opcode == refdec.OPCODE["GET_LINK_PARAMS"] and status == 0:
+            # §9.1 — the one field in this record the harness can check against
+            # something independent. A device wrong about its own MTU is a
+            # device whose other link_params fields nobody can trust either.
+            base = 3 + refdec.offset("link_params", "att_mtu")
+            struct.pack_into("<H", response, base,
+                             struct.unpack_from("<H", response, base)[0] + 4)
         if "opcode_capability_late" in self.faults:
             response = self._corrupt_capability_refusal(response, request)
         if "rate_not_applied" in self.faults and status == 0 and opcode in (
@@ -624,12 +752,30 @@ class LoopbackTransport(Transport):
             else:
                 seq = (seq + 1) & 0xFFFF
             struct.pack_into("<H", payload, off, seq)
+        if "clock_steps_backwards" in self.faults and stream == "gps":
+            # SPEC.md §8.1 — a device disciplining to GNSS by stepping its
+            # clock rather than adjusting its frequency. Every notification is
+            # individually plausible; only the pair reveals it, and a client
+            # aligning CAN to GPS across the step gets a wrong answer rather
+            # than no answer.
+            self._steps = getattr(self, "_steps", 0) + 1
+            if self._steps % 2 == 0:
+                off = refdec.offset("gps_fix", "t_device")
+                t = struct.unpack_from("<Q", payload, off)[0]
+                struct.pack_into("<Q", payload, off, max(0, t - 500_000))
         if "clock_per_stream" in self.faults and stream == "imu":
             # One clock per sensor is the mistake §8.1 exists to forbid: each
             # stream looks perfectly self-consistent and no two agree.
             off = refdec.offset("imu_header", "t_base")
             t = struct.unpack_from("<Q", payload, off)[0]
             struct.pack_into("<Q", payload, off, t + 3_600_000_000)
+        if "stream_truncated" in self.faults and stream == "gps":
+            # SPEC.md §5 — a record is its size. Every other notification, so
+            # the run still has well-formed ones for everything downstream of
+            # the decode check to judge.
+            self._truncations = getattr(self, "_truncations", 0) + 1
+            if self._truncations % 2 == 0:
+                del payload[-1:]
         if "absent_field_nonzero" in self.faults and stream == "gps":
             # A value written into a field whose validity bit is clear: the
             # plausible wrong value SPEC.md §1.1 exists to prevent, and one no

@@ -8,6 +8,59 @@ conformance vector.
 
 ## [Unreleased]
 
+### The harness proved less than it claimed
+
+Reported from the field: a device answering `MONITOR_LIST` in the superseded
+paged format with no working `TIME_SYNC`, on a repository whose CI runs the
+harness against a peripheral on every push. The device turned out to be a
+process started before both changes — but the question it raised was the right
+one, and one of the two defects really would have passed.
+
+- **A missing `TIME_SYNC` was reported as a skip.** `control.time_sync`
+  answered `unsupported_opcode` with `Skip("TIME_SYNC is not implemented")`,
+  on a check declared `severity="MUST"`. §9 gives `TIME_SYNC` no owning
+  capability: it is about the clock, which every device has, and reaching it at
+  all means Control is live, so there is no device for which that answer is
+  correct. `GET_LINK_PARAMS` — the other unowned opcode, and only a SHOULD —
+  already treated the identical status as a failure. Now both do.
+
+- **`transport.FAULTS` decided what "detects every defect it claims" meant.**
+  The selftest asserted that every fault had a check named against it, which
+  holds the fault table to account and nothing else — and the fault table is
+  written by whoever wrote the checks. Nothing asserted the converse, so
+  **41 of the 66 MUST and SHOULD checks had never once been observed to fail**,
+  among them the one covering §13.3's declaration format.
+
+  The selftest now asserts both directions. A MUST or SHOULD must have a seeded
+  fault or an entry in `NOT_SEEDED` stating why none is possible; the two lists
+  must be exhaustive and disjoint. Sixteen new faults were written to satisfy
+  it, taking coverage from 25 to 41 — including `monitor_paged_declaration`,
+  the reported defect, and `timesync_unsupported`. The 26 remaining entries are
+  debts with reasons attached, not dispensations.
+
+- **A skip said nothing, and nothing was watching which ones.** A check that
+  quietly stops reaching what it tests — a renamed state key, a capability
+  probe that stopped matching, a refusal newly read as "not applicable" — looks
+  exactly like a passing run. The clean run is now held to an `EXPECTED_SKIPS`
+  baseline, and the reports name how many MUSTs went unverified beside the
+  counts rather than only in Not verified. `run.unverified_musts` joins
+  `conforms` in the JSON, because a machine has the same way of misreading a
+  run that verified nothing.
+
+- **An installed harness carries a snapshot, and nothing compared it.**
+  `pyproject.toml` force-includes the schema, the reference decoder and the
+  software peripheral into the wheel, so `--loopback` works from an install. A
+  wheel built from a stale tree therefore tests last week's peripheral against
+  last week's rulebook, agrees with itself completely, and reports green — the
+  one way every check here can be right and a developer running the published
+  tool still be told a superseded device conforms. `tools/check_package.py`
+  compares every bundled file against the source, reading the file list from
+  the force-include block rather than restating it; CI builds the wheel, runs
+  that, and then runs the packaged harness against the packaged peripheral.
+
+Both new gates have a CI step that breaks them on purpose and requires the
+failure, for the same reason the mutation sweep does.
+
 ### Review of PR #24, third pass
 
 - **CI was red and my own verification hid it.** `encode_selftest.c` still
