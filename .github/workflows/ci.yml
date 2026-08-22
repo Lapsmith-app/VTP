@@ -94,3 +94,31 @@ jobs:
       # run, none of which review had caught.
       - name: Conformance suite has no coverage holes
         run: python3 tools/mutate.py
+
+      # ...and the sweep itself must be capable of failing. Breaking a header
+      # made all 79 mutations fail to compile while tools/mutate.py reported
+      # success and exited 0, so this step passed green over a check that had
+      # silently become a no-op. Guard the guard.
+      - name: Mutation sweep fails when it proves nothing
+        run: |
+          cp reference/c/vtp1.h /tmp/vtp1.h.orig
+          printf '\n#error deliberately broken\n' >> reference/c/vtp1.h
+          if python3 tools/mutate.py --operator offset; then
+            echo "::error::mutate.py reported success with a build that cannot compile"
+            cp /tmp/vtp1.h.orig reference/c/vtp1.h
+            exit 1
+          fi
+          cp /tmp/vtp1.h.orig reference/c/vtp1.h
+          make -C reference/c
+          echo "Mutation sweep correctly refuses to pass on a broken build."
+
+      # A partial implementation runs the roles it declares (SPEC.md 12). If
+      # this stops filtering, a GPS-only decoder is handed CAN vectors and
+      # fails conformance for records it never claimed.
+      - name: Roles can be declared
+        run: |
+          python3 conformance/run.py --impl "reference/c/vtp1_cli" --roles gps
+          if python3 conformance/run.py --impl "reference/c/vtp1_cli" --roles nonsense; then
+            echo "::error::an unknown role name was accepted"
+            exit 1
+          fi

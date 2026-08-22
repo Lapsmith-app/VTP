@@ -19,6 +19,27 @@ python3 conformance/run.py --impl "./my-decoder"
 
 `--verbose` lists each case as it passes and notes reject-reason differences.
 
+### Declaring roles
+
+SPEC.md §12 asks an implementation to pass the vectors **for the roles it
+declares**. A decoder that implements GPS and nothing else says so:
+
+```sh
+python3 conformance/run.py --impl "./my-decoder" --roles gps
+```
+
+| Role | Records |
+| --- | --- |
+| `core` | `info`, `control_response`, `link_params` — always included, never optional |
+| `gps` | `gps_fix` |
+| `can` | `can_batch`, `can_list` |
+| `imu` | `imu_batch` |
+| `monitor` | `monitor_list`, `monitor_update` |
+
+Omit `--roles` to run everything, which is what a full implementation should
+do. The summary line names the scope either way, because a green run over one
+role must not be mistaken for conformance across all of them.
+
 ## The runner contract
 
 The runner is deliberately language-agnostic. Any implementation that speaks
