@@ -98,7 +98,8 @@ bitmasks:
       - {bit: 1, name: rtk_float}
       - {bit: 2, name: rtk_fixed}
       - {bit: 3, name: clock_disciplined, desc: "t_device was GNSS-disciplined at this sample"}
-    reserved_from: 4
+      - {bit: 4, name: solution_epoch, desc: "t_device is the epoch of the solution; when clear it is when the fix reached the device (SPEC.md 5.6)"}
+    reserved_from: 5
   capabilities:
     width: 4
     bits:
@@ -302,6 +303,14 @@ records:
       - {name: tag,    offset: 1, size: 1, type: u8, desc: "Echoed from the request; opaque to the device"}
       - {name: status, offset: 2, size: 1, type: u8, enum: status}
 
+  time_sync:
+    access: control
+    size: 16
+    desc: "The detail of a TIME_SYNC response. Two readings of one clock, so a client can bound its own error."
+    fields:
+      - {name: t_device_rx, offset: 0, size: 8, type: u64, units: µs, desc: "Device clock when the request arrived"}
+      - {name: t_device_tx, offset: 8, size: 8, type: u64, units: µs, desc: "Device clock when this answer was prepared; MUST NOT be earlier than t_device_rx"}
+
   link_params:
     access: control
     size: 16
@@ -329,6 +338,6 @@ control:
     - {value: 0x05, name: CAN_LIST,           params: "start:u16",                    response: "can_list_page record",  desc: "One page of the table, starting at index `start`"}
     - {value: 0x10, name: GPS_SET_RATE,       params: "hz:u16",                       response: ""}
     - {value: 0x20, name: IMU_SET_RATE,       params: "hz:u16",                       response: ""}
-    - {value: 0x30, name: TIME_SYNC,          params: "host_t_utc_ms:i64",            response: "t_device:u64",          desc: "The device clock at the instant the write was received"}
+    - {value: 0x30, name: TIME_SYNC,          params: "host_t_utc_ms:i64",            response: "time_sync record",      desc: "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"}
     - {value: 0x31, name: GET_LINK_PARAMS,    params: "",                             response: "link_params record"}
     - {value: 0x40, name: MONITOR_LIST,       params: "start:u16",                    response: "monitor_page record",   desc: "One page of the channels this device asks the client to supply"}

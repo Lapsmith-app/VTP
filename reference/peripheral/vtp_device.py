@@ -41,6 +41,8 @@ V_S_ACC, V_P_DOP, V_NUM_SV = 1 << 9, 1 << 10, 1 << 11
 
 IMU_ACCEL, IMU_GYRO = 0x01, 0x02
 FIX_3D = 3
+# SPEC.md §5.6 — fix_flags bit 4.
+FIX_FLAG_SOLUTION_EPOCH = 1 << 4
 
 # Control opcodes (SPEC.md §9).
 CAN_RESET, CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK = 0x01, 0x02, 0x03
@@ -409,7 +411,10 @@ class VtpDevice:
             "p_dop": 130,
             "fix_type": FIX_3D,
             "num_sv": 14,
-            "fix_flags": 0,
+            # SPEC.md §5.6 — this device computes its fix from its own model
+            # at a known instant, so t_device IS the solution epoch. Real
+            # firmware sets this only when the receiver gives it the epoch.
+            "fix_flags": FIX_FLAG_SOLUTION_EPOCH,
             "ext_count": 0,
         })
 
@@ -614,9 +619,21 @@ class VtpDevice:
         self.mtu = att_mtu
         self.set_link_params(att_mtu=att_mtu)
 
-    def handle_control(self, request):
+    def handle_control(self, request, t_rx=None):
         """SPEC.md §9. `[opcode][tag][params]` in, `[opcode][tag][status]
-        [detail]` out. A device MUST respond to every request."""
+        [detail]` out. A device MUST respond to every request.
+
+        `t_rx` is the device clock at the instant the write ARRIVED, which only
+        the transport can observe. SPEC.md §9.7 requires it be taken then and
+        not when the reply is composed: the gap between the two is exactly the
+        processing time TIME_SYNC exists to expose, so a device reading its
+        clock once and reporting it as both has quietly reverted to the
+        single-timestamp form while appearing to implement the other. Defaults
+        to now for callers with no better answer -- which makes the reported
+        processing time an understatement, never an overstatement.
+        """
+        if t_rx is None:
+            t_rx = self.now_us()
         if len(request) < 2:
             return None                      # not addressable: no tag to echo
         opcode, tag, params = request[0], request[1], request[2:]
@@ -711,8 +728,12 @@ class VtpDevice:
         if opcode == TIME_SYNC:
             if len(params) != 8:
                 return reply(ST_BAD_PARAMS)
-            # SPEC.md §9: "Response echoes the device t_device at receipt".
-            return reply(ST_OK, struct.pack("<Q", self.now_us()))
+            # SPEC.md §9.7 — two readings: when it arrived, and now. The
+            # client subtracts the difference from its own round trip and is
+            # left with the flight time rather than the flight time plus
+            # however long this device took to think about it.
+            return reply(ST_OK, enc.encode_time_sync({
+                "t_device_rx": t_rx, "t_device_tx": self.now_us()}))
 
         if opcode == GET_LINK_PARAMS:
             return reply(ST_OK, self._link_params())

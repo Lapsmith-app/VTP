@@ -327,3 +327,12 @@ int vtp_encode_control_response(const vtp_control_response_t *r,
     }
     return (int)needed;
 }
+
+int vtp_encode_time_sync(const vtp_time_sync_t *t, uint8_t *out, size_t cap) {
+    /* An encoder must not emit what its own decoder rejects. SPEC.md §9.7. */
+    if (t->t_device_tx < t->t_device_rx) return -1;
+    if (cap < VTP_TIME_SYNC_SIZE) return -1;
+    wr64(out + VTP_TIME_SYNC_OFF_T_DEVICE_RX, t->t_device_rx);
+    wr64(out + VTP_TIME_SYNC_OFF_T_DEVICE_TX, t->t_device_tx);
+    return VTP_TIME_SYNC_SIZE;
+}

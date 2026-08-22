@@ -399,7 +399,8 @@ measurement of zero. No field value anywhere in VTP/1 signals absence.
 | 1 | `rtk_float` | — |
 | 2 | `rtk_fixed` | — |
 | 3 | `clock_disciplined` | t_device was GNSS-disciplined at this sample |
-| 4+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+| 4 | `solution_epoch` | t_device is the epoch of the solution; when clear it is when the fix reached the device (SPEC.md 5.6) |
+| 5+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:fix_flags -->
 
 ### 5.4 Reference frames and derived quantities
@@ -440,6 +441,40 @@ from the expected value.
 The notification length MUST equal the base record plus exactly the bytes
 accounted for by `ext_count` extension records. Any other length MUST be
 rejected.
+
+---
+
+### 5.6 When a fix is timestamped
+
+`t_device` MUST be the device clock at the **epoch of the solution** — the
+instant the reported position was true — and not the instant the fix reached
+the device.
+
+The two are far apart. A GNSS receiver computes a solution for a specific
+instant and delivers it over a serial link some tens to some hundreds of
+milliseconds later, depending on the receiver, its output rate and how busy the
+link is. A device that stamps delivery therefore reports a position that was
+true at one time with a timestamp naming another, and every GPS sample is late
+against CAN and IMU by that latency. Cross-channel alignment is what §8.1's
+single shared clock exists to provide, and a systematic offset on one of the
+three channels removes it while leaving every number looking entirely
+plausible.
+
+A device that **cannot** determine the solution epoch MUST clear `fix_flags`
+bit 4 (`solution_epoch`) and stamp the best time it has, which is when the fix
+arrived. A device that can MUST set it. Whether the receiver exposes the epoch
+— through a timing message, or a PPS edge the device can latch — is a property
+of the hardware, not of this protocol, and a specification that required what
+some hardware cannot do would be met by devices setting a timestamp they cannot
+justify.
+
+The flag exists so a client can tell which it has. §1.1 applies exactly as it
+does to a validity bit: the honest answer to "when was this true?" is either a
+measured epoch or an admission that the device does not know, and never a
+delivery time presented as a measurement. A client aligning GPS against CAN
+below the tens of milliseconds SHOULD check this bit, and SHOULD NOT assume the
+offset is constant when it is clear — receiver latency varies with the number
+of satellites and the solution type.
 
 ---
 
@@ -710,6 +745,22 @@ Total: **12 bytes**. All fields little-endian.
 
 Samples are evenly spaced: sample *i* is at `t_base + i × period` microseconds.
 
+`t_base` MUST be the acquisition time of sample 0 — the instant the sensor
+took that reading — and not the instant the device read it out.
+
+Samples are commonly drained from a sensor's FIFO in bursts, so the read
+happens well after the earliest sample in the burst was taken: at 833 Hz a
+sixteen-deep FIFO is nearly twenty milliseconds. A device stamping the drain
+reports the whole batch late by the depth of its own buffer, and the error
+changes with the buffer's occupancy, so it is not even a constant a client
+could calibrate away.
+
+Unlike a GNSS solution epoch (§5.6) this needs no flag and admits no exception.
+The device sets the sampling schedule itself, so it knows the interval and how
+many samples it drained; sample 0's time is the drain time less the samples
+behind it. A device that cannot work that out is not measuring what it claims
+to measure.
+
 A CAN record carries its own `dt` (§6.1) because bus frames arrive when the bus
 decides. IMU samples do not: the device reads its sensor on a schedule it sets,
 so one interval describes the whole batch and a per-sample offset would carry
@@ -886,7 +937,7 @@ an opcode it does not implement as opaque rather than malformed.
 | `0x05` | `CAN_LIST` | `start:u16` | `can_list_page record` | One page of the table, starting at index `start` |
 | `0x10` | `GPS_SET_RATE` | `hz:u16` | — | — |
 | `0x20` | `IMU_SET_RATE` | `hz:u16` | — | — |
-| `0x30` | `TIME_SYNC` | `host_t_utc_ms:i64` | `t_device:u64` | The device clock at the instant the write was received |
+| `0x30` | `TIME_SYNC` | `host_t_utc_ms:i64` | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
 | `0x31` | `GET_LINK_PARAMS` | — | `link_params record` | — |
 | `0x40` | `MONITOR_LIST` | `start:u16` | `monitor_page record` | One page of the channels this device asks the client to supply |
 <!-- END GENERATED: control -->
@@ -1163,6 +1214,63 @@ the same property in weaker form.
 
 ---
 
+
+### 9.7 TIME_SYNC
+
+The response carries two readings of the device clock:
+
+<!-- BEGIN GENERATED: time_sync -->
+*The detail of a TIME_SYNC response. Two readings of one clock, so a client can bound its own error.*
+
+Total: **16 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 8 | `u64` | `t_device_rx` | `µs`; Device clock when the request arrived |
+| 8 | 8 | `u64` | `t_device_tx` | `µs`; Device clock when this answer was prepared; MUST NOT be earlier than t_device_rx |
+<!-- END GENERATED: time_sync -->
+
+`t_device_rx` is the clock when the write arrived; `t_device_tx` is the clock
+when the device finished preparing this answer. `t_device_tx` MUST NOT be
+earlier than `t_device_rx`.
+
+With the two the client already has — *t₁* when it wrote and *t₄* when the
+response arrived, both on its own clock — it can compute both the offset
+between the clocks and its own uncertainty about that offset:
+
+    offset ≈ ((t_device_rx − t₁) + (t_device_tx − t₄)) ÷ 2
+    delay  ≈ (t₄ − t₁) − (t_device_tx − t_device_rx)
+
+This is the exchange NTP uses, for the reason NTP uses it. **One timestamp
+cannot bound its own error.** A client that knows only when it asked, when it
+heard back, and one device reading has no way to separate the outbound delay
+from the inbound one, so its estimate of the device clock is uncertain by the
+whole round trip — and over a link with a 30 ms connection interval that is
+tens of milliseconds, in an exchange whose purpose is to align a microsecond
+clock. Reporting the device's own processing time is what lets the client take
+it out of the arithmetic, and `delay` is a number the client can act on rather
+than a bound it has to assume.
+
+A client SHOULD issue `TIME_SYNC` several times and keep the sample with the
+smallest `delay`. The sample that spent least time in flight is the one whose
+outbound and inbound halves have least room to differ, so it is the one whose
+offset is most nearly right. A single sample gives a client no way to tell a
+good exchange from one that happened to sit behind a full transmit queue.
+
+**What this does not remove.** The response travels by indication, so it is
+queued and goes out at the next connection event; `t_device_tx` is when the
+device prepared the answer, not when the radio sent it. The remaining
+uncertainty is therefore the asymmetry between the two queuing delays, which
+neither end can observe. The exchange bounds what it can measure and this
+paragraph states what it cannot, rather than leaving a client to discover that
+`delay` is a floor and not a total.
+
+A device MUST take `t_device_rx` when the write arrives, not when it begins
+composing the reply. The gap between those is exactly the processing time this
+exchange exists to expose, and a device that reads its clock once and reports
+it as both has silently reported the single-timestamp form while appearing to
+implement this one.
+
 ---
 
 ## 10. Security
@@ -1285,6 +1393,7 @@ all.
 | `can_list_page` | No — closed for major version 1 | One per CAN_LIST page |
 | `can_subscription` | No — closed for major version 1 | One per table entry |
 | `control_response` | No — closed for major version 1 | — |
+| `time_sync` | No — closed for major version 1 | — |
 | `link_params` | No — closed for major version 1 | On request |
 <!-- END GENERATED: extensibility -->
 

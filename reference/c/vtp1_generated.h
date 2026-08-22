@@ -133,6 +133,11 @@
 #define VTP_CONTROL_RESPONSE_OFF_TAG 1
 #define VTP_CONTROL_RESPONSE_OFF_STATUS 2
 
+/* The detail of a TIME_SYNC response. Two readings of one clock, so a client can bound its own error. */
+#define VTP_TIME_SYNC_SIZE 16
+#define VTP_TIME_SYNC_OFF_T_DEVICE_RX 0
+#define VTP_TIME_SYNC_OFF_T_DEVICE_TX 8
+
 /* The device's view of the negotiated link. Reported, never negotiated here. */
 #define VTP_LINK_PARAMS_SIZE 16
 #define VTP_LINK_PARAMS_OFF_VALIDITY 0
@@ -207,6 +212,7 @@ typedef enum {
 #define VTP_FIX_FLAGS_RTK_FLOAT (1u << 1)
 #define VTP_FIX_FLAGS_RTK_FIXED (1u << 2)
 #define VTP_FIX_FLAGS_CLOCK_DISCIPLINED (1u << 3)
+#define VTP_FIX_FLAGS_SOLUTION_EPOCH (1u << 4)
 
 #define VTP_CAPABILITIES_GPS (1u << 0)
 #define VTP_CAPABILITIES_CAN (1u << 1)

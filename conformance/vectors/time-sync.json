@@ -1,0 +1,60 @@
+{
+  "protocol": "VTP/1",
+  "generated_by": "tools/generate.py",
+  "cases": [
+    {
+      "name": "typical-processing",
+      "desc": "A request answered 1.2 ms after it arrived. SPEC.md 9.7 -- the gap is the device's own processing time, which is the term a client takes out of the round trip to bound its error.",
+      "record": "time_sync",
+      "hex": "00286bee00000000b02c6bee00000000",
+      "expect": {
+        "t_device_rx": 4000000000,
+        "t_device_tx": 4000001200,
+        "processing_us": 1200
+      }
+    },
+    {
+      "name": "answered-immediately",
+      "desc": "Both readings equal: the device answered within one tick of its own clock. Legal, and NOT the same as a device reporting one timestamp twice because it never took the second.",
+      "record": "time_sync",
+      "hex": "e070720000000000e070720000000000",
+      "expect": {
+        "t_device_rx": 7500000,
+        "t_device_tx": 7500000,
+        "processing_us": 0
+      }
+    },
+    {
+      "name": "clock-near-wrap",
+      "desc": "Both readings within a microsecond of the u64 ceiling. SPEC.md 8.1 -- the clock will not reach this in half a million years, but a decoder that sign-extends or overflows here is wrong now.",
+      "record": "time_sync",
+      "hex": "feffffffffffffffffffffffffffffff",
+      "expect": {
+        "t_device_rx": 18446744073709551614,
+        "t_device_tx": 18446744073709551615,
+        "processing_us": 1
+      }
+    },
+    {
+      "name": "tx-before-rx",
+      "desc": "The device reports finishing its answer before the request arrived. MUST be rejected: a client computing delay from it gets a negative round trip, and halved into an offset that is a confidently wrong clock rather than an obviously broken one.",
+      "record": "time_sync",
+      "hex": "40548900000000005850890000000000",
+      "must_reject": "tx-before-rx"
+    },
+    {
+      "name": "short-payload",
+      "desc": "Eight bytes: one timestamp where two are required. MUST be rejected rather than read as a device that answered instantly.",
+      "record": "time_sync",
+      "hex": "0100000000000000",
+      "must_reject": "length"
+    },
+    {
+      "name": "long-payload",
+      "desc": "Seventeen bytes. time_sync is fixed-size with no extension mechanism, so trailing bytes MUST be rejected.",
+      "record": "time_sync",
+      "hex": "0100000000000000020000000000000000",
+      "must_reject": "length"
+    }
+  ]
+}

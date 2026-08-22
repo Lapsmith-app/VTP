@@ -244,6 +244,15 @@ def encode_control_response(resp):
     return _pack("control_response", resp) + detail
 
 
+def encode_time_sync(ts):
+    """SPEC.md §9.7. An encoder must not emit what its own decoder rejects."""
+    if ts.get("t_device_tx", 0) < ts.get("t_device_rx", 0):
+        raise EncodeError(
+            "time_sync: t_device_tx precedes t_device_rx, so the device "
+            "answered before it was asked")
+    return _pack("time_sync", ts)
+
+
 def encode_link_params(link_params):
     """SPEC.md §9.1. The detail of a GET_LINK_PARAMS response."""
     return _pack("link_params", _gate("link_params", link_params))
@@ -261,4 +270,5 @@ ENCODERS = {
     "monitor_list": lambda d: encode_monitor_list(d["page"], d["entries"]),
     "monitor_update": lambda d: encode_monitor_update(d["header"], d["values"]),
     "control_response": encode_control_response,
+    "time_sync": encode_time_sync,
 }

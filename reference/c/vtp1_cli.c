@@ -327,6 +327,15 @@ int main(void) {
             printf("\"");
             finish(enc, vtp_encode_control_response(&r, enc, sizeof enc));
 
+        } else if (!strcmp(record, "time_sync")) {
+            vtp_time_sync_t t;
+            if (vtp_decode_time_sync(buf, len, &t, &err)) { reject(err); continue; }
+            printf("{\"ok\":true,\"t_device_rx\":%" PRIu64 ","
+                   "\"t_device_tx\":%" PRIu64 ",\"processing_us\":%" PRIu64,
+                   t.t_device_rx, t.t_device_tx,
+                   t.t_device_tx - t.t_device_rx);
+            finish(enc, vtp_encode_time_sync(&t, enc, sizeof enc));
+
         } else {
             reject("unknown-record");
         }

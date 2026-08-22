@@ -274,6 +274,27 @@ def decode_control_response(buf):
     return resp
 
 
+def decode_time_sync(buf):
+    """SPEC.md §9.7 — the detail of a TIME_SYNC response.
+
+    Two readings of one clock. `t_device_tx` before `t_device_rx` would mean
+    the device finished answering before the question arrived, so it is
+    rejected rather than reported: a client that computed a delay from it
+    would get a negative round trip and, halved into an offset, a confidently
+    wrong clock.
+    """
+    if len(buf) != _size("time_sync"):
+        raise Reject("length")
+    ts = _unpack("time_sync", buf)
+    if ts["t_device_tx"] < ts["t_device_rx"]:
+        raise Reject("tx-before-rx")
+    # Reported so a client need not recompute it, and so the corpus can check
+    # it: the device's own processing time is the term §9.7 takes out of the
+    # round trip.
+    ts["processing_us"] = ts["t_device_tx"] - ts["t_device_rx"]
+    return ts
+
+
 def decode_link_params(buf):
     """SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response.
 
@@ -309,6 +330,7 @@ DECODERS = {
     "monitor_list": decode_monitor_list,
     "monitor_update": decode_monitor_update,
     "control_response": decode_control_response,
+    "time_sync": decode_time_sync,
 }
 
 
