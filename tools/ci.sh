@@ -9,6 +9,9 @@
 #
 #   tools/ci.sh          run everything
 #   tools/ci.sh --quick  skip the mutation sweep, which dominates the runtime
+#
+# Nothing here needs a Bluetooth adapter, including the harness step: its
+# loopback transport drives the software peripheral in-process.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -50,6 +53,9 @@ python3 reference/peripheral/selftest.py
 
 step "transport state machine conforms"
 python3 reference/peripheral/transport_selftest.py
+
+step "conformance harness conforms, and detects every defect it claims"
+PYTHONPATH=harness python3 harness/selftest.py
 
 step "no existing vector changed meaning"
 python3 tools/check_baseline.py --check

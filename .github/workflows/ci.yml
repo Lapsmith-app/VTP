@@ -132,6 +132,34 @@ jobs:
       - name: Transport state machine conforms
         run: python3 reference/peripheral/transport_selftest.py
 
+      # The harness is the only thing in this repository meant to run somewhere
+      # else -- on a developer's own machine, against firmware nobody here has
+      # seen. It therefore has to be trustworthy in both directions, and this
+      # checks both: it must report the software peripheral clean, because a
+      # tool that fails a conforming device sends somebody rewriting working
+      # firmware, and every defect it claims to catch must actually break it.
+      #
+      # Deliberately run with no Bluetooth library installed. The loopback
+      # transport imports nothing platform-specific, so this also proves the
+      # checks themselves never reached for the radio.
+      - name: Conformance harness conforms, and detects every defect it claims
+        run: PYTHONPATH=harness python3 harness/selftest.py
+
+      # ...and the harness's own guard must be capable of failing, for the same
+      # reason the mutation sweep's is. A fault defined with no check named
+      # against it is a claim nobody is holding to account.
+      - name: Harness selftest fails when a defect goes uncaught
+        run: |
+          cp harness/vtp1_harness/checks/streams.py /tmp/streams.py.orig
+          perl -pi -e 's/if seq != 0:/if False:/' harness/vtp1_harness/checks/streams.py
+          if PYTHONPATH=harness python3 harness/selftest.py; then
+            echo "::error::the selftest passed with seq.first_is_zero disabled"
+            cp /tmp/streams.py.orig harness/vtp1_harness/checks/streams.py
+            exit 1
+          fi
+          cp /tmp/streams.py.orig harness/vtp1_harness/checks/streams.py
+          echo "Harness selftest correctly refuses to pass on a disabled check."
+
       # The other direction. run.py only ever round-trips payloads that
       # already decoded, so it asks whether an encoder reproduces something
       # valid and never whether it declines something invalid. That gap let an
