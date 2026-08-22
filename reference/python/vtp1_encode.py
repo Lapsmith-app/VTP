@@ -97,6 +97,22 @@ def _payload_bytes(record):
     return data
 
 
+def _check_gps_ranges(fix):
+    """SPEC.md §5.4. Only where the validity bit claims the field means
+    something -- a cleared bit is written as zero, which is always in range."""
+    bit = {b["name"]: b["bit"] for b in SCHEMA["bitmasks"]["gps_validity"]["bits"]}
+    validity = fix.get("validity", 0)
+    if validity & (1 << bit["position"]):
+        if abs(fix.get("lat", 0)) > 900_000_000:
+            raise EncodeError(f"gps_fix.lat {fix['lat']} is outside ±90°")
+        if abs(fix.get("lon", 0)) > 1_800_000_000:
+            raise EncodeError(f"gps_fix.lon {fix['lon']} is outside ±180°")
+    if validity & (1 << bit["head_mot"]):
+        if not 0 <= fix.get("head_mot", 0) < 36_000_000:
+            raise EncodeError(
+                f"gps_fix.head_mot {fix['head_mot']} is outside 0°..360°")
+
+
 def encode_gps_fix(fix, ext=b""):
     """SPEC.md §5. `ext` is appended verbatim and MUST match `ext_count`.
 
@@ -109,6 +125,7 @@ def encode_gps_fix(fix, ext=b""):
     `[type][len][value]` and the only way to know that `ext_count` is right is
     to follow them to the end.
     """
+    _check_gps_ranges(fix)
     ext = bytes(ext)
     declared = fix.get("ext_count", 0)
     off, seen = 0, 0
@@ -177,6 +194,11 @@ def encode_imu_batch(header, samples):
         raise EncodeError(
             f"imu_header.count is {header.get('count', 0)} but "
             f"{len(samples)} sample(s) were supplied")
+    # An encoder must not emit what its own decoder rejects. SPEC.md §7.
+    if not header.get("period"):
+        raise EncodeError(
+            "imu_header.period is zero, which says every sample was taken at "
+            "the same instant")
     flags = header.get("flags", 0)
     accel = bool(flags & IMU_HAS_ACCEL)
     gyro = bool(flags & IMU_HAS_GYRO)

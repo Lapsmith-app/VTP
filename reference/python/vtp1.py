@@ -68,6 +68,22 @@ def decode_gps_fix(buf):
     # this decoder by design (SPEC.md §5.5) but it is not free to discard them.
     fix["ext_hex"] = buf[_size("gps_fix"):].hex()
 
+    bit_of_valid = {b["name"]: b["bit"]
+                    for b in SCHEMA["bitmasks"]["gps_validity"]["bits"]}
+    # SPEC.md §5.4 — a coordinate outside the earth is a corrupted field, and
+    # every other field in the record came from the same bytes. Rejected rather
+    # than clamped: clamping 91° to 90° puts the vehicle at the pole and lets
+    # the client draw it there. Checked only where the validity bit claims the
+    # field means something.
+    if fix["validity"] & (1 << bit_of_valid["position"]):
+        if abs(fix["lat"]) > 900_000_000:
+            raise Reject("lat-out-of-range")
+        if abs(fix["lon"]) > 1_800_000_000:
+            raise Reject("lon-out-of-range")
+    if fix["validity"] & (1 << bit_of_valid["head_mot"]):
+        if not 0 <= fix["head_mot"] < 36_000_000:
+            raise Reject("head-out-of-range")
+
     known = {m["value"] for m in SCHEMA["enums"]["fix_type"]["members"]}
     fix["fix_type_known"] = fix["fix_type"] in known
 
@@ -143,6 +159,10 @@ def decode_can_batch(buf):
     return {"header": hdr, "records": records}
 
 
+# SPEC.md §7.2 — imu_header.flags bit 2.
+IMU_SATURATED = 0x04
+
+
 def decode_imu_batch(buf):
     hsz, ssz = _size("imu_header"), _size("imu_sample")
     if len(buf) < hsz:
@@ -150,6 +170,12 @@ def decode_imu_batch(buf):
     hdr = _unpack("imu_header", buf)
     if len(buf) != hsz + hdr["count"] * ssz:
         raise Reject("length")
+    # SPEC.md §7 — zero says every sample was taken at one instant, which
+    # describes no measurement, and a client recovering a rate divides by it.
+    if hdr["period"] == 0:
+        raise Reject("period-zero")
+    # SPEC.md §7.2 — "at least this much" is not "this much".
+    hdr["saturated"] = bool(hdr["flags"] & IMU_SATURATED)
 
     # SPEC.md §7 — a sensor group whose presence flag is clear is ABSENT, not a
     # measurement of zero. Derived from the schema's `presence` declaration, so

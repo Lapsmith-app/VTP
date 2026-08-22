@@ -295,6 +295,42 @@ def main():
         check("info" not in protected,
               f"the {name} posture encrypts Info; §10.2 says to leave it "
               f"readable so an unpaired client can still identify the device")
+    # ---- Semantic constraints (SPEC.md §5.4, §7.1, §7.2) -----------------
+    # Every fix this device emits must be somewhere on earth, and every batch
+    # must carry a period a client can divide by.
+    for f in gps:
+        check(abs(f["lat"]) <= 900_000_000 and abs(f["lon"]) <= 1_800_000_000,
+              f"gps: lat/lon outside the earth ({f['lat']}, {f['lon']})")
+        if "head_mot" not in f["absent"]:
+            check(0 <= f["head_mot"] < 36_000_000,
+                  f"gps: head_mot {f['head_mot']} outside 0..360 degrees")
+    for b in imu:
+        check(b["header"]["period"] > 0,
+              "imu: a period of zero says every sample was taken at one "
+              "instant, which describes no measurement")
+        check(b["header"]["saturated"] is False,
+              "imu: this synthetic vehicle stays well inside the sensor range, "
+              "so nothing should be flagged saturated")
+
+    # SPEC.md §7.1 — specific force, not acceleration. A level car at rest
+    # reads +1 g on the axis that points UP. Both signs are in use in the
+    # wild, and a client that assumes the wrong one sees a car braking when it
+    # is accelerating, with every magnitude still looking right.
+    level = [s for b in imu for s in b["samples"]]
+    check(level and all(s["az"] > 0 for s in level),
+          "imu: a level vehicle MUST report a POSITIVE az under the specific-"
+          "force convention; a negative one is the gravity-vector convention "
+          "and means every client reading this device has its signs inverted")
+
+    # SPEC.md §7.2 — the flag is computed, not hardcoded clear.
+    sat = dev.VtpDevice(now_us=lambda: 0, gps_hz=0, imu_hz=100)
+    sat._imu_pending = [dict(ax=32767, ay=0, az=1000, gx=0, gy=0, gz=0)]
+    check(sat._imu_saturation() == dev.IMU_SATURATED,
+          "a sample at the i16 rail MUST raise the saturation flag")
+    sat._imu_pending = [dict(ax=1, ay=2, az=1000, gx=0, gy=0, gz=0)]
+    check(sat._imu_saturation() == 0,
+          "an ordinary sample MUST NOT raise the saturation flag")
+
     # ---- Monitor values go stale, and say so ----------------------------
     # SPEC.md §13.5 — silence is the ONLY symptom a device sees when a client
     # crashes, is backgrounded or wedges: the link stays up and the writes

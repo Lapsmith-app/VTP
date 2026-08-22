@@ -556,6 +556,54 @@ def vectors(schema):
                                                 "no ext_count accounts for MUST be rejected.",
          "record": "gps_fix", "hex": (encode(schema, "gps_fix", nominal) + b"\x00").hex(),
          "must_reject": "length"},
+        case(schema, "gps_fix", "coordinate-extremes",
+             dict(nominal, seq=30, lat=900_000_000, lon=-1_800_000_000,
+                  head_mot=0),
+             "The poles and the antimeridian: lat +90, lon -180, heading due "
+             "north. All three are the last legal value on their side and MUST "
+             "decode."),
+        case(schema, "gps_fix", "heading-just-below-360",
+             dict(nominal, seq=31, head_mot=35_999_999),
+             "SPEC.md 5.4 -- heading is 0 to 360 exclusive of 360, so this is "
+             "the largest legal value and 36000000 is not."),
+        {"name": "latitude-beyond-the-pole",
+         "desc": "A latitude of 91 degrees with the position bit set. MUST be "
+                 "rejected, never clamped: 91 degrees is not a place a clamp "
+                 "could move closer to, it is a corrupted field -- and every "
+                 "other field in the record came from the same bytes. Clamping "
+                 "to 90 puts the vehicle at the pole and lets the client draw "
+                 "it there. SPEC.md 5.4.",
+         "record": "gps_fix",
+         "hex": encode(schema, "gps_fix",
+                       dict(nominal, seq=32, lat=910_000_000)).hex(),
+         "must_reject": "lat-out-of-range"},
+        {"name": "longitude-beyond-the-antimeridian",
+         "desc": "A longitude of 181 degrees. MUST be rejected. SPEC.md 5.4.",
+         "record": "gps_fix",
+         "hex": encode(schema, "gps_fix",
+                       dict(nominal, seq=33, lon=1_810_000_000)).hex(),
+         "must_reject": "lon-out-of-range"},
+        {"name": "heading-at-360",
+         "desc": "A heading of exactly 360 degrees. MUST be rejected: 360 and 0 "
+                 "are the same bearing, and a range that admits both has two "
+                 "encodings for one direction. SPEC.md 5.4.",
+         "record": "gps_fix",
+         "hex": encode(schema, "gps_fix",
+                       dict(nominal, seq=34, head_mot=36_000_000)).hex(),
+         "must_reject": "head-out-of-range"},
+        case(schema, "gps_fix", "out-of-range-but-not-claimed",
+             dict(nominal, seq=35, validity=V["t_utc"], lat=910_000_000),
+             "A latitude of 91 degrees with the position bit CLEAR. The range "
+             "rule of SPEC.md 5.4 applies only where a validity bit claims the "
+             "field means something, so this MUST decode and MUST report "
+             "position absent. A receiver that rejected it would be refusing a "
+             "fix over a field it has already been told to ignore, and SPEC.md "
+             "5.1 puts the duty to write zero on the device rather than the "
+             "duty to police it on the receiver.",
+             canonical=False,
+             note="Not byte-canonical, so exempt from the round-trip: a "
+                  "conforming encoder normalises the ungated latitude to zero, "
+                  "which is also why this vector cannot be built through one."),
         {"name": "ext-count-exceeds-payload",
          "desc": "A well-formed 74-byte fix declaring one extension that is not "
                  "there. The record MUST be rejected: a decoder that trusts "
@@ -801,8 +849,13 @@ def vectors(schema):
             e["absent"] = absent
             exp.append(e)
         c = {"name": name, "desc": desc, "record": "imu_batch", "hex": raw.hex(),
-             "expect": {"header": {f["name"]: hdr.get(f["name"], 0)
-                                   for f in schema["records"]["imu_header"]["fields"]},
+             "expect": {"header": dict(
+                            {f["name"]: hdr.get(f["name"], 0)
+                             for f in schema["records"]["imu_header"]["fields"]},
+                            # SPEC.md 7.2 -- reported explicitly so the corpus
+                            # checks both references agree, rather than each
+                            # deriving it privately from flags.
+                            saturated=bool(hdr.get("flags", 0) & 0x04)),
                         "samples": exp}}
         if not canonical:
             c["canonical"] = False
@@ -860,6 +913,30 @@ def vectors(schema):
                        dict(seq=7, dropped=0, t_base=1, period=5000,
                             count=0, flags=0b011))[:-1].hex(),
          "must_reject": "length"},
+        imu_batch("saturated-batch",
+                  "A batch flagged saturated (flags bit 2) with a sample at the "
+                  "i16 rail. SPEC.md 7.2 -- the reading is 'at least this much', "
+                  "not 'this much', so a client MUST treat it as a lower bound "
+                  "and MUST NOT integrate it. Note the presence bits stay SET: "
+                  "the sensor is fitted and did report, which is a different "
+                  "state from absent.",
+                  dict(seq=21, dropped=0, t_base=5_000_000, period=1_200,
+                       count=1, flags=0b111),
+                  [dict(ax=32767, ay=-32768, az=1000,
+                        gx=32767, gy=0, gz=-32768)]),
+        {"name": "period-zero",
+         "desc": "A period of zero says every sample in the batch was taken at "
+                 "the same instant, which describes no measurement -- and a "
+                 "client recovering a rate from it divides by zero. SPEC.md 7 "
+                 "forbids emitting it; this vector makes a decoder reject it, "
+                 "which neither reference did.",
+         "record": "imu_batch",
+         "hex": (encode(schema, "imu_header",
+                        dict(seq=22, dropped=0, t_base=1, period=0, count=1,
+                             flags=0b011))
+                 + encode(schema, "imu_sample",
+                          dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6))).hex(),
+         "must_reject": "period-zero"},
         {"name": "count-exceeds-payload",
          "desc": "Header declares four samples, one is present. MUST be rejected: "
                  "a decoder that trusts count without checking the buffer reads "

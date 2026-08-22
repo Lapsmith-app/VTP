@@ -203,6 +203,11 @@ int vtp_decode_monitor_update(const uint8_t *buf, size_t len,
 void vtp_monitor_value_at(const uint8_t *buf, uint8_t index,
                           vtp_monitor_value_t *out);
 
+/* SPEC.md §7.2 -- imu_header.flags bit 2: at least one sample in this batch
+ * was at or beyond the range of the sensor that produced it. The reading is a
+ * lower bound on the magnitude, not a measurement. */
+#define VTP_IMU_FLAG_SATURATED 0x04
+
 /* ---- Link parameters ------------------------------------------------- */
 
 /* SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response. Reporting only:

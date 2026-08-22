@@ -55,6 +55,9 @@ CH_LAP_TIME, CH_LAST_LAP_TIME, CH_BEST_LAP_TIME = 1, 2, 3
 CH_DELTA_BEST, CH_PREDICTED_LAP_TIME, CH_LAP_NUMBER = 4, 5, 6
 CH_SPEED, CH_SESSION_DISTANCE, CH_SESSION_TIME = 7, 8, 9
 
+# SPEC.md §7.2 — imu_header.flags bit 2.
+IMU_SATURATED = 0x04
+
 MONITOR_PRESENT = 0x01
 
 # SPEC.md §13.5 — how long each channel may be displayed without a refresh, in
@@ -454,10 +457,29 @@ class VtpDevice:
             # derivative of the speed on the CAN bus.
             "ax": round(st["long_g"] * 1000),
             "ay": round(st["lat_g"] * 1000),
-            "az": 1000,                       # 1 g down, level car
+            # SPEC.md §7.1 — specific force, not acceleration: a level car at
+            # rest pushes back against gravity, so the UP axis reads +1 g. The
+            # comment here used to say "1 g down" beside this same +1000, which
+            # is the exact ambiguity §7.1 was written to remove.
+            "az": 1000,
             "gx": 0, "gy": 0,
             "gz": round(st["yaw_rate"] / 0.05),
         }
+
+    def _imu_saturation(self):
+        """SPEC.md §7.2 — IMU_SATURATED if any pending sample is at a rail.
+
+        This synthetic vehicle never gets near one, so the flag stays clear and
+        the branch looks like dead code. It is not: it is the shape real
+        firmware needs, and without it this device would model a sensor that
+        cannot saturate, which is not a sensor.
+        """
+        rails = (-32768, 32767)
+        for sample in self._imu_pending:
+            if any(sample[axis] in rails
+                   for axis in ("ax", "ay", "az", "gx", "gy", "gz")):
+                return IMU_SATURATED
+        return 0
 
     def _flush_imu(self):
         if not self._imu_pending:
@@ -468,7 +490,7 @@ class VtpDevice:
             "t_base": self._imu_batch_t0,
             "period": self._imu_period_us,
             "count": len(self._imu_pending),
-            "flags": IMU_ACCEL | IMU_GYRO,
+            "flags": IMU_ACCEL | IMU_GYRO | self._imu_saturation(),
             "reserved": 0,
         }, self._imu_pending)
         self._imu_pending, self._imu_batch_t0 = [], None

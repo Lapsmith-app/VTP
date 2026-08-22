@@ -8,6 +8,65 @@ conformance vector.
 
 ## [Unreleased]
 
+### Added
+- **§7.1 — IMU axes and signs.** The sensor frame is the device's own and
+  vehicle alignment stays the client's job, but how to *read* the numbers was
+  never stated and a client cannot infer any of it. The frame is right-handed;
+  the gyroscope follows the right-hand rule; and the accelerometer reports
+  **specific force**, so a device at rest reads **+1000 mg on whichever axis
+  points up**.
+
+  That last one is the one that matters. Both signs are in use in the wild —
+  some parts and libraries report the gravity vector, the exact negative — and
+  a client that assumes the wrong one sees a car braking when it is
+  accelerating. The mistake survives every plausible sanity check, because the
+  magnitudes are right.
+
+  The peripheral had `"az": 1000` with the comment `# 1 g down, level car`
+  beside it: the value correct under one convention and the comment describing
+  the other, in the reference device, which is as good an illustration as the
+  ambiguity deserves.
+
+- **§7.2 — saturation.** `i16` at these scales gives ±32.767 g and ±1638.35
+  °/s, and a real part rails well before either. A reading at the rail is "at
+  least this much", not "this much". `imu_header.flags` bit 2 is now assigned:
+  set when any sample in the batch is at or beyond its sensor's range, and a
+  client MUST treat such a batch as a lower bound and SHOULD NOT integrate it.
+
+  Per batch rather than per sample because `imu_sample` is deliberately closed
+  (§11.3) and twelve bytes at 833 Hz is the one stream where a per-sample byte
+  costs real airtime. Saturation is explicitly **not** absence: the presence
+  bit stays set, because the sensor is fitted and did report — what is in doubt
+  is the magnitude, not whether there is one.
+
+- **§5.4 — coordinate ranges.** Where its validity bit is set, `lat` MUST be
+  within ±90°, `lon` within ±180°, and `head_mot` within 0° to 360° exclusive.
+  Both decoders rejected none of these; a latitude of 91° decoded happily.
+  Rejected rather than clamped, under §1.1: 91° is not a place a clamp could
+  move closer to, it is a corrupted field — and every other field in the record
+  came from the same bytes. Clamping to 90° puts the vehicle at the pole and
+  lets the client draw it there.
+
+  The rule applies only where a validity bit claims the field means something.
+  A vector pins that boundary: an out-of-range latitude with the position bit
+  clear MUST still decode, because §5.1 puts the duty to write zero on the
+  device rather than the duty to police it on the receiver.
+
+### Fixed
+- **`period` zero was accepted by both decoders and emitted by both encoders**,
+  though §7 has always forbidden it. Zero says every sample in the batch was
+  taken at the same instant, which describes no measurement, and a client
+  recovering a rate from it divides by zero.
+
+- **The two references disagreed about saturation.** The Python decoder
+  reported a `saturated` field the C one did not, and the runner only checks
+  keys the vector names — so the asymmetry passed. Both report it now and the
+  corpus checks it, which is the same class of gap `tools/mutate.py` was
+  hardened against.
+
+- **The datum was already stated** by the documentation pass, so §5's WGS-84
+  requirement needed nothing here.
+
 ### Changed — wire format
 - **A Monitor value now expires (§13.5).** The rule had been the opposite:
   there was no minimum rate and a device MUST NOT infer that an un-updated
