@@ -1,7 +1,14 @@
 # Conformance harness
 
-A Bluetooth central that connects to your device and checks it against
-[SPEC.md](../SPEC.md). It runs on Windows, macOS and Linux from one codebase.
+**For anybody building a VTP/1 device.** A Bluetooth central that connects to
+your firmware and checks it against [SPEC.md](../SPEC.md), from Windows, macOS
+or Linux, out of one codebase.
+
+It is the only thing in this repository that tests a *device* rather than a
+piece of code. `conformance/` hands your decoder bytes and your encoder
+structures, offline, and needs both to be buildable as command-line programs —
+which firmware generally is not. This connects to the device you actually
+built, over the radio, and tests what it does.
 
 ```sh
 uv run vtp1-harness
