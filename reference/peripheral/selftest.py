@@ -59,11 +59,21 @@ def decode(characteristic, payload):
 
 
 def run(device, clock, seconds, step_us=5_000):
-    """Advance the injected clock and collect everything the device emits."""
+    """Advance the injected clock and collect everything the device emits.
+
+    Every payload is stamped and committed, which models a transport that
+    delivers all of them. SPEC.md §8.2 makes seq a fact about delivery, so a
+    payload straight out of poll() carries only a placeholder and a device-only
+    harness has to supply the other half. transport_selftest.py exercises the
+    cases where delivery FAILS, which is where the number stops being trivial.
+    """
     out = []
     for _ in range(int(seconds * 1_000_000 // step_us)):
         clock[0] += step_us
-        out.extend(device.poll())
+        for characteristic, payload in device.poll():
+            out.append((characteristic,
+                        device.stamp_seq(characteristic, payload)))
+            device.commit_seq(characteristic)
     return out
 
 
@@ -234,6 +244,7 @@ def main():
     for _ in range(400):
         mclock[0] += 5_000
         for characteristic, payload in masked.poll():
+            masked.commit_seq(characteristic)
             if characteristic == "can":
                 for r in vtp1.decode_can_batch(payload)["records"]:
                     matched.add(r["id"])
@@ -259,14 +270,19 @@ def main():
           "silently discarded")
 
     # SPEC.md §9 — the tag is the only means of correlation, so a second
-    # request bearing an outstanding one cannot be applied.
-    check(q.admit(0) == "duplicate-tag",
+    # request bearing an outstanding one cannot be applied. Checked with room
+    # in the queue: capacity is tested first now, because a duplicate-tag
+    # refusal is still a response and still needs somewhere to sit. Testing the
+    # tag first let one reused tag hold a thousand responses against a depth
+    # of four.
+    q.delivered()                      # frees a slot; tag 0 leaves the queue
+    check(q.admit(1) == "duplicate-tag",
           "a tag that is still outstanding MUST NOT be admitted a second time")
-    q.delivered()
     check(q.admit(0) == "apply",
           "a tag MUST become reusable once its response has been delivered")
 
     # Nothing is owed to a client that has gone.
+    q.hold(0, bytes([0x02, 0, 0]))
     q.discard_all()
     check(len(q) == 0 and q.dropped > 0,
           "a dropped link MUST clear the queue and count what never arrived")
@@ -356,9 +372,14 @@ def main():
     # liveness bound and the two rules can be told apart.
     slot_fast = min(perishable, key=lambda e: e["max_age"])["slot"]
     slot_never = durable[0]["slot"]
-    write = (struct.pack("<HBB", 1, 2, 0)
-             + struct.pack("<BBi", slot_fast, dev.MONITOR_PRESENT, 12345)
-             + struct.pack("<BBi", slot_never, dev.MONITOR_PRESENT, 99999))
+    # SPEC.md §13.4 — a write is a complete statement, so it carries every
+    # declared slot and not just the two this check is about.
+    all_slots = [e["slot"] for e in declared["entries"]]
+    def value_for(slot):
+        return {slot_fast: 12345, slot_never: 99999}.get(slot, 7)
+    write = struct.pack("<HBB", 1, len(all_slots), 0) + b"".join(
+        struct.pack("<BBi", s, dev.MONITOR_PRESENT, value_for(s))
+        for s in all_slots)
     check(mon.handle_monitor_write(write) is None,
           "a well-formed monitor write was rejected")
 
@@ -389,9 +410,10 @@ def main():
           f"{sorted(s for s, p in after.items() if p)}")
 
     # SPEC.md §13.4 — a slot twice in one write, and nothing says which wins.
-    twice = (struct.pack("<HBB", 2, 2, 0)
+    twice = (struct.pack("<HBB", 2, len(all_slots) + 1, 0)
              + struct.pack("<BBi", slot_fast, dev.MONITOR_PRESENT, 1)
-             + struct.pack("<BBi", slot_fast, dev.MONITOR_PRESENT, 2))
+             + b"".join(struct.pack("<BBi", s, dev.MONITOR_PRESENT, value_for(s))
+                        for s in all_slots))
     check(mon.handle_monitor_write(twice) == "duplicate-slot",
           "a write naming one slot twice MUST be rejected rather than "
           "resolved arbitrarily")
@@ -443,6 +465,8 @@ def main():
     for _ in range(200):
         fresh_clock[0] += 5_000
         for characteristic, payload in fresh.poll():
+            payload = fresh.stamp_seq(characteristic, payload)
+            fresh.commit_seq(characteristic)
             if characteristic in firsts:
                 continue
             # Not named `decode`: this function already has one, and
@@ -702,11 +726,15 @@ def main():
 
     # Mid first lap: elapsed is known; last lap and delta do not exist yet.
     import vtp1_encode as menc
+    # SPEC.md §13.4 — a write carries every declared slot. Elapsed is known;
+    # everything else does not exist yet and says so with a clear present bit,
+    # which is a different statement from leaving it out.
+    mon_slots = [slot for slot, _ in mon._monitor_channels]
     update = menc.encode_monitor_update(
-        {"seq": 1, "count": 3, "reserved": 0},
-        [{"slot": 0, "validity": dev.MONITOR_PRESENT, "value": 42_318},
-         {"slot": 1, "validity": 0, "value": 0},
-         {"slot": 2, "validity": 0, "value": 0}])
+        {"seq": 1, "count": len(mon_slots), "reserved": 0},
+        [{"slot": s,
+          "validity": dev.MONITOR_PRESENT if s == 0 else 0,
+          "value": 42_318 if s == 0 else 0} for s in mon_slots])
     check(mon.handle_monitor_write(update) is None,
           "a well-formed monitor update was rejected")
     state = {slot: (value, present) for slot, _, value, present
@@ -725,18 +753,36 @@ def main():
 
     # A cleared present bit with a stale value in the bytes: the bit governs.
     stale = menc.encode_monitor_update(
-        {"seq": 2, "count": 1, "reserved": 0},
-        [{"slot": 1, "validity": 0, "value": 87_340}])
-    mon.handle_monitor_write(stale)
+        {"seq": 2, "count": len(mon_slots), "reserved": 0},
+        [{"slot": s,
+          "validity": dev.MONITOR_PRESENT if s == 0 else 0,
+          "value": 87_340 if s == 1 else (42_318 if s == 0 else 0)}
+         for s in mon_slots])
+    check(mon.handle_monitor_write(stale) is None,
+          "the write must be ACCEPTED for this check to mean anything; a "
+          "rejected one leaves the previous display in place and the check "
+          "below then passes without testing the bit at all")
     check(disp.ABSENT in mon.display_lines()[1],
           "a stale value behind a cleared present bit MUST NOT be displayed")
 
     # A slot the device never asked for is ignored, not an error.
+    # §13.1 and §13.4 together: the write still carries every slot the device
+    # asked for, and the one it did not ask for is ignored rather than making
+    # the write an error. A write of the stray slot ALONE would be incomplete,
+    # which is a different fault and correctly a rejection.
     stray = menc.encode_monitor_update(
-        {"seq": 3, "count": 1, "reserved": 0},
-        [{"slot": 200, "validity": dev.MONITOR_PRESENT, "value": 5}])
+        {"seq": 3, "count": len(mon_slots) + 1, "reserved": 0},
+        [{"slot": s, "validity": 0, "value": 0} for s in mon_slots]
+        + [{"slot": 200, "validity": dev.MONITOR_PRESENT, "value": 5}])
     check(mon.handle_monitor_write(stray) is None,
           "a value for an unrequested slot MUST be ignored, not rejected")
+    only_stray = menc.encode_monitor_update(
+        {"seq": 4, "count": 1, "reserved": 0},
+        [{"slot": 200, "validity": dev.MONITOR_PRESENT, "value": 5}])
+    check(mon.handle_monitor_write(only_stray) is not None,
+          "a write carrying ONLY an unrequested slot names none of the slots "
+          "the device asked for, so it is incomplete (§13.4) and MUST be "
+          "rejected")
 
     check(mon.handle_monitor_write(update[:-1]) is not None,
           "a truncated monitor update MUST be rejected, not partly applied")

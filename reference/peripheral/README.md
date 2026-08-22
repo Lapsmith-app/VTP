@@ -228,6 +228,22 @@ with manufacturer, model, firmware revision and serial number, which SPEC.md
 §3.4 recommends. Nothing in VTP/1 reads it — it is there because it is where
 every generic BLE tool already looks when someone asks what a device is.
 
+## A reconnect faster than one poll is invisible
+
+Connection state is discovered by polling `is_connected()` once per tick, and
+`ConnectionTracker` compares the current answer with the last one. A central
+that drops and reconnects **between two polls** therefore produces no edge at
+all: `on_connect()` never runs, so the device does not restart its sequence
+numbers or clear its subscription table for what is, to it, a new client.
+
+At the default 200 Hz that window is 5 ms, and no BLE stack completes a
+disconnect and a fresh connection inside it — the supervision timeout alone is
+orders of magnitude longer. So this is not reachable on hardware. It is
+recorded because it is a property of *how* the state is discovered rather than
+of the timings that make it safe, and a future change to either would need to
+know it is there. A stack that reports connection edges as events rather than
+as a level would not have it.
+
 ## Platform limits
 
 **macOS.** Works, with one hole: CoreBluetooth's peripheral role accepts only a

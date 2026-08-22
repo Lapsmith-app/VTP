@@ -8,6 +8,81 @@ conformance vector.
 
 ## [Unreleased]
 
+### Fixed — the reference peripheral
+Milestone 2 of the second review. Every defect was reproduced before it was
+touched.
+
+- **A sequence number is now assigned when a notification is delivered, not
+  when it is encoded.** SPEC.md §8.2 counts notifications *sent*, which makes
+  seq a fact about delivery, and owning it at encode time produced two bugs in
+  succession: a notification nobody had subscribed to burned a number and never
+  returned it, so the first one actually delivered carried **2**; and returning
+  a number on refusal handed back one a later notification had already taken,
+  so a superseded batch produced the delivered sequence **1, 1, 2, 3**. The
+  second was introduced fixing the first, which is the clearest possible sign
+  the number was being owned in the wrong place.
+
+  A payload is encoded with a placeholder, `stamp_seq` writes the pending
+  number into it, and `commit_seq` advances the counter only once the stack has
+  taken it. A refusal consumes nothing, so there is nothing to give back and
+  `_return_seq` is gone.
+
+- **The connection edge is handled before anything is sent.** It ran after the
+  control drain and the telemetry pump, so a notification built for the
+  previous central could be handed to a new one in the same tick that reset the
+  device. Both edges now go through one `_reset_transport_state()`, so neither
+  can clear half the per-link state and leave the rest.
+
+- **A Monitor write must carry every slot the device asked for.** §13.4 has
+  required a complete snapshot since it was written; the peripheral merged a
+  subset into its previous state, so an omitted slot kept both its value *and*
+  its timestamp and stayed on screen looking current while the client had
+  stopped saying anything about it — the exact failure the snapshot rule
+  exists to prevent.
+
+- **A duplicate tag no longer bypasses the control queue's capacity.** The tag
+  was tested before the depth, so one reused tag held a thousand responses
+  against a declared depth of four. A duplicate-tag refusal is still a response
+  and still needs somewhere to sit.
+
+- **`CAN_RESET` and `GET_LINK_PARAMS` reject trailing parameters.** A malformed
+  `CAN_RESET` cleared the subscription table anyway.
+
+- **A grouped validity bit is set only when every field it governs is known**
+  (§9.1). Told a TX PHY and nothing else, the device reported the same value as
+  the RX PHY with a validity bit asserting it was a measurement.
+
+### Added
+- **A fake GATT link and a transport conformance suite**
+  (`gattsim.py`, `transport_selftest.py`). Every bug above reached a real phone
+  before anyone noticed, because none is reachable by a conformance vector and
+  none is in the device model. The suite drives the **real** pump — a
+  reimplementation would be a second state machine, and these were all bugs in
+  the ordering of the first — against a fake that models the four things which
+  decide its behaviour: connection state, CCCD subscription, backpressure, and
+  what reached the wire.
+
+  It covers the first delivered notification carrying 0, contiguous unique
+  numbers through a stall and recovery, a reconnection restarting from 0 and
+  receiving nothing built before the drop, and a refused control response being
+  retried rather than dropped. Verified to fail when the sequence commit is
+  moved back ahead of delivery.
+
+- **A known limitation, recorded rather than fixed**: connection state is
+  discovered by polling, so a central that drops and reconnects between two
+  polls produces no edge at all and the device never resets for it. At 200 Hz
+  that window is 5 ms and no BLE stack completes a reconnection inside it, so
+  it is unreachable on hardware — but it is a property of how the state is
+  discovered rather than of the timings that make it safe.
+
+### Fixed — the checks themselves
+Three device selftest assertions were passing without testing anything once the
+rules around them changed, and are now written so they cannot: a monitor write
+that had become incomplete was rejected while the check after it still passed
+on the *previous* display; a duplicate-tag check tested a tag that had already
+left the queue; and a stray-slot check wrote only the stray slot, which is now
+incomplete for a different reason.
+
 ### Changed — wire format
 Normative closure, from a second external review. **Four existing conformance
 vectors changed meaning**, which `tools/check_baseline.py` caught and which was

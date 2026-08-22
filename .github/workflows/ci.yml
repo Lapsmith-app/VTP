@@ -121,6 +121,15 @@ jobs:
       - name: No existing vector changed meaning
         run: python3 tools/check_baseline.py --check
 
+      # The device model is one half; this is the other. Every bug it covers
+      # -- sequence numbers burned by unsubscribed notifications, a number
+      # returned after a later notification took it, a connection edge handled
+      # after the tick had already sent -- reached a real phone before anyone
+      # noticed, because none is reachable by a conformance vector and none is
+      # in the device model. It drives the REAL pump against a fake GATT link.
+      - name: Transport state machine conforms
+        run: python3 reference/peripheral/transport_selftest.py
+
       # A partial implementation runs the roles it declares (SPEC.md 12). If
       # this stops filtering, a GPS-only decoder is handed CAN vectors and
       # fails conformance for records it never claimed.

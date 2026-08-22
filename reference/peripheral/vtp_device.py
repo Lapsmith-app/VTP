@@ -300,7 +300,6 @@ class VtpDevice:
         # one it lost next. Credit both back: the items this payload was
         # carrying, and the count it was carrying the news of.
         self._dropped[stream] += items + field("dropped")
-        self._return_seq(stream)
         return items
 
     def on_disconnect(self):
@@ -347,30 +346,43 @@ class VtpDevice:
                 return handle
         return None
 
-    def _next_seq(self, stream):
-        """SPEC.md §8.2 — the FIRST notification after a connection carries 0.
+    # SPEC.md §8.2 — seq counts notifications **sent**. That makes it a fact
+    # about delivery, not about encoding, and it is now assigned at delivery.
+    #
+    # It used to be consumed while building the payload, which two different
+    # bugs then had to work around: a notification nobody was subscribed to
+    # burned a number and never gave it back, so the first one actually
+    # delivered carried 2; and returning a number on refusal handed back one a
+    # LATER notification had already taken, so a superseded batch produced the
+    # delivered sequence 1, 1, 2, 3. The second was introduced fixing the
+    # first, which is the clearest possible sign the number was being owned in
+    # the wrong place.
+    #
+    # A payload is now encoded with a placeholder, `stamp` writes the pending
+    # number into its header, and `commit` advances the counter only once the
+    # transport reports the notification went out. A refusal consumes nothing,
+    # so there is nothing to give back.
+    SEQ_PLACEHOLDER = 0
 
-        Post-increment, not pre-increment. Returning the incremented value
-        made the first notification of every connection seq 1, so a client
-        counting from 0 saw a one-notification gap before anything had been
-        lost -- on every stream, on every connection.
-        """
-        n = self._seq[stream]
-        self._seq[stream] = (n + 1) & 0xFFFF
-        return n
+    def _seq_offset(self, stream):
+        record = {"gps": "gps_fix", "can": "can_header",
+                  "imu": "imu_header"}[stream]
+        return next(f["offset"] for f in enc.SCHEMA["records"][record]["fields"]
+                    if f["name"] == "seq")
 
-    def _return_seq(self, stream):
-        """Give back a sequence number whose notification was never sent.
+    def stamp_seq(self, stream, payload):
+        """Write the pending sequence number in, without consuming it."""
+        off = self._seq_offset(stream)
+        out = bytearray(payload)
+        struct.pack_into("<H", out, off, self._seq[stream])
+        return bytes(out)
 
-        SPEC.md §8.2 -- seq counts notifications *sent*. A notification the
-        transport refused was not sent, so consuming its number would leave a
-        gap, and §8.2 defines a gap as notifications the client did not
-        receive in transit. The loss is real but it happened inside the
-        device, which is what `dropped` is for; reporting it twice, in two
-        fields that mean different things, tells a client less than reporting
-        it once in the right one.
-        """
-        self._seq[stream] = (self._seq[stream] - 1) & 0xFFFF
+    def commit_seq(self, stream):
+        """The notification went out; the number is spent."""
+        self._seq[stream] = (self._seq[stream] + 1) & 0xFFFF
+
+    def peek_seq(self, stream):
+        return self._seq[stream]
 
     def _take_dropped(self, stream):
         """SPEC.md §8.3 — saturates at 65535 and MUST NOT wrap."""
@@ -413,7 +425,7 @@ class VtpDevice:
                     | V_VELOCITY | V_HEAD_MOT | V_H_ACC | V_V_ACC | V_S_ACC
                     | V_P_DOP | V_NUM_SV)
         return enc.encode_gps_fix({
-            "seq": self._next_seq("gps"),
+            "seq": self.SEQ_PLACEHOLDER,   # stamped at delivery (§8.2)
             "dropped": self._take_dropped("gps"),
             "validity": validity,
             "t_device": now,
@@ -485,7 +497,7 @@ class VtpDevice:
         if not self._imu_pending:
             return None
         payload = enc.encode_imu_batch({
-            "seq": self._next_seq("imu"),
+            "seq": self.SEQ_PLACEHOLDER,   # stamped at delivery (§8.2)
             "dropped": self._take_dropped("imu"),
             "t_base": self._imu_batch_t0,
             "period": self._imu_period_us,
@@ -526,7 +538,7 @@ class VtpDevice:
 
     def _flush_can(self, now):
         header = {
-            "seq": self._next_seq("can"),
+            "seq": self.SEQ_PLACEHOLDER,   # stamped at delivery (§8.2)
             "dropped": self._take_dropped("can"),
             "t_base": self._can_batch_t0 if self._can_pending else now,
             "count": len(self._can_pending),
@@ -683,6 +695,12 @@ class VtpDevice:
             return bytes([opcode, tag, status]) + detail
 
         if opcode == CAN_RESET:
+            # Parameterless. It used to clear the table regardless of what
+            # followed the tag, so a malformed request still took effect --
+            # exactly what §9.6 forbids for a request a device cannot answer,
+            # applied to one it should not have answered at all.
+            if params:
+                return reply(ST_BAD_PARAMS)
             self._subscriptions.clear()
             self._can_pending, self._can_batch_t0 = [], None
             return reply(ST_OK)
@@ -780,6 +798,8 @@ class VtpDevice:
                 "t_device_rx": t_rx, "t_device_tx": self.now_us()}))
 
         if opcode == GET_LINK_PARAMS:
+            if params:
+                return reply(ST_BAD_PARAMS)
             return reply(ST_OK, self._link_params())
 
         if opcode == MONITOR_LIST:
@@ -846,6 +866,15 @@ class VtpDevice:
                 continue
             present = bool(validity & MONITOR_PRESENT)
             staged[slot] = (value if present else 0, present, now)
+
+        # SPEC.md §13.4 — every write carries every slot the device asked for.
+        # Merging a subset was the whole failure the snapshot rule exists to
+        # prevent: an omitted slot kept its previous value AND its previous
+        # timestamp, so it stayed on screen looking current while the client
+        # had stopped saying anything about it.
+        missing = known - set(staged)
+        if missing:
+            return f"incomplete: {len(missing)} slot(s) not carried"
 
         self._monitor_values.update(staged)
         self._monitor_seq = seq
@@ -924,27 +953,29 @@ class VtpDevice:
 
     def _link_params(self):
         link = self._link or {}
-        validity, fields = 0, {
+        fields = {
             "att_mtu": 0, "ll_max_tx_octets": 0, "ll_max_rx_octets": 0,
             "conn_interval": 0, "peripheral_latency": 0,
             "supervision_timeout": 0, "phy_tx": 0, "phy_rx": 0,
         }
-        if link.get("att_mtu"):
-            validity |= 1 << 0
-            fields["att_mtu"] = link["att_mtu"]
-        if link.get("ll_max_tx_octets"):
-            validity |= 1 << 1
-            fields["ll_max_tx_octets"] = link["ll_max_tx_octets"]
-            fields["ll_max_rx_octets"] = link.get("ll_max_rx_octets", 0)
-        if link.get("conn_interval"):
-            validity |= 1 << 2
-            fields["conn_interval"] = link["conn_interval"]
-            fields["peripheral_latency"] = link.get("peripheral_latency", 0)
-            fields["supervision_timeout"] = link.get("supervision_timeout", 0)
-        if link.get("phy_tx"):
-            validity |= 1 << 3
-            fields["phy_tx"] = link["phy_tx"]
-            fields["phy_rx"] = link.get("phy_rx", link["phy_tx"])
+        # SPEC.md §9.1 — a bit governing several fields may be set only when
+        # EVERY one of them is known. This used to set the bit as soon as one
+        # was, filling the rest with zero or with a copy: told a TX PHY and
+        # nothing else, it reported the same value as the RX PHY, with a
+        # validity bit asserting that was a measurement. Half a group is the
+        # same state as none of it, and a clear bit is how that state is said.
+        GROUPS = (
+            (0, ("att_mtu",)),
+            (1, ("ll_max_tx_octets", "ll_max_rx_octets")),
+            (2, ("conn_interval", "peripheral_latency", "supervision_timeout")),
+            (3, ("phy_tx", "phy_rx")),
+        )
+        validity = 0
+        for bit, names in GROUPS:
+            if all(link.get(n) for n in names):
+                validity |= 1 << bit
+                for n in names:
+                    fields[n] = link[n]
         # Everything a host stack does not expose stays absent rather than
         # being guessed — SPEC.md §9.1 is explicit that a cleared bit is the
         # only honest answer, and a desktop CoreBluetooth or BlueZ peripheral
