@@ -36,7 +36,13 @@ SOURCES = ["SPEC.md", "RATIONALE.md", "README.md", "CONTRIBUTING.md",
            "reference/c/vtp1_encode.c", "reference/c/vtp1_encode.h",
            "reference/python/vtp1.py", "tools/generate.py",
            "conformance/run.py", "conformance/README.md",
-           "schema/README.md", "reference/README.md"]
+           "schema/README.md", "reference/README.md",
+           # The harness cites more sections than anything else here, in
+           # messages a developer reads while their device is failing. A
+           # pointer to the wrong clause is worse there than in a comment.
+           "harness/README.md", "harness/selftest.py",
+           *sorted(str(p.relative_to(ROOT))
+                   for p in (ROOT / "harness" / "vtp1_harness").rglob("*.py"))]
 
 HEADING = re.compile(r"^#{2,4}\s+(?:Appendix\s+)?(\d+(?:\.\d+)*)\.?\s")
 # An optional "SPEC.md "/"RATIONALE.md " qualifier decides which document is

@@ -3,3 +3,8 @@ reference/c/vtp1_cli
 __pycache__/
 .DS_Store
 VTPPeripheral.app/
+# The harness is a Python package, so building or running it from a clone
+# leaves the usual debris.
+.venv/
+dist/
+*.egg-info/
