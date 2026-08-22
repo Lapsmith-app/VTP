@@ -61,21 +61,30 @@ IMU_SATURATED = 0x04
 MONITOR_PRESENT = 0x01
 
 # SPEC.md §13.5 — how long each channel may be displayed without a refresh, in
-# 100 ms units; 0 never expires. Per channel because the channels differ in
-# kind: a lap time ticking up is wrong within a second of going stale, while a
-# best lap stays true until it is beaten. Several times the expected update
-# interval, because this bounds how wrong a display may be rather than how
-# often a client must talk.
+# 100 ms units. Never zero: every declared channel carries a deadline, so a
+# value the client stops sending always stops being shown.
+#
+# Per channel because the channels differ in kind, and the spread here is the
+# argument for that. A lap time ticking up is wrong within a second of going
+# stale; a best lap stays true until it is beaten, so it gets the longest
+# deadline this field can express rather than none at all. Several times the
+# expected update interval throughout, because this bounds how wrong a display
+# may be rather than how often a client must talk.
+#
+# The three that read 0 used to mean "no deadline of its own", and SPEC.md then
+# derived a device-wide liveness bound to expire them anyway. One deadline per
+# channel replaced both rules; 255 is 25.5 s, the ceiling of a u8 in 100 ms
+# units, and is still a bound.
 MONITOR_MAX_AGE = {
     CH_LAP_TIME: 20,             # 2 s — ticks continuously
     CH_PREDICTED_LAP_TIME: 20,
     CH_SPEED: 10,                # 1 s — changes fastest
     CH_SESSION_TIME: 20,
     CH_SESSION_DISTANCE: 30,
-    CH_LAST_LAP_TIME: 0,         # true until the next lap ends
-    CH_BEST_LAP_TIME: 0,         # true until it is beaten
+    CH_LAST_LAP_TIME: 255,       # 25.5 s — true until the next lap ends
+    CH_BEST_LAP_TIME: 255,       # true until it is beaten
     CH_DELTA_BEST: 20,
-    CH_LAP_NUMBER: 0,            # true until the next lap starts
+    CH_LAP_NUMBER: 255,          # true until the next lap starts
 }
 
 PROTOCOL_MAJOR, PROTOCOL_MINOR = 1, 0
@@ -953,28 +962,21 @@ class VtpDevice:
         writing, so silence is the only symptom the device ever sees; without
         this the screen shows a lap time from four minutes ago and the driver
         reading it has no way to tell.
+
+        One rule, applied per channel. There used to be a second — a derived
+        device-wide "liveness bound", the largest max_age declared, which
+        expired the channels that declared none — and the two together were
+        what nobody could keep straight. Every channel carries a deadline now,
+        so the bound has nothing left to catch.
         """
         now = self.now_us()
-        # SPEC.md §13.5 — the liveness bound: the largest max_age declared. No
-        # write at all within it means the client is gone, and then NOTHING
-        # survives, including channels whose own max_age is zero. A best lap
-        # from a session that ended is as wrong as a stopped lap timer and only
-        # less obviously so.
-        bound = max((MONITOR_MAX_AGE.get(c, 20)
-                     for _, c in self._monitor_channels), default=0)
-        last = max((w for _, _, w in self._monitor_values.values()
-                    if w is not None), default=None)
-        client_gone = (bound and last is not None
-                       and now - last > bound * 100_000)
-
         out = []
         for slot, channel in self._monitor_channels:
             value, present, written_at = self._monitor_values.get(
                 slot, (0, False, None))
             max_age = MONITOR_MAX_AGE.get(channel, 20)
-            expired = (present and max_age and written_at is not None
-                       and now - written_at > max_age * 100_000)
-            if client_gone or expired:
+            if (present and written_at is not None
+                    and now - written_at > max_age * 100_000):
                 value, present = 0, False
             out.append((slot, channel, value, present))
         return out

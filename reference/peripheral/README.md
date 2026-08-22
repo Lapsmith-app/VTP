@@ -57,6 +57,56 @@ python3 display.py                # the panel alone, with fake data
 
 ---
 
+## What this backend cannot tell you
+
+**A CoreBluetooth peripheral is never told about a connect or a disconnect.**
+The delegate has exactly two central-facing callbacks —
+`didSubscribeToCharacteristic` and `didUnsubscribeFromCharacteristic` — and no
+connect/disconnect pair at all. bless 0.3.0's `is_connected()` therefore
+returns `len(_central_subscriptions) > 0`: *at least one central is subscribed
+to at least one characteristic*.
+
+That is the only link-ish signal the platform offers, and it differs from a
+real connection in a way you can trip over:
+
+| What happened | What this peripheral sees |
+| --- | --- |
+| A central connects and subscribes | connected |
+| A central unsubscribes from **everything**, link still up | disconnected |
+| ...and then resubscribes | a new connection |
+| A central disconnects | disconnected |
+| The same phone reconnects | a new connection |
+
+Rows two and three are the ones that are not true. The peripheral resets
+anyway — sequence numbers restart and the CAN subscription table is cleared —
+and that is deliberate rather than an oversight, because the two possible
+mistakes are not equal:
+
+- Resetting on a resubscribe costs the client its CAN table and restarts `seq`.
+  A client already has to handle both, because that is what every reconnection
+  does, and it can see the restart in the next notification.
+- *Not* resetting on a real reconnection hands the new connection the old one's
+  sequence numbers and subscription table. SPEC.md §8.2 exists so a client
+  never has to tell a reconnection from a wrap and §9.2 so it never inherits
+  state it did not install; a client cannot detect either failure.
+
+The second is silent and unrecoverable, so the ambiguous case errs towards
+resetting. The log says which it probably was: a rising edge from the same
+central identity is most likely a resubscribe, a different identity is
+certainly a new central. CoreBluetooth keeps `CBCentral.identifier` stable
+across connections to the same peer, so identity is a hint for the log and
+never a reason to skip a reset.
+
+`reference/peripheral/gattsim.py` can be told to reproduce this
+(`bless_semantics=True`), and `transport_selftest.py` pins the behaviour above
+so it cannot drift.
+
+**A BlueZ peripheral has a real `InterfacesRemoved` signal** and does not need
+any of this. If you port `serve.py` to it, feed that edge straight into
+`ConnectionTracker.update()` and the names mean what they say.
+
+---
+
 ## The real-radio smoke test
 
 Everything else in this repository — the conformance corpus, `selftest.py`,

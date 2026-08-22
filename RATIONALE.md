@@ -491,3 +491,88 @@ Stating these plainly, because a rationale that only lists benefits is marketing
   with tests rather than with prose.
 - **Zero deployed devices.** Which is the largest cost by a wide margin, and the
   one nothing in this document addresses.
+
+---
+
+## Contradictions found by review, and how each was closed
+
+SPEC.md states rules; this is why these particular rules are the ones it
+states. Every entry below was a place where two parts of the specification, or
+the specification and its own conformance suite, said different things — the
+class of defect that produces two implementations which each pass every test
+and cannot talk to each other. The full history is in CHANGELOG.md.
+
+**Capability implications were nowhere.** SPEC.md defined each capability bit
+independently while `conformance/run.py` carried a hard-coded table making
+`can` and `monitor` imply `control` — the runner enforcing a rule the
+specification did not state. Canonical Info vectors meanwhile described a CAN
+device with no Control characteristic, which no client can install a
+subscription on. SPEC.md §4.1 is now one generated matrix and the runner reads it.
+
+**Omitting unused characteristics loses to a fixed table.** The choice looks
+like a matter of taste and is not. Central stacks cache the attribute table
+across connections and some across reboots, so a device whose table changes
+between connections hands the client a stale handle, and the symptom is a read
+of the wrong characteristic rather than a missing one. A fixed table cannot
+produce that. The cost is bounded deliberately: an inert characteristic
+rejects writes with an ATT error and implements nothing else, so a GPS-only
+build is a service declaration, four inert attributes and one notify path.
+
+**`max_notify_bytes` could not mean the negotiated MTU.** A client reads Info
+as its first act after connecting; a CoreBluetooth peripheral does not learn
+the negotiated maximum until a central subscribes, which is strictly later.
+Defined as the live value it was a field whose correct answer did not exist yet
+at the only moment anyone read it. Defined as a device ceiling (SPEC.md §4.2) it always
+has one.
+
+**Monitor freshness had two rules and a third to reconcile them.** `max_age` of
+zero meant "no deadline of its own", and a derived device-wide "liveness bound"
+— the largest deadline declared — then expired those channels anyway. Three
+concepts for one question, and the canonical four-channel vector satisfied none
+of them. Requiring every declared channel to carry a non-zero `max_age` deletes
+the other two. A channel that changes rarely takes the 25.5 s ceiling rather
+than an exemption.
+
+**`dropped` is a diagnostic, not an audit trail.** Making it exact means owning
+a counter transactionally across encoding, transmit-queue refusal and
+supersession. The question it answers — "is my link bad, or is the device
+overrun?" — survives a count landing one notification late, so SPEC.md §8.3 says
+best-effort and spends the exactness on `seq` instead, where it is cheap:
+`seq` counts notifications actually sent and is committed when the transport
+accepts one.
+
+**Rate setting was undefined in four ways** — zero, unsupported rates,
+ceilings, and when the change takes effect. SPEC.md §9.8 states them. There is
+deliberately no way to enumerate supported rates: asking and finding out is one
+round trip on a link the client already has, and a discovery mechanism would be
+a list format, a paging scheme and a second thing to keep in step with Info.
+
+**Both RTK bits could be set at once.** The natural client reading of the pair
+is "fixed wins", which upgrades a device's accuracy claim on the strength of a
+bug. SPEC.md §5.3 makes them exclusive and makes either imply `differential`, and a
+receiver rejects a fix that breaks either rule — the flags and the position came
+out of the same bytes, so the rest of the record is not trustworthy either.
+
+**An IMU batch could carry no samples**, though `t_base` is defined as the
+acquisition time of sample 0. SPEC.md §6's CAN batch still permits an empty one and
+that is not an inconsistency: a CAN `t_base` describes a bus that was observed
+and found quiet, an IMU `t_base` describes a sample.
+
+## What the reference peripheral cannot observe
+
+A CoreBluetooth peripheral is never told about a connect or a disconnect: the
+delegate has `didSubscribeToCharacteristic` and
+`didUnsubscribeFromCharacteristic` and no connect/disconnect pair at all. bless
+0.3.0's `is_connected()` therefore reports "at least one central is subscribed
+to at least one characteristic".
+
+So the reference peripheral's connection edge is not a link edge, and a client
+that unsubscribes from everything while staying connected is indistinguishable
+from one that went away. It resets anyway, because the two mistakes are not
+equal: resetting on a resubscribe costs the client a CAN table and a `seq`
+restart it must already tolerate and can see, while failing to reset on a real
+reconnection hands the next connection the previous one's state in a way
+SPEC.md §8.2 and SPEC.md §9.2 exist to prevent and no client can detect.
+
+This is a property of that backend, not of VTP/1. A BlueZ peripheral has a real
+`InterfacesRemoved` signal and needs none of it.

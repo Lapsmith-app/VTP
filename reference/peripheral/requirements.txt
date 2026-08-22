@@ -1,6 +1,11 @@
-# The software peripheral only. Nothing in the specification, the reference
-# decoders or CI depends on these -- CI runs the peripheral's selftest, which
-# is deliberately free of any Bluetooth import (see selftest.py).
+# The software peripheral. Install this and you can run serve.py.
+#
+# `-r ../../requirements.txt` is not decoration: vtp_device.py imports
+# vtp1_encode, which reads schema/vtp1.yaml, so the peripheral needs a YAML
+# parser as much as the generator does. Naming only bless here made the
+# documented standalone install fail on `import yaml` at the first line that
+# matters, and the peripheral's own README told people to run exactly that.
 #
 # Needs a real radio and, on macOS, an app bundle: see README.md here.
+-r ../../requirements.txt
 bless==0.3.0

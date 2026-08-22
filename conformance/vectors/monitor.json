@@ -6,7 +6,7 @@
       "name": "dash-asks-for-four",
       "desc": "A display device asking for the four values a lap timer shows. It names channels; it does not send an expression to evaluate.",
       "record": "monitor_list",
-      "hex": "04000000040000010000010200000204000003060000",
+      "hex": "04000000040000010014010200ff02040014030600ff",
       "expect": {
         "page": {
           "total": 4,
@@ -18,25 +18,25 @@
           {
             "slot": 0,
             "channel": 1,
-            "max_age": 0,
+            "max_age": 20,
             "channel_known": true
           },
           {
             "slot": 1,
             "channel": 2,
-            "max_age": 0,
+            "max_age": 255,
             "channel_known": true
           },
           {
             "slot": 2,
             "channel": 4,
-            "max_age": 0,
+            "max_age": 20,
             "channel_known": true
           },
           {
             "slot": 3,
             "channel": 6,
-            "max_age": 0,
+            "max_age": 255,
             "channel_known": true
           }
         ]
@@ -61,7 +61,7 @@
       "name": "unknown-channel-requested",
       "desc": "A device asking for a channel from a later minor. A client MUST report it unknown, MUST NOT substitute another, and MUST answer the slot as absent rather than omitting it.",
       "record": "monitor_list",
-      "hex": "01000000010009921000",
+      "hex": "01000000010009921014",
       "expect": {
         "page": {
           "total": 1,
@@ -73,7 +73,7 @@
           {
             "slot": 9,
             "channel": 4242,
-            "max_age": 0,
+            "max_age": 20,
             "channel_known": false
           }
         ]
@@ -220,21 +220,21 @@
       "name": "count-exceeds-page",
       "desc": "Page declares three entries, one is present. MUST be rejected: a decoder that trusts count without checking the buffer reads two channel assignments out of adjacent memory.",
       "record": "monitor_list",
-      "hex": "03000000030000010000",
+      "hex": "03000000030000010014",
       "must_reject": "length"
     },
     {
       "name": "long-page",
       "desc": "One entry declared, one present, plus a trailing byte. MUST be rejected.",
       "record": "monitor_list",
-      "hex": "0100000001000001000000",
+      "hex": "0100000001000001001400",
       "must_reject": "length"
     },
     {
       "name": "per-channel-expiry",
-      "desc": "Three channels with different max_age. SPEC.md 13.5 -- a lap time ticking up is wrong within a second of going stale, a best lap stays true until it is beaten, so the deadline is per channel and 0 means never.",
+      "desc": "Three channels with three different deadlines. SPEC.md 13.5 -- a lap time ticking up is wrong within a second of going stale while a best lap stays true until it is beaten, so the deadline is per channel. Every channel has one.",
       "record": "monitor_list",
-      "hex": "030000000300000100140103000002070005",
+      "hex": "03000000030000010014010300ff02070005",
       "expect": {
         "page": {
           "total": 3,
@@ -252,7 +252,7 @@
           {
             "slot": 1,
             "channel": 3,
-            "max_age": 0,
+            "max_age": 255,
             "channel_known": true
           },
           {
@@ -266,7 +266,7 @@
     },
     {
       "name": "max-age-at-ceiling",
-      "desc": "max_age 255 is 25.5 seconds, the longest a device can ask for short of never.",
+      "desc": "max_age 255 is 25.5 seconds, the longest deadline this field can express. A channel that changes rarely takes this rather than none: SPEC.md 13.5 has no `never`.",
       "record": "monitor_list",
       "hex": "010000000100000300ff",
       "expect": {
@@ -285,6 +285,35 @@
           }
         ]
       }
+    },
+    {
+      "name": "zero-max-age",
+      "desc": "A channel declaring max_age 0. MUST be rejected: SPEC.md 13.5 gives every declared channel a deadline, so a value the client stops sending always stops being shown. Zero used to mean `no deadline of its own`, reconciled by a derived device-wide liveness bound -- two rules, and a canonical vector that satisfied neither.",
+      "record": "monitor_list",
+      "hex": "0200000002000001001401030000",
+      "expect": {
+        "page": {
+          "total": 2,
+          "index": 0,
+          "count": 2,
+          "reserved": 0
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 20,
+            "channel_known": true
+          },
+          {
+            "slot": 1,
+            "channel": 3,
+            "max_age": 0,
+            "channel_known": true
+          }
+        ]
+      },
+      "must_reject": "zero-max-age"
     },
     {
       "name": "duplicate-slot-in-declaration",

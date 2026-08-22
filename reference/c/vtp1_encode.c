@@ -55,6 +55,18 @@ int vtp_encode_gps_fix(const vtp_gps_fix_t *f,
     }
     if ((f->validity & VTP_GPS_VALIDITY_HEAD_MOT)
         && (f->head_mot < 0 || f->head_mot >= 36000000)) return -1;
+    /* SPEC.md 5.3 -- a carrier-phase solution has either resolved its
+     * integer ambiguities or it has not, so both RTK bits at once is a claim about
+     * solution quality that means nothing. The natural client reading of the pair is
+     * "fixed wins", which upgrades a device's accuracy claim on the strength of a
+     * bug. And either RTK bit implies `differential`, because an RTK solution IS a
+     * differentially corrected one. */
+    {
+        const uint8_t rtk = f->fix_flags
+            & (VTP_FIX_FLAGS_RTK_FLOAT | VTP_FIX_FLAGS_RTK_FIXED);
+        if (rtk == (VTP_FIX_FLAGS_RTK_FLOAT | VTP_FIX_FLAGS_RTK_FIXED)) return -1;
+        if (rtk && !(f->fix_flags & VTP_FIX_FLAGS_DIFFERENTIAL)) return -1;
+    }
     /* SPEC.md §5.5 — the notification length MUST equal the base record plus
      * exactly the bytes accounted for by ext_count. An encoder that writes a
      * count disagreeing with its own payload emits something no conforming
@@ -307,6 +319,9 @@ int vtp_encode_monitor_list(const vtp_monitor_page_t *p,
     for (uint8_t i = 0; i < p->count; i++)
         for (uint8_t j = (uint8_t)(i + 1); j < p->count; j++)
             if (entries[i].slot == entries[j].slot) return -1;
+    /* SPEC.md §13.5 -- every declared channel carries a deadline. */
+    for (uint8_t i = 0; i < p->count; i++)
+        if (entries[i].max_age == 0) return -1;
     memset(out, 0, needed);
 
     wr16(out + VTP_MONITOR_PAGE_OFF_TOTAL, p->total);

@@ -29,7 +29,7 @@
         "cccd": "notify",
         "written_by": "device",
         "read_by": "client",
-        "inert": "notifications are never sent",
+        "inert": "no CCCD to enable; notifications are never sent",
         "record": "gps_fix"
       },
       {
@@ -41,7 +41,7 @@
         "cccd": "notify",
         "written_by": "device",
         "read_by": "client",
-        "inert": "notifications are never sent",
+        "inert": "no CCCD to enable; notifications are never sent",
         "record": "can_header"
       },
       {
@@ -53,7 +53,7 @@
         "cccd": "notify",
         "written_by": "device",
         "read_by": "client",
-        "inert": "notifications are never sent",
+        "inert": "no CCCD to enable; notifications are never sent",
         "record": "imu_header"
       },
       {
@@ -67,7 +67,7 @@
         "write_type": "with-response",
         "written_by": "client",
         "read_by": "client",
-        "inert": "every opcode answers unsupported_opcode",
+        "inert": "writes are rejected with an ATT error; no opcode is parsed",
         "record": "control_response"
       },
       {
@@ -80,7 +80,7 @@
         "write_type": "with-response",
         "written_by": "client",
         "read_by": "device",
-        "inert": "every write answers with an ATT error and changes nothing",
+        "inert": "writes are rejected with an ATT error and change nothing",
         "record": "monitor_header"
       }
     ],
@@ -334,7 +334,8 @@
           "name": "num_sv"
         }
       ],
-      "reserved_from": 12
+      "reserved_from": 12,
+      "reserved_purpose": "Validity for fields added in a later minor"
     },
     "fix_flags": {
       "width": 1,
@@ -363,7 +364,8 @@
           "desc": "t_device is the epoch of the solution; when clear it is when the fix reached the device (SPEC.md 5.6)"
         }
       ],
-      "reserved_from": 5
+      "reserved_from": 5,
+      "reserved_purpose": "Additional solution-quality flags"
     },
     "capabilities": {
       "width": 4,
@@ -417,7 +419,59 @@
           ]
         }
       ],
-      "reserved_from": 8
+      "reserved_from": 8,
+      "reserved_purpose": "Roles and features added in a later minor"
+    },
+    "can_flags": {
+      "width": 1,
+      "bits": [
+        {
+          "bit": 0,
+          "name": "shedding",
+          "desc": "Device is discarding accepted frames (SPEC.md 6.3)"
+        }
+      ],
+      "reserved_from": 1,
+      "reserved_purpose": "Additional batch-level CAN status"
+    },
+    "imu_flags": {
+      "width": 1,
+      "bits": [
+        {
+          "bit": 0,
+          "name": "accel",
+          "desc": "Accelerometer triple is present"
+        },
+        {
+          "bit": 1,
+          "name": "gyro",
+          "desc": "Gyroscope triple is present"
+        },
+        {
+          "bit": 2,
+          "name": "saturated",
+          "desc": "A sample in this batch hit the sensor's limit (SPEC.md 7.2)"
+        }
+      ],
+      "reserved_from": 3,
+      "reserved_purpose": "Additional sensor groups"
+    },
+    "clock_flags": {
+      "width": 1,
+      "bits": [
+        {
+          "bit": 0,
+          "name": "gnss_disciplined",
+          "desc": "The device clock is disciplined by GNSS"
+        },
+        {
+          "bit": 1,
+          "name": "survives_reconnect",
+          "desc": "The device clock does not restart when the link drops"
+        }
+      ],
+      "reserved_from": 2,
+      "reserved_purpose": "Additional clock properties"
     },
     "monitor_validity": {
       "width": 1,
@@ -428,7 +482,8 @@
           "desc": "The client can currently supply this channel"
         }
       ],
-      "reserved_from": 1
+      "reserved_from": 1,
+      "reserved_purpose": "Validity for values added in a later minor"
     },
     "link_validity": {
       "width": 2,
@@ -454,7 +509,8 @@
           "desc": "phy_tx and phy_rx are valid"
         }
       ],
-      "reserved_from": 4
+      "reserved_from": 4,
+      "reserved_purpose": "Validity for link parameters added in a later minor"
     }
   },
   "records": {
@@ -538,7 +594,7 @@
           "offset": 21,
           "size": 1,
           "type": "u8",
-          "desc": "bit0 GNSS-disciplined, bit1 clock survives reconnect"
+          "bitmask": "clock_flags"
         },
         {
           "name": "max_notify_bytes",
@@ -777,14 +833,15 @@
           "offset": 13,
           "size": 1,
           "type": "u8",
-          "desc": "bit0 device is shedding load \u2014 discarding accepted frames (\u00a76.3)"
+          "bitmask": "can_flags"
         },
         {
           "name": "reserved",
           "offset": 14,
           "size": 2,
           "type": "u16",
-          "reserved": true
+          "reserved": true,
+          "desc": "Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned"
         }
       ]
     },
@@ -864,14 +921,15 @@
           "offset": 17,
           "size": 1,
           "type": "u8",
-          "desc": "bit0 accel present, bit1 gyro present, bit2 a sample in this batch saturated (SPEC.md 7.2)"
+          "bitmask": "imu_flags"
         },
         {
           "name": "reserved",
           "offset": 18,
           "size": 2,
           "type": "u16",
-          "reserved": true
+          "reserved": true,
+          "desc": "In-band IMU metadata"
         }
       ]
     },
@@ -972,7 +1030,8 @@
           "offset": 5,
           "size": 1,
           "type": "u8",
-          "reserved": true
+          "reserved": true,
+          "desc": "Paging metadata"
         }
       ]
     },
@@ -1001,7 +1060,7 @@
           "size": 1,
           "type": "u8",
           "units": "100ms",
-          "desc": "Longest this value may be shown without a refresh; 0 means no deadline of its own, but the device's liveness bound still applies (SPEC.md 13.5)"
+          "desc": "Longest this value may be shown without a refresh; MUST NOT be zero (SPEC.md 13.5)"
         }
       ]
     },
@@ -1029,7 +1088,8 @@
           "offset": 3,
           "size": 1,
           "type": "u8",
-          "reserved": true
+          "reserved": true,
+          "desc": "Update metadata"
         }
       ]
     },
@@ -1091,7 +1151,8 @@
           "offset": 5,
           "size": 1,
           "type": "u8",
-          "reserved": true
+          "reserved": true,
+          "desc": "Paging metadata"
         }
       ]
     },

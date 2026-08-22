@@ -107,6 +107,58 @@
       }
     },
     {
+      "name": "can-len-longer-than-payload",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 6 -- len 8 with one byte of payload. Padding to eight publishes seven bytes the caller never supplied, on a bus signal a client will decode as a measurement.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 8,
+            "payload": "00"
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-len-shorter-than-payload",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 6 -- len 0 with one byte of payload. Discarding it silently drops data the caller asked to send.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 0,
+            "payload": "aa"
+          }
+        ]
+      }
+    },
+    {
       "name": "gps-latitude-beyond-the-pole",
       "record": "gps_fix",
       "must_refuse": true,
@@ -117,6 +169,34 @@
           "validity": 4,
           "lat": 910000000,
           "lon": 0,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-rtk-float-and-fixed",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "desc": "SPEC.md 5.3 -- the two RTK bits are exclusive.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 0,
+          "fix_flags": 7,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-rtk-without-differential",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "desc": "SPEC.md 5.3 -- an RTK solution is a differentially corrected one, so the bit is implied and not optional.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 0,
+          "fix_flags": 2,
           "ext_count": 0
         }
       }
@@ -199,6 +279,31 @@
             "slot": 0,
             "channel": 7,
             "max_age": 10
+          }
+        ]
+      }
+    },
+    {
+      "name": "monitor-channel-with-no-deadline",
+      "record": "monitor_list",
+      "must_refuse": true,
+      "desc": "SPEC.md 13.5 -- every declared channel carries a deadline. A channel with none is a value a device can go on displaying forever after the client stopped sending it.",
+      "input": {
+        "page": {
+          "total": 2,
+          "index": 0,
+          "count": 2
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 20
+          },
+          {
+            "slot": 1,
+            "channel": 3,
+            "max_age": 0
           }
         ]
       }
@@ -317,11 +422,11 @@
           {
             "slot": 1,
             "channel": 3,
-            "max_age": 0
+            "max_age": 255
           }
         ]
       },
-      "expect_hex": "0200000002000001000a01030000"
+      "expect_hex": "0200000002000001000a010300ff"
     },
     {
       "name": "imu-ordinary-batch",

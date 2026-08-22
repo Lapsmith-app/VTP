@@ -86,6 +86,22 @@ int vtp_decode_gps_fix(const uint8_t *b, size_t len,
         && (o->head_mot < 0 || o->head_mot >= 36000000)) {
         *err = "head-out-of-range"; return -1;
     }
+    /* SPEC.md 5.3 -- a carrier-phase solution has either resolved its
+     * integer ambiguities or it has not, so both RTK bits at once is a claim about
+     * solution quality that means nothing. The natural client reading of the pair is
+     * "fixed wins", which upgrades a device's accuracy claim on the strength of a
+     * bug. And either RTK bit implies `differential`, because an RTK solution IS a
+     * differentially corrected one. */
+    {
+        const uint8_t rtk = o->fix_flags
+            & (VTP_FIX_FLAGS_RTK_FLOAT | VTP_FIX_FLAGS_RTK_FIXED);
+        if (rtk == (VTP_FIX_FLAGS_RTK_FLOAT | VTP_FIX_FLAGS_RTK_FIXED)) {
+            *err = "rtk-both"; return -1;
+        }
+        if (rtk && !(o->fix_flags & VTP_FIX_FLAGS_DIFFERENTIAL)) {
+            *err = "rtk-without-differential"; return -1;
+        }
+    }
     return 0;
 }
 
@@ -380,6 +396,16 @@ int vtp_decode_monitor_list(const uint8_t *b, size_t len,
                                  + (size_t)j * VTP_MONITOR_CHANNEL_SIZE
                                  + VTP_MONITOR_CHANNEL_OFF_SLOT];
             if (si == sj) { *err = "duplicate-slot"; return -1; }
+        }
+    }
+    /* SPEC.md §13.5 -- every declared channel carries a deadline, so a value
+     * a client stops refreshing always stops being shown. Zero used to mean
+     * "no deadline of its own", reconciled by a derived device-wide liveness
+     * bound; one rule per channel replaced both. */
+    for (uint8_t i = 0; i < p->count; i++) {
+        if (b[VTP_MONITOR_PAGE_SIZE + (size_t)i * VTP_MONITOR_CHANNEL_SIZE
+              + VTP_MONITOR_CHANNEL_OFF_MAX_AGE] == 0) {
+            *err = "zero-max-age"; return -1;
         }
     }
     return 0;

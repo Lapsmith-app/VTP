@@ -120,11 +120,7 @@ and no stream carries a clock of its own.
 A device MUST function correctly at an ATT MTU of 100 and MUST use up to the
 negotiated maximum when batching (§6, §7).
 
-The Device Information Service is a SHOULD, and §3.4 is where it is specified.
-This paragraph used to state it as a MUST, so the specification required and
-merely recommended the same service four sections apart — an implementer
-reading §2 built it and an implementer reading §3.4 did not, and both were
-conforming.
+The Device Information Service is a SHOULD, specified in §3.4.
 
 Signed integers are two's complement. Reserved fields MUST be written as zero
 and MUST be ignored on receive.
@@ -249,9 +245,19 @@ Total: **24 bytes**. All fields little-endian.
 | 16 | 2 | `u16` | `imu_rate_hz` | `Hz` |
 | 18 | 2 | `u16` | `imu_max_rate_hz` | `Hz` |
 | 20 | 1 | `u8` | `can_max_payload` | 8 for classic CAN, 64 for CAN FD |
-| 21 | 1 | `u8` | `clock_flags` | bit0 GNSS-disciplined, bit1 clock survives reconnect |
+| 21 | 1 | `u8` | `clock_flags` | bitmask `clock_flags` |
 | 22 | 2 | `u16` | `max_notify_bytes` | `bytes`; Largest notification this device will ever send; a fixed device ceiling, NOT the negotiated ATT payload (SPEC.md 4.2) |
 <!-- END GENERATED: info -->
+
+`clock_flags` bits:
+
+<!-- BEGIN GENERATED: bitmask:clock_flags -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `gnss_disciplined` | The device clock is disciplined by GNSS |
+| 1 | `survives_reconnect` | The device clock does not restart when the link drops |
+| 2+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:clock_flags -->
 
 `capabilities` bits:
 
@@ -295,21 +301,34 @@ last column says exactly what inert means for it.
 | Characteristic | Capability | Properties | CCCD | Written by | Read by | When the capability bit is clear |
 | --- | --- | --- | --- | --- | --- | --- |
 | `info` | — always present | `read` | — | device | client | never; Info is always meaningful |
-| `gps` | bit 0 (`gps`) | `notify` | **client MUST enable notifications** | device | client | notifications are never sent |
-| `can` | bit 1 (`can`) | `notify` | **client MUST enable notifications** | device | client | notifications are never sent |
-| `imu` | bit 2 (`imu`) | `notify` | **client MUST enable notifications** | device | client | notifications are never sent |
-| `control` | bit 4 (`control`) | `write`, `indicate` (write with-response) | **client MUST enable indications** | client | client | every opcode answers unsupported_opcode |
-| `monitor_values` | bit 3 (`monitor`) | `write` (write with-response) | — | client | device | every write answers with an ATT error and changes nothing |
+| `gps` | bit 0 (`gps`) | `notify` | notify — client enables it when the bit is set | device | client | no CCCD to enable; notifications are never sent |
+| `can` | bit 1 (`can`) | `notify` | notify — client enables it when the bit is set | device | client | no CCCD to enable; notifications are never sent |
+| `imu` | bit 2 (`imu`) | `notify` | notify — client enables it when the bit is set | device | client | no CCCD to enable; notifications are never sent |
+| `control` | bit 4 (`control`) | `write`, `indicate` (write with-response) | indicate — client enables it when the bit is set | client | client | writes are rejected with an ATT error; no opcode is parsed |
+| `monitor_values` | bit 3 (`monitor`) | `write` (write with-response) | — | client | device | writes are rejected with an ATT error and change nothing |
 <!-- END GENERATED: profile:attributes -->
 
 A device MUST NOT add a characteristic to the VTP/1 service beyond these, and
-MUST NOT expose one with properties beyond those listed. A client MUST NOT
-require any property the table does not list — a device MAY, for example, also
-make `gps` readable, and a client MUST NOT read it in place of subscribing.
+MUST expose at least the properties listed. It MAY expose more — making `gps`
+readable is a common convenience — and a client MUST NOT rely on any property
+the table does not list, so it MUST NOT read `gps` in place of subscribing.
 
-The alternative — omitting the characteristics a device does not implement — is
-what this replaces, and it fails for a reason that has nothing to do with
-elegance. Central stacks **cache the attribute table** across connections, and
+**An inert characteristic costs its implementer almost nothing**, and that is
+the point of requiring one. A device without the `control` bit exposes the
+Control characteristic and **rejects every write with an ATT error**; it does
+not parse opcodes, does not implement indications, and never answers
+`unsupported_opcode`, because answering requires the response path it does not
+have. The same goes for `monitor_values`. A GPS-only build is a service
+declaration, four inert attributes and one notify path.
+
+The CCCD column is conditional for the same reason. A client enables
+notifications on `gps` when the `gps` bit is set, and a device implements the
+CCCD for a stream it implements. Nothing has to be built for a role nobody
+claimed.
+
+The alternative — omitting the characteristics a device does not implement —
+fails for a reason that has nothing to do with elegance. Central stacks
+**cache the attribute table** across connections, and
 several cache it across reboots of the phone. A device whose table changes
 between connections, because a capability was switched off in firmware or
 because a build shipped without a role, hands the client a stale handle. The
@@ -342,9 +361,7 @@ mismatch, and MUST NOT guess which half was meant.
 without it. A CAN device forwards nothing until a client has sent
 `CAN_SUBSCRIBE` (§9.2), and a Monitor device cannot say which channels it wants
 except through `MONITOR_LIST` (§13.3). A device advertising either without
-Control is advertising a role no client can use, and this specification used to
-permit exactly that while `conformance/run.py` quietly required the opposite —
-the runner enforcing a rule the specification did not state.
+Control is advertising a role no client can use.
 
 `can_fd`, `masked_subscriptions` and `on_change_subscriptions` require `can`
 for the same reason: each qualifies how CAN subscriptions behave, and qualifies
@@ -525,19 +542,17 @@ measurement of zero. No field value anywhere in VTP/1 signals absence.
 | 5+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:fix_flags -->
 
-`rtk_float` and `rtk_fixed` are **mutually exclusive**. A carrier-phase
-solution has either resolved its integer ambiguities or it has not, so a device
-MUST NOT set both, and a client that receives both MUST treat the pair as
-unknown — neither RTK state — rather than picking the better of the two.
+`rtk_float` and `rtk_fixed` are **mutually exclusive**: a carrier-phase
+solution has either resolved its integer ambiguities or it has not. Either RTK
+bit also implies `differential`, since an RTK solution is by definition a
+differentially corrected one.
 
-Both being set was legal until this paragraph existed, and the natural client
-reading of it is "fixed wins", which upgrades a device's accuracy claim on the
-strength of a bug. Reporting unknown is the §1.1 answer: an ambiguous statement
-about solution quality is worth less than no statement.
-
-Either RTK bit implies `differential`, since an RTK solution is by definition a
-differentially corrected one. A device that sets an RTK bit MUST also set
-`differential`.
+A device MUST NOT set both RTK bits, and MUST set `differential` whenever it
+sets either. A receiver MUST reject a fix that breaks either rule, as it
+rejects any other self-contradictory record (§1.1) — the flags and the position
+came from the same bytes, and the natural client reading of both-RTK-set is
+"fixed wins", which would upgrade a device's accuracy claim on the strength of
+a bug.
 
 ### 5.4 Reference frames and derived quantities
 
@@ -639,9 +654,18 @@ Total: **16 bytes**. All fields little-endian.
 | 2 | 2 | `u16` | `dropped` | Frames accepted then discarded since the previous notification; excludes frames no subscription matched or a subscription mode did not select; saturates |
 | 4 | 8 | `u64` | `t_base` | `µs`; Bus-arrival time of record 0, on the device clock (§8.1) |
 | 12 | 1 | `u8` | `count` | — |
-| 13 | 1 | `u8` | `flags` | bit0 device is shedding load — discarding accepted frames (§6.3) |
-| 14 | 2 | `u16` | `reserved` | **reserved — MUST be zero** |
+| 13 | 1 | `u8` | `flags` | bitmask `can_flags` |
+| 14 | 2 | `u16` | `reserved` | Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned; **reserved — MUST be zero** |
 <!-- END GENERATED: can_header -->
+
+`flags` bits:
+
+<!-- BEGIN GENERATED: bitmask:can_flags -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `shedding` | Device is discarding accepted frames (SPEC.md 6.3) |
+| 1+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:can_flags -->
 
 <!-- BEGIN GENERATED: can_record -->
 *One CAN frame with a device-measured bus-arrival time.*
@@ -878,9 +902,20 @@ Total: **20 bytes**. All fields little-endian.
 | 4 | 8 | `u64` | `t_base` | `µs`; Device-clock timestamp of sample 0 (§8.1) |
 | 12 | 4 | `u32` | `period` | `µs`; Interval between consecutive samples |
 | 16 | 1 | `u8` | `count` | — |
-| 17 | 1 | `u8` | `flags` | bit0 accel present, bit1 gyro present, bit2 a sample in this batch saturated (SPEC.md 7.2) |
-| 18 | 2 | `u16` | `reserved` | **reserved — MUST be zero** |
+| 17 | 1 | `u8` | `flags` | bitmask `imu_flags` |
+| 18 | 2 | `u16` | `reserved` | In-band IMU metadata; **reserved — MUST be zero** |
 <!-- END GENERATED: imu_header -->
+
+`flags` bits:
+
+<!-- BEGIN GENERATED: bitmask:imu_flags -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `accel` | Accelerometer triple is present |
+| 1 | `gyro` | Gyroscope triple is present |
+| 2 | `saturated` | A sample in this batch hit the sensor's limit (SPEC.md 7.2) |
+| 3+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:imu_flags -->
 
 <!-- BEGIN GENERATED: imu_sample -->
 *Sensor-frame acceleration and rotation. Vehicle alignment is the client's job.*
@@ -1119,11 +1154,10 @@ It is not an audit trail, and a client MUST NOT use it to reconcile counts.
 
 That is a deliberate limit on how hard a device has to work. Attributing every
 lost item to exactly one notification means owning the counter transactionally
-across encoding, transmit-queue refusal and supersession — three places a
-firmware author would otherwise have to get right — and the failure mode when
-they do not is that a count lands one notification late. A count that arrives
-one notification late still says the device is losing data, at roughly the rate
-it is losing it, which is the entire question the field exists to answer.
+across encoding, transmit-queue refusal and supersession, and the failure mode
+when a device does not is that a count lands one notification late — which
+still says the device is losing data, at roughly the rate it is losing it, and
+that is the whole question the field exists to answer.
 
 So: a device MUST count every accepted-then-discarded item, MUST saturate
 rather than wrap, and MUST NOT report loss it did not have. A device MAY report
@@ -1411,7 +1445,7 @@ Total: **6 bytes**. All fields little-endian.
 | 0 | 2 | `u16` | `total` | Subscriptions installed, across all pages |
 | 2 | 2 | `u16` | `index` | Table index of the first entry in this page |
 | 4 | 1 | `u8` | `count` | Entries in this page |
-| 5 | 1 | `u8` | `reserved` | **reserved — MUST be zero** |
+| 5 | 1 | `u8` | `reserved` | Paging metadata; **reserved — MUST be zero** |
 <!-- END GENERATED: can_list_page -->
 
 followed by `count` entries:
@@ -1573,7 +1607,7 @@ implement this one.
 ### 9.8 Setting a rate
 
 `GPS_SET_RATE` and `IMU_SET_RATE` each take one `hz:u16` and answer with no
-detail. Four things follow, and none of them was stated:
+detail. Four rules govern them:
 
 **Zero stops the stream.** `hz` of 0 is a valid request meaning "send nothing".
 The device stops producing notifications on that characteristic, keeps the
@@ -1891,7 +1925,7 @@ Total: **6 bytes**. All fields little-endian.
 | 0 | 2 | `u16` | `total` | Channels requested, across all pages |
 | 2 | 2 | `u16` | `index` | Table index of the first entry in this page |
 | 4 | 1 | `u8` | `count` | Entries in this page |
-| 5 | 1 | `u8` | `reserved` | **reserved — MUST be zero** |
+| 5 | 1 | `u8` | `reserved` | Paging metadata; **reserved — MUST be zero** |
 <!-- END GENERATED: monitor_page -->
 
 followed by `count` entries:
@@ -1905,7 +1939,7 @@ Total: **4 bytes**. All fields little-endian.
 | --- | --- | --- | --- | --- |
 | 0 | 1 | `u8` | `slot` | The device's own name for this value; used in monitor_value |
 | 1 | 2 | `u16` | `channel` | enum `channel` |
-| 3 | 1 | `u8` | `max_age` | `100ms`; Longest this value may be shown without a refresh; 0 means no deadline of its own, but the device's liveness bound still applies (SPEC.md 13.5) |
+| 3 | 1 | `u8` | `max_age` | `100ms`; Longest this value may be shown without a refresh; MUST NOT be zero (SPEC.md 13.5) |
 <!-- END GENERATED: monitor_channel -->
 
 `slot` is the device's own name for the value; the client quotes it back in
@@ -1925,7 +1959,7 @@ Total: **4 bytes**. All fields little-endian.
 | --- | --- | --- | --- | --- |
 | 0 | 2 | `u16` | `seq` | Updates written by the client; +1 each, wraps, restarts at 0 per connection |
 | 2 | 1 | `u8` | `count` | — |
-| 3 | 1 | `u8` | `reserved` | **reserved — MUST be zero** |
+| 3 | 1 | `u8` | `reserved` | Update metadata; **reserved — MUST be zero** |
 <!-- END GENERATED: monitor_header -->
 
 <!-- BEGIN GENERATED: monitor_value -->
@@ -1989,60 +2023,34 @@ device MUST render a value as unavailable once `max_age` has passed since the
 write that last carried it**, exactly as it renders one whose `present` bit is
 clear.
 
-`max_age` of zero means the value has **no deadline of its own** — not that it
-is immortal. A device that declares any channel MUST declare a non-zero
-`max_age` on at least one of them, and the largest `max_age` it declares is its
-**liveness bound**: when no write at all has arrived within that, **every**
-value becomes unavailable, including those whose own `max_age` is zero.
+**`max_age` MUST NOT be zero.** Every channel a device declares carries a
+deadline, so every channel expires, and there is no second rule. A device MUST
+NOT declare a channel with `max_age` of 0, and a receiver MUST reject a
+declaration containing one.
 
-**A device MAY declare no channels at all.** `total` and `count` of zero is a
-legal declaration and is the state of a device that has not yet configured
-itself, or one whose display currently needs nothing from the client. It has no
-liveness bound, because it has nothing to keep alive and nothing to expire, and
-the paragraph above is vacuous rather than violated. A client MUST accept the
-empty declaration and MUST NOT write values to a device that asked for none —
-every slot it could name is a slot the device did not ask for, and §13.1
-already says those are ignored.
+A device MAY declare no channels at all — `total` and `count` of zero is the
+state of a device that has not yet configured itself, or one whose display
+currently needs nothing. A client MUST accept the empty declaration and MUST
+NOT write values to a device that asked for none; every slot it could name is
+one the device did not ask for, and §13.1 already says those are ignored.
 
-That reading was previously left to the reader. The corpus carried a legal
-zero-channel declaration while this section said a device MUST declare a
-non-zero `max_age` on at least one channel, which a device with no channels
-cannot do, so the two documents disagreed about whether such a device conformed.
-
-Without that, "never expires" defeats the rule it sits beside. If the client is
-gone, a best lap time is as wrong as a lap timer — the session it belonged to
-has ended, and the screen is asserting otherwise. It is merely less obviously
-wrong, which makes it worse rather than better. The liveness bound costs no
-field: a device that declares any perishable channel has already said how long
-it is willing to wait, and a client keeping that channel fresh keeps everything
-else alive as a side effect.
-
-The client MUST refresh before then. A client SHOULD still write only when
+The client MUST refresh before the deadline. A client SHOULD write only when
 something it can supply has changed — but "nothing has changed" is not a reason
 to let a value expire, so it MUST write anyway as the deadline approaches, and
 that write costs one small packet at whatever interval the device chose.
 
-This replaces a rule that said the opposite: that there was no minimum rate and
-a device MUST NOT infer expiry from silence. The reasoning was that a client
-sends nothing precisely when nothing has changed, which is true and is not the
-failure that matters. The failure that matters is a client that has stopped
-sending because it crashed, was backgrounded, or wedged — with the link still
-up, so the device sees nothing wrong. Under the old rule such a device
-displayed a lap time from four minutes ago, indefinitely, and the driver
-reading it had no way to tell. A stale value shown as current is a plausible
-wrong value, which §1.1 exists to prevent, and the display is the worst place
-in this protocol to allow one.
-
 `max_age` is per channel because the channels differ in kind. A `lap_time`
 ticking up is wrong within a second of going stale; a `best_lap_time` stays
-true until it is beaten and can reasonably never expire. A single device-wide
-timeout would be set for the most perishable channel and would then demand
-pointless traffic for the rest.
+true until it is beaten, so it can carry a deadline measured in tens of seconds
+rather than one. A single device-wide timeout would be set for the most
+perishable channel and would then demand pointless traffic for the rest.
 
 A device SHOULD choose a `max_age` several times its expected update interval.
 It bounds how wrong a display may be, not how often a client must talk, and one
 set close to the update rate turns an ordinary scheduling delay into a
-flickering screen.
+flickering screen. For a channel that only changes occasionally, choose a large
+deadline rather than none: `best_lap_time` at 25.5 seconds is the longest this
+field can express, and that is still a bound.
 
 ### 13.6 What Monitor is not
 
@@ -2054,16 +2062,24 @@ anything it records. Monitor drives a display; the recording is the client's.
 
 ## Appendix A — Reserved space
 
+Generated from `schema/vtp1.yaml`, so it cannot disagree with the bitmask and
+record tables above.
+
+<!-- BEGIN GENERATED: reserved_space -->
 | Location | Reserved | Purpose |
 | --- | --- | --- |
 | `gps_fix.validity` | bits 12–31 | Validity for fields added in a later minor |
-| `gps_fix.fix_flags` | bits 4–7 | Additional solution-quality flags |
+| `gps_fix.fix_flags` | bits 5–7 | Additional solution-quality flags |
 | `info.capabilities` | bits 8–31 | Roles and features added in a later minor |
-| `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (§6.9); high byte unassigned |
-| `can_list_page.reserved` | 1 byte | Paging metadata |
+| `can_header.flags` | bits 1–7 | Additional batch-level CAN status |
+| `imu_header.flags` | bits 3–7 | Additional sensor groups |
+| `info.clock_flags` | bits 2–7 | Additional clock properties |
+| `monitor_value.validity` | bits 1–7 | Validity for values added in a later minor |
+| `link_params.validity` | bits 4–15 | Validity for link parameters added in a later minor |
+| `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned |
+| `imu_header.reserved` | 2 bytes | In-band IMU metadata |
 | `monitor_page.reserved` | 1 byte | Paging metadata |
 | `monitor_header.reserved` | 1 byte | Update metadata |
-| `monitor_value.validity` | bits 1–7 | Validity for values added in a later minor |
-| `imu_header.reserved` | 2 bytes | In-band IMU metadata |
-| `imu_header.flags` | bits 3–7 | Additional sensor groups |
-| Extension types | `0x00`–`0xFF` | `0x80`–`0xFF` are reserved for vendor-private use and MUST NOT be assigned by this specification |
+| `can_list_page.reserved` | 1 byte | Paging metadata |
+| Extension types | `0x80`–`0xFF` | Vendor-private; this specification MUST NOT assign them (§5.5) |
+<!-- END GENERATED: reserved_space -->

@@ -362,21 +362,27 @@ def main():
     check(declared["page"]["total"] <= vtp1.MONITOR_MAX_CHANNELS,
           f"a device MUST NOT ask for more channels than fit in one complete "
           f"write: {declared['page']['total']} > {vtp1.MONITOR_MAX_CHANNELS}")
-    perishable = [e for e in declared["entries"] if e["max_age"]]
-    durable = [e for e in declared["entries"] if not e["max_age"]]
-    check(perishable and durable,
-          "this device should declare both kinds of channel, or the expiry "
-          "rule is only half exercised")
+    # SPEC.md §13.5 — every declared channel carries a deadline, and none of
+    # them is zero. There used to be two kinds of channel here, "perishable"
+    # and "durable", plus a derived device-wide liveness bound to expire the
+    # durable ones; one rule per channel replaced all of it.
+    check(all(e["max_age"] for e in declared["entries"]),
+          f"every declared channel MUST carry a non-zero max_age: "
+          f"{[(e['slot'], e['max_age']) for e in declared['entries']]}")
+    deadlines = sorted(declared["entries"], key=lambda e: e["max_age"])
+    check(deadlines[0]["max_age"] != deadlines[-1]["max_age"],
+          "this device should declare channels with DIFFERENT deadlines, or "
+          "the per-channel half of the rule is not exercised")
 
-    # The SHORTEST perishable channel, so its own deadline falls inside the
-    # liveness bound and the two rules can be told apart.
-    slot_fast = min(perishable, key=lambda e: e["max_age"])["slot"]
-    slot_never = durable[0]["slot"]
+    # The shortest and the longest, so one expires while the other is still
+    # inside its own deadline. That is the whole of §13.5 now.
+    slot_fast = deadlines[0]["slot"]
+    slot_slow = deadlines[-1]["slot"]
     # SPEC.md §13.4 — a write is a complete statement, so it carries every
     # declared slot and not just the two this check is about.
     all_slots = [e["slot"] for e in declared["entries"]]
     def value_for(slot):
-        return {slot_fast: 12345, slot_never: 99999}.get(slot, 7)
+        return {slot_fast: 12345, slot_slow: 99999}.get(slot, 7)
     write = struct.pack("<HBB", 1, len(all_slots), 0) + b"".join(
         struct.pack("<BBi", s, dev.MONITOR_PRESENT, value_for(s))
         for s in all_slots)
@@ -393,21 +399,19 @@ def main():
     check(not present_at(deadline + 100_000)[slot_fast],
           "a value past its max_age MUST be rendered unavailable, not held on "
           "screen as though it were current")
-    check(present_at(deadline + 100_000)[slot_never],
-          "a channel declaring max_age 0 never expires, so it MUST survive a "
-          "deadline that belongs to another channel")
-    # SPEC.md §13.5 — max_age 0 is "no deadline of its own", not immortal. The
-    # liveness bound is the largest max_age declared, and past it nothing
-    # survives: a best lap from a session that ended is as wrong as a stopped
-    # lap timer, and only less obviously so.
-    bound = max(e["max_age"] for e in declared["entries"]) * 100_000
-    check(present_at(bound - 100_000)[slot_never],
-          "inside the liveness bound a max_age 0 channel MUST still be shown")
-    after = present_at(bound + 100_000)
+    check(present_at(deadline + 100_000)[slot_slow],
+          "a deadline belongs to its own channel: a longer-lived channel MUST "
+          "survive the expiry of a shorter-lived one")
+    # ...and it expires too, on its own deadline. Nothing is immortal, which
+    # is what the liveness bound existed to guarantee and what a per-channel
+    # deadline now guarantees directly.
+    slow_deadline = by_slot[slot_slow]["max_age"] * 100_000
+    check(present_at(slow_deadline - 100_000)[slot_slow],
+          "a value inside its own max_age MUST still be shown")
+    after = present_at(slow_deadline + 100_000)
     check(not any(after.values()),
-          f"past the liveness bound NOTHING may still be shown, including "
-          f"max_age 0 channels; still present: "
-          f"{sorted(s for s, p in after.items() if p)}")
+          f"past the LONGEST declared deadline nothing may still be shown; "
+          f"still present: {sorted(s for s, p in after.items() if p)}")
 
     # SPEC.md §13.4 — a slot twice in one write, and nothing says which wins.
     twice = (struct.pack("<HBB", 2, len(all_slots) + 1, 0)
@@ -996,6 +1000,32 @@ def main():
     check(run_smoke(dict(captured, mtu=247, info=overrun)),
           "smoketest.py passed a device whose notifications exceed the "
           "max_notify_bytes it published (SPEC.md 4.2)")
+
+    # A device that connects, answers Info and then sends nothing is the most
+    # likely way for a first bring-up to fail, and an empty stream used to be
+    # only a note -- so the all-silent device passed.
+    silent = {"gps": [], "can": [], "imu": [], "mtu": 247,
+              "info": vtp1.decode_info(smoke_dev.info())}
+    check(run_smoke(silent),
+          "smoketest.py passed a device that sent nothing at all while Info "
+          "said it was running")
+
+    # ...and the rate-aware half of that: GPS silent while Info promises 10 Hz
+    # is a fault, whatever the other streams did.
+    check(run_smoke(dict(captured, gps=[], mtu=247,
+                         info=vtp1.decode_info(smoke_dev.info()))),
+          "smoketest.py passed a silent GPS stream on a device whose Info "
+          "reports a non-zero gps_rate_hz")
+
+    # The converse must NOT fail: a device that says it is not running GPS and
+    # then does not send any is behaving correctly, and a check that cannot
+    # distinguish those two is a check that will be turned off on real
+    # hardware.
+    quiet_by_design = vtp1.decode_info(smoke_dev.info())
+    quiet_by_design["gps_rate_hz"] = 0
+    check(not run_smoke(dict(captured, gps=[], mtu=247, info=quiet_by_design)),
+          "smoketest.py failed a device that reports gps_rate_hz 0 and sends "
+          "no GPS, which is exactly what such a device should do")
 
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)

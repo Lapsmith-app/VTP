@@ -58,7 +58,7 @@ def drive(impl, cases):
     """
     stdin = "".join(f"{c['record']}\t{json.dumps(c['input'])}\n" for c in cases)
     proc = subprocess.run(shlex.split(impl), input=stdin, capture_output=True,
-                          text=True)
+                          text=True, cwd=ROOT)
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     answers = []
     for i, _ in enumerate(cases):
@@ -99,6 +99,21 @@ def main():
     answers, proc = drive(args.impl, cases)
     passed = failed = 0
 
+    # An implementation that answers every case correctly and then exits
+    # non-zero has not passed. This runner deliberately tolerates SHORT output
+    # so a crash is attributed to the case it happened on rather than
+    # invalidating the whole run — and that tolerance quietly swallowed the
+    # exit status too, so a wrapper printing 24 correct answers and exiting 7
+    # was reported as 24 passed. The two are separate questions and both are
+    # asked now.
+    if proc.returncode != 0:
+        print(f"    FAIL the implementation exited {proc.returncode}")
+        if proc.stderr.strip():
+            print("    --- stderr ---")
+            for line in proc.stderr.strip().splitlines()[-10:]:
+                print(f"    {line}")
+        failed += 1
+
     for case, got in zip(cases, answers):
         name, want_refusal = case["name"], case["must_refuse"]
         if got is None:
@@ -136,8 +151,9 @@ def main():
             print(f"    ok   {name}" + (f" — {why}" if why else ""))
 
     scope = f"roles: {', '.join(['core'] + roles)}" if roles else "all roles"
+    exited = "" if proc.returncode == 0 else f", exit status {proc.returncode}"
     print(f"\n{passed} passed, {failed} failed, {len(cases)} producer case(s) "
-          f"({scope})")
+          f"({scope}{exited})")
     if proc.stderr.strip() and args.verbose:
         print("--- implementation stderr ---", file=sys.stderr)
         print(proc.stderr, file=sys.stderr)

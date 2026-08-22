@@ -62,12 +62,26 @@ def note(text):
     print(f"  ---- {text}")
 
 
-async def collect(client, name, seconds, sink):
-    """Subscribe to `name` and gather notifications for `seconds`."""
-    uuid = CHAR[name]
-    await client.start_notify(uuid, lambda _h, data: sink.append(bytes(data)))
+async def collect(client, sinks, seconds):
+    """Subscribe to every named stream, gather for `seconds`, then stop.
+
+    All of them at once, and this is not a convenience. Collecting them one
+    after another made SPEC.md 8.1's central promise untestable and then
+    tested it anyway: three streams gathered in series have three disjoint
+    device-clock windows, so the overlap check below failed on a device that
+    was behaving perfectly. Sharing a clock is only observable while they are
+    sharing a wall-clock second.
+    """
+    for name, sink in sinks.items():
+        await client.start_notify(
+            CHAR[name],
+            lambda _h, data, sink=sink: sink.append(bytes(data)))
     await asyncio.sleep(seconds)
-    await client.stop_notify(uuid)
+    for name in sinks:
+        try:
+            await client.stop_notify(CHAR[name])
+        except Exception as exc:                       # noqa: BLE001
+            note(f"{name}: stop_notify raised {exc!r}; harmless on disconnect")
 
 
 async def one_connection(BleakClient, address, args, first):
@@ -109,53 +123,77 @@ async def one_connection(BleakClient, address, args, first):
 
         # ---- Control: a real indication on a real link -----------------
         answers = []
+        can_subscribed = None
+
+        async def request(opcode, tag, params=b"", what=""):
+            """Write one request and wait for the indication that answers it.
+
+            Every request is checked. CAN_SUBSCRIBE used to be written and
+            slept on, so a device that refused it -- table_full, bad_params,
+            or an unsupported_opcode from a build with no CAN -- produced a
+            silent CAN stream that this test then blamed on the radio.
+            """
+            before = len(answers)
+            t0 = time.monotonic()
+            await client.write_gatt_char(
+                CHAR["control"], bytes([opcode, tag]) + params, response=True)
+            for _ in range(60):
+                if len(answers) > before:
+                    break
+                await asyncio.sleep(0.05)
+            if not check(len(answers) > before,
+                         f"{what}: written, but no indication arrived; a "
+                         f"device MUST answer every request it applies "
+                         f"(SPEC.md 9)"):
+                return None, 0.0
+            resp = vtp1.decode_control_response(answers[before])
+            check(resp["tag"] == tag,
+                  f"{what}: the response echoed tag {resp['tag']}, not {tag}")
+            return resp, (time.monotonic() - t0) * 1000
+
         if has["control"]:
             await client.start_notify(
                 CHAR["control"], lambda _h, d: answers.append(bytes(d)))
+
             # TIME_SYNC: parameterless, idempotent, and the answer is a record
             # rather than an empty ok, so a wrong offset shows up immediately.
-            t0 = time.monotonic()
-            await client.write_gatt_char(CHAR["control"], bytes([0x30, 0x5A]),
-                                         response=True)
-            for _ in range(50):
-                if answers:
-                    break
-                await asyncio.sleep(0.05)
-            rtt_ms = (time.monotonic() - t0) * 1000
-            if check(bool(answers),
-                     "TIME_SYNC was written but no indication arrived; a "
-                     "device MUST answer every request it applies (SPEC.md 9)"):
-                resp = vtp1.decode_control_response(answers[0])
-                check(resp["tag"] == 0x5A,
-                      f"the response echoed tag {resp['tag']}, not 0x5A")
-                check(resp["status"] == 0,
-                      f"TIME_SYNC answered status {resp['status']}")
-                if resp["status"] == 0:
-                    ts = vtp1.decode_time_sync(
-                        bytes.fromhex(resp["detail_hex"]))
-                    check(ts["t_device_tx"] >= ts["t_device_rx"],
-                          "t_device_tx precedes t_device_rx (SPEC.md 9.7)")
-                    note(f"TIME_SYNC round trip {rtt_ms:.1f} ms, device "
-                         f"processing {(ts['t_device_tx'] - ts['t_device_rx']) / 1000:.2f} ms")
+            resp, rtt_ms = await request(0x30, 0x5A, what="TIME_SYNC")
+            if resp and check(resp["status"] == 0,
+                              f"TIME_SYNC answered status {resp['status']}"):
+                ts = vtp1.decode_time_sync(bytes.fromhex(resp["detail_hex"]))
+                check(ts["t_device_tx"] >= ts["t_device_rx"],
+                      "t_device_tx precedes t_device_rx (SPEC.md 9.7)")
+                note(f"TIME_SYNC round trip {rtt_ms:.1f} ms, device "
+                     f"processing "
+                     f"{(ts['t_device_tx'] - ts['t_device_rx']) / 1000:.2f} ms")
 
-        # ---- The streams ------------------------------------------------
-        wanted = [(n, s) for n, s in (("gps", gps), ("can", can), ("imu", imu))
-                  if has[n]]
-        if has["can"] and has["control"]:
-            # A CAN device forwards nothing until asked (SPEC.md 9.2), so a
-            # smoke test that only subscribed would report a silent stream and
-            # blame the device.
-            await client.write_gatt_char(
-                CHAR["control"],
-                bytes([0x02, 0x5B]) + (0x1A0).to_bytes(4, "little")
-                + bytes([0]) + (0).to_bytes(2, "little"),
-                response=True)
-            await asyncio.sleep(0.3)
+            # A CAN device forwards nothing until asked (SPEC.md 9.2).
+            if has["can"]:
+                resp, _ = await request(
+                    0x02, 0x5B,
+                    (0x1A0).to_bytes(4, "little") + bytes([0])
+                    + (0).to_bytes(2, "little"),
+                    what="CAN_SUBSCRIBE")
+                can_subscribed = bool(resp) and resp["status"] == 0
+                check(can_subscribed,
+                      f"CAN_SUBSCRIBE was refused (status "
+                      f"{resp['status'] if resp else 'none'}), so nothing "
+                      f"below can say anything about the CAN stream")
+                if can_subscribed:
+                    detail = bytes.fromhex(resp["detail_hex"])
+                    check(len(detail) == 2,
+                          f"CAN_SUBSCRIBE answered ok with {len(detail)} "
+                          f"detail byte(s); SPEC.md 9 says the detail is a "
+                          f"u16 handle")
 
-        for name, sink in wanted:
-            await collect(client, name, args.seconds, sink)
+        # ---- The streams, together --------------------------------------
+        sinks = {n: s for n, s in (("gps", gps), ("can", can), ("imu", imu))
+                 if has[n]}
+        if sinks:
+            await collect(client, sinks, args.seconds)
 
-    return {"info": info, "gps": gps, "can": can, "imu": imu, "mtu": mtu}
+    return {"info": info, "gps": gps, "can": can, "imu": imu, "mtu": mtu,
+            "can_subscribed": can_subscribed}
 
 
 def inspect(result, args):
@@ -164,11 +202,32 @@ def inspect(result, args):
     decoders = {"gps": lambda p: vtp1.decode_gps_fix(p),
                 "can": lambda p: vtp1.decode_can_batch(p)["header"],
                 "imu": lambda p: vtp1.decode_imu_batch(p)["header"]}
+
+    # Silence is only acceptable where the device itself said to expect it.
+    # An empty stream used to be a note, so a device that connected, answered
+    # Info and then sent absolutely nothing passed this test -- which is the
+    # single most likely way for a first bring-up to fail.
+    #
+    # GPS and IMU publish the rate they are CURRENTLY running at (SPEC.md 4);
+    # non-zero means notifications are due and none arriving is a fault. CAN
+    # has no such field: a real vehicle bus can be genuinely quiet, so CAN
+    # silence stays a note -- but only once the subscription that gates it has
+    # been confirmed installed, which `one_connection` now checks.
+    expected = {
+        "gps": info.get("gps_rate_hz", 0) > 0,
+        "imu": info.get("imu_rate_hz", 0) > 0,
+        "can": False,
+    }
     clocks = {}
     for name, decode in decoders.items():
         payloads = result[name]
         if not payloads:
-            note(f"{name}: nothing arrived")
+            check(not expected[name],
+                  f"{name}: nothing arrived in {args.seconds:.0f}s, but Info "
+                  f"says the device is running at "
+                  f"{info.get(name + '_rate_hz', 0)} Hz")
+            if not expected[name]:
+                note(f"{name}: nothing arrived, and Info did not promise any")
             continue
         note(f"{name}: {len(payloads)} notification(s), "
              f"largest {max(len(p) for p in payloads)} bytes")
@@ -223,6 +282,18 @@ def inspect(result, args):
         if hi >= lo:
             note(f"{len(clocks)} streams share a device clock over a "
                  f"{(hi - lo) / 1e6:.1f} s overlap")
+    elif len(clocks) == 1:
+        note("only one stream produced data, so SPEC.md 8.1's shared clock is "
+             "not exercised")
+    else:
+        # Every rate could legitimately be zero and the bus genuinely quiet,
+        # and each of those is a note above. All of them at once is not a
+        # device this test can say anything about: no telemetry crossed the
+        # radio, which is the one thing a smoke test exists to witness.
+        check(False,
+              "no notification arrived on any characteristic, so nothing was "
+              "carried over the air; a green run here would mean only that "
+              "the device answered a read")
 
 
 async def main_async(args):

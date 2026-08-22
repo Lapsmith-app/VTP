@@ -177,7 +177,7 @@ typedef struct {
 typedef struct {
     uint8_t  slot;
     uint16_t channel;
-    uint8_t  max_age;   /* 100 ms units; 0 never expires. SPEC.md §13.5 */
+    uint8_t  max_age;   /* 100 ms units; never zero. SPEC.md §13.5 */
 } vtp_monitor_channel_t;
 
 /* SPEC.md §13.4 -- the most channels a device may ask for: as many values as

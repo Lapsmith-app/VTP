@@ -166,6 +166,29 @@ def _check_gps_ranges(fix):
                 f"gps_fix.head_mot {fix['head_mot']} is outside 0°..360°")
 
 
+FIX_FLAG = {b["name"]: 1 << b["bit"]
+            for b in SCHEMA["bitmasks"]["fix_flags"]["bits"]}
+
+
+def _check_fix_flags(fix):
+    """SPEC.md 5.3 -- a carrier-phase solution has either resolved its
+integer ambiguities or it has not, so both RTK bits at once is a claim about
+solution quality that means nothing. The natural client reading of the pair is
+"fixed wins", which upgrades a device's accuracy claim on the strength of a
+bug. And either RTK bit implies `differential`, because an RTK solution IS a
+differentially corrected one."""
+    flags = fix.get("fix_flags", 0)
+    rtk = flags & (FIX_FLAG["rtk_float"] | FIX_FLAG["rtk_fixed"])
+    if rtk == (FIX_FLAG["rtk_float"] | FIX_FLAG["rtk_fixed"]):
+        raise EncodeError(
+            "gps_fix.fix_flags sets both rtk_float and rtk_fixed; a "
+            "carrier-phase solution is one or the other")
+    if rtk and not flags & FIX_FLAG["differential"]:
+        raise EncodeError(
+            "gps_fix.fix_flags claims an RTK solution without differential; "
+            "an RTK solution is a differentially corrected one")
+
+
 def encode_gps_fix(fix, ext=b""):
     """SPEC.md §5. `ext` is appended verbatim and MUST match `ext_count`.
 
@@ -179,6 +202,7 @@ def encode_gps_fix(fix, ext=b""):
     to follow them to the end.
     """
     _check_gps_ranges(fix)
+    _check_fix_flags(fix)
     ext = bytes(ext)
     declared = fix.get("ext_count", 0)
     off, seen = 0, 0
@@ -358,6 +382,13 @@ def encode_monitor_list(page, entries):
             f"monitor_page.total is {page.get('total')}, more than the "
             f"{MONITOR_MAX_CHANNELS} that fit in one complete write at the "
             f"minimum ATT MTU")
+    # SPEC.md §13.5 — every declared channel carries a deadline.
+    for e in entries:
+        if not e.get("max_age"):
+            raise EncodeError(
+                f"monitor_channel slot {e.get('slot')} declares max_age 0; "
+                f"a channel with no deadline is a value that can be displayed "
+                f"forever after the client stopped sending it")
     out = bytearray(_pack("monitor_page", _zero_reserved("monitor_page", page)))
     for e in entries:
         out += _pack("monitor_channel", _zero_reserved("monitor_channel", e))

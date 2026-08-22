@@ -104,8 +104,9 @@ PLIST
 # versions against the same peripheral -- and the bundle is exactly the thing
 # nobody rebuilds, so the drift is invisible until the radio misbehaves.
 echo "==> installing pinned dependencies into the bundle"
+# requirements.txt here already pulls in the root file, which carries PyYAML.
 "$APP/Contents/MacOS/VTPPeripheral" -m pip install -q --break-system-packages \
-    -r "$HERE/requirements.txt" -r "$HERE/../../requirements.txt"
+    -r "$HERE/requirements.txt"
 
 echo "==> signing"
 codesign --force --deep --sign - "$APP"

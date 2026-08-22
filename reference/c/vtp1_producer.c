@@ -316,7 +316,15 @@ static void do_can_batch(const jctx *c, const jv *in) {
     /* The C encoder reads `hdr->count` frames from the array, so a count that
      * disagrees with the array is not a call this API can express — there is
      * no length to compare against. The Python encoder rejects it explicitly;
-     * here the harness does, and says so, rather than reading off the end. */
+     * here the harness does, and says so, rather than reading off the end.
+     *
+     * The same applies one level down, to `len` against the payload actually
+     * supplied, and missing it made this adapter certify output the Python
+     * encoder refuses: `len` of 8 behind one byte of payload produced a frame
+     * with seven zeroes the caller never supplied, and `len` of 0 behind one
+     * byte silently dropped it. Both answered `ok`. A producer suite whose
+     * adapter reshapes its input has the exact defect the suite exists to
+     * find, one layer further out. */
     if ((int)hdr.count != n) { refuse("can_header.count disagrees with `records`"); return; }
 
     static vtp_can_frame_t frames[MAX_FRAMES];
@@ -327,6 +335,10 @@ static void do_can_batch(const jctx *c, const jv *in) {
         size_t plen = 0;
         if (unhex(jhex(c, r, "payload"), payloads[i], sizeof payloads[i], &plen) < 0) {
             refuse("malformed frame payload"); return;
+        }
+        if (plen != (size_t)jint(c, r, "len")) {
+            refuse("can_record.len disagrees with the payload supplied");
+            return;
         }
         frames[i].dt       = (uint16_t)jint(c, r, "dt");
         /* A negative identifier lands here exactly as firmware would land it:

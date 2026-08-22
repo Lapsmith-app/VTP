@@ -38,13 +38,30 @@ class FakeDelegate:
 class FakeServer:
     """The subset of bless's BlessServer that serve.py touches."""
 
-    def __init__(self, clock, step_us=5_000):
+    def __init__(self, clock, step_us=5_000, bless_semantics=False):
         self._chars = {}
         self._clock = clock
         self._step_us = step_us
         self.peripheral_manager_delegate = FakeDelegate()
 
+        # bless 0.3.0's `is_connected()` does NOT report a link. It returns
+        # `len(_central_subscriptions) > 0` -- "at least one central is
+        # subscribed to at least one characteristic" -- because a CoreBluetooth
+        # peripheral is never told about a connect or a disconnect at all; the
+        # delegate has didSubscribe and didUnsubscribe and nothing else.
+        #
+        # Off by default, because a fake that models only the awkward backend
+        # cannot express "a link dropped" and half these tests are about that.
+        # On, it reproduces exactly what the peripheral will meet on macOS, and
+        # a test can then pin what the peripheral does about it. Without this
+        # the fake was MORE honest than the real thing, and the transport tests
+        # passed on a signal that does not exist.
+        self.bless_semantics = bless_semantics
         self.connected = False
+        # A central's identity. Stable across connect/disconnect for the same
+        # peer, exactly as CBCentral.identifier is -- which is why identity
+        # cannot be used to tell a reconnection from a resubscribe.
+        self.central = "central"
         # Characteristic name -> list of payloads the stack accepted.
         self.wire = {}
         # When False, update_value refuses, exactly as a full transmit queue
@@ -66,6 +83,8 @@ class FakeServer:
         # makes device time a function of loop iterations rather than of how
         # fast the test machine happens to be.
         self._clock[0] += self._step_us
+        if self.bless_semantics:
+            return bool(self.peripheral_manager_delegate._central_subscriptions)
         return self.connected
 
     def get_characteristic(self, uuid):
@@ -103,7 +122,21 @@ class FakeServer:
 
     def subscribe(self, name):
         subs = self.peripheral_manager_delegate._central_subscriptions
-        subs.setdefault("central", []).append(self._uuid(name).lower())
+        subs.setdefault(self.central, []).append(self._uuid(name).lower())
+
+    def unsubscribe(self, name):
+        """One CCCD cleared, with the link still up.
+
+        The case bless cannot distinguish from a disconnect, and therefore the
+        case worth being able to write a test about.
+        """
+        subs = self.peripheral_manager_delegate._central_subscriptions
+        uuid = self._uuid(name).lower()
+        for central, chars in list(subs.items()):
+            if uuid in chars:
+                chars.remove(uuid)
+            if not chars:
+                del subs[central]
 
     def sent(self, name):
         return self.wire.get(name, [])

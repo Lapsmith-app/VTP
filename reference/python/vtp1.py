@@ -84,6 +84,20 @@ def decode_gps_fix(buf):
         if not 0 <= fix["head_mot"] < 36_000_000:
             raise Reject("head-out-of-range")
 
+    # SPEC.md 5.3 -- a carrier-phase solution has either resolved its
+    # integer ambiguities or it has not, so both RTK bits at once is a claim about
+    # solution quality that means nothing. The natural client reading of the pair is
+    # "fixed wins", which upgrades a device's accuracy claim on the strength of a
+    # bug. And either RTK bit implies `differential`, because an RTK solution IS a
+    # differentially corrected one.
+    flag = {b["name"]: 1 << b["bit"]
+            for b in SCHEMA["bitmasks"]["fix_flags"]["bits"]}
+    rtk = fix["fix_flags"] & (flag["rtk_float"] | flag["rtk_fixed"])
+    if rtk == (flag["rtk_float"] | flag["rtk_fixed"]):
+        raise Reject("rtk-both")
+    if rtk and not fix["fix_flags"] & flag["differential"]:
+        raise Reject("rtk-without-differential")
+
     known = {m["value"] for m in SCHEMA["enums"]["fix_type"]["members"]}
     fix["fix_type_known"] = fix["fix_type"] in known
 
@@ -319,6 +333,12 @@ def decode_monitor_list(buf):
     # declaration larger than that has made its own rule unsatisfiable.
     if page["total"] > MONITOR_MAX_CHANNELS:
         raise Reject("too-many-channels")
+    # SPEC.md §13.5 — every declared channel carries a deadline, so a value the
+    # client stops refreshing always stops being shown. Zero used to mean "no
+    # deadline of its own", reconciled by a derived device-wide liveness bound;
+    # one rule per channel replaced both.
+    if any(e["max_age"] == 0 for e in entries):
+        raise Reject("zero-max-age")
     return {"page": page, "entries": entries}
 
 

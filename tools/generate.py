@@ -480,8 +480,14 @@ def spec_tables(schema):
         props = ", ".join(f"`{x}`" for x in ch["properties"])
         if ch.get("write_type"):
             props += f" (write {ch['write_type']})"
-        cccd = {"none": "—", "notify": "**client MUST enable notifications**",
-                "indicate": "**client MUST enable indications**"}[ch["cccd"]]
+        # Conditional on the capability bit, because that is what makes an
+        # inert characteristic cost its implementer nothing: a GPS-only device
+        # exposes Control and answers writes with an ATT error, and does not
+        # implement indications for a role it does not have.
+        cccd = {"none": "—",
+                "notify": "notify — client enables it when the bit is set",
+                "indicate": "indicate — client enables it when the bit is set"
+                }[ch["cccd"]]
         lines.append(f"| `{ch['name']}` | {bit} | {props} | {cccd} | "
                      f"{ch['written_by']} | {ch['read_by']} | {ch['inert']} |")
     out["profile:attributes"] = "\n".join(lines)
@@ -494,6 +500,32 @@ def spec_tables(schema):
         zeroed = ", ".join(f"`{f}`" for f in capacity.get(b["name"], [])) or "—"
         lines.append(f"| {b['bit']} | `{b['name']}` | {req} | {zeroed} |")
     out["profile:capabilities"] = "\n".join(lines)
+
+    # Appendix A. Hand-written until now, and wrong: it listed fix_flags bits
+    # 4-7 as reserved after bit 4 was assigned to `solution_epoch`. A table
+    # restating what the schema already says is a table that drifts, so it is
+    # derived instead.
+    lines = ["| Location | Reserved | Purpose |", "| --- | --- | --- |"]
+    for name, bm in schema["bitmasks"].items():
+        rf = bm.get("reserved_from")
+        if rf is None:
+            continue
+        top = bm["width"] * 8 - 1
+        where = [f"`{r}.{f['name']}`" for r, rec in schema["records"].items()
+                 for f in rec["fields"] if f.get("bitmask") == name]
+        span = f"bit {rf}" if rf == top else f"bits {rf}–{top}"
+        lines.append(f"| {', '.join(where) or '`' + name + '`'} | {span} | "
+                     f"{bm.get('reserved_purpose', '—')} |")
+    for rname, rec in schema["records"].items():
+        for f in rec["fields"]:
+            if not f.get("reserved"):
+                continue
+            size = f"{f['size']} byte" + ("s" if f["size"] != 1 else "")
+            lines.append(f"| `{rname}.{f['name']}` | {size} | "
+                         f"{f.get('desc', '—')} |")
+    lines.append("| Extension types | `0x80`–`0xFF` | Vendor-private; this "
+                 "specification MUST NOT assign them (§5.5) |")
+    out["reserved_space"] = "\n".join(lines)
 
     uu = json.loads(UUIDS.read_text())
 
@@ -842,6 +874,26 @@ def vectors(schema):
              "and MUST NOT fall back to 3D.",
              note="Falling back to a plausible default is the sentinel mistake in a "
                   "different costume."),
+        # SPEC.md 5.3 -- the two RTK bits are exclusive, and either implies
+        # differential. Both were legal until this existed, and the natural
+        # client reading of both-set is "fixed wins", which upgrades a device's
+        # accuracy claim on the strength of a bug.
+        case(schema, "gps_fix", "rtk-float-and-fixed",
+             dict(nominal, seq=11, fix_flags=0b0000_0111),
+             "Both RTK bits set. MUST be rejected: a carrier-phase solution "
+             "has either resolved its integer ambiguities or it has not, so "
+             "the pair is a quality claim that means nothing.",
+             reject="rtk-both"),
+        case(schema, "gps_fix", "rtk-without-differential",
+             dict(nominal, seq=12, fix_flags=0b0000_0100),
+             "rtk_fixed without differential. MUST be rejected: an RTK "
+             "solution IS a differentially corrected one, so this describes "
+             "no receiver.",
+             reject="rtk-without-differential"),
+        case(schema, "gps_fix", "rtk-fixed-well-formed",
+             dict(nominal, seq=13, fix_flags=0b0000_1101),
+             "rtk_fixed with differential and a disciplined clock, which is "
+             "what a working RTK receiver reports."),
         case(schema, "gps_fix", "reserved-validity-bits-set",
              dict(nominal, seq=7, validity=full | (1 << 20)),
              "A future minor set validity bit 20. A decoder MUST ignore the unknown bit "
@@ -1553,10 +1605,14 @@ def vectors(schema):
                      "A display device asking for the four values a lap timer shows. "
                      "It names channels; it does not send an expression to evaluate.",
                      dict(total=4, index=0, count=4),
-                     [dict(slot=0, channel=CH["lap_time"]),
-                      dict(slot=1, channel=CH["last_lap_time"]),
-                      dict(slot=2, channel=CH["delta_best"]),
-                      dict(slot=3, channel=CH["lap_number"])]),
+                     # Every channel carries a deadline (SPEC.md 13.5). This
+                     # vector used to leave max_age defaulted to 0 on all four
+                     # -- the canonical declaration violating the section that
+                     # governs it, in a corpus that checked everything else.
+                     [dict(slot=0, channel=CH["lap_time"], max_age=20),
+                      dict(slot=1, channel=CH["last_lap_time"], max_age=255),
+                      dict(slot=2, channel=CH["delta_best"], max_age=20),
+                      dict(slot=3, channel=CH["lap_number"], max_age=255)]),
         monitor_list("no-channels-requested",
                      "A device that implements the role but currently wants nothing. "
                      "Legal, and the state before it has configured itself.",
@@ -1566,7 +1622,7 @@ def vectors(schema):
                      "report it unknown, MUST NOT substitute another, and MUST answer "
                      "the slot as absent rather than omitting it.",
                      dict(total=1, index=0, count=1),
-                     [dict(slot=9, channel=4242)]),
+                     [dict(slot=9, channel=4242, max_age=20)]),
         monitor_update("first-lap-nothing-to-report",
                        "Mid first lap: elapsed time is known, but there is no last lap "
                        "and no delta yet. Those slots are present-bit clear and zero -- "
@@ -1626,30 +1682,45 @@ def vectors(schema):
                  "two channel assignments out of adjacent memory.",
          "record": "monitor_list",
          "hex": (encode(schema, "monitor_page", dict(total=3, index=0, count=3))
-                 + encode(schema, "monitor_channel", dict(slot=0, channel=1))).hex(),
+                 + encode(schema, "monitor_channel",
+                            dict(slot=0, channel=1, max_age=20))).hex(),
          "must_reject": "length"},
         {"name": "long-page",
          "desc": "One entry declared, one present, plus a trailing byte. MUST be "
                  "rejected.",
          "record": "monitor_list",
          "hex": (encode(schema, "monitor_page", dict(total=1, index=0, count=1))
-                 + encode(schema, "monitor_channel", dict(slot=0, channel=1))
+                 + encode(schema, "monitor_channel",
+                            dict(slot=0, channel=1, max_age=20))
                  + b"\x00").hex(),
          "must_reject": "length"},
         monitor_list("per-channel-expiry",
-                     "Three channels with different max_age. SPEC.md 13.5 -- a "
-                     "lap time ticking up is wrong within a second of going "
-                     "stale, a best lap stays true until it is beaten, so the "
-                     "deadline is per channel and 0 means never.",
+                     "Three channels with three different deadlines. SPEC.md "
+                     "13.5 -- a lap time ticking up is wrong within a second "
+                     "of going stale while a best lap stays true until it is "
+                     "beaten, so the deadline is per channel. Every channel "
+                     "has one.",
                      dict(total=3, index=0, count=3),
                      [dict(slot=0, channel=1, max_age=20),    # lap_time, 2 s
-                      dict(slot=1, channel=3, max_age=0),     # best_lap, never
+                      dict(slot=1, channel=3, max_age=255),   # best_lap, 25.5 s
                       dict(slot=2, channel=7, max_age=5)]),   # speed, 500 ms
         monitor_list("max-age-at-ceiling",
-                     "max_age 255 is 25.5 seconds, the longest a device can ask "
-                     "for short of never.",
+                     "max_age 255 is 25.5 seconds, the longest deadline this "
+                     "field can express. A channel that changes rarely takes "
+                     "this rather than none: SPEC.md 13.5 has no `never`.",
                      dict(total=1, index=0, count=1),
                      [dict(slot=0, channel=3, max_age=255)]),
+        monitor_list("zero-max-age",
+                     "A channel declaring max_age 0. MUST be rejected: SPEC.md "
+                     "13.5 gives every declared channel a deadline, so a value "
+                     "the client stops sending always stops being shown. Zero "
+                     "used to mean `no deadline of its own`, reconciled by a "
+                     "derived device-wide liveness bound -- two rules, and a "
+                     "canonical vector that satisfied neither.",
+                     dict(total=2, index=0, count=2),
+                     [dict(slot=0, channel=1, max_age=20),
+                      dict(slot=1, channel=3, max_age=0)],
+                     must_reject="zero-max-age"),
         monitor_list("duplicate-slot-in-declaration",
                      "Two entries claiming slot 0. MUST be rejected: the slot is "
                      "how a value is addressed, so every later update would be "
@@ -1908,12 +1979,44 @@ def vectors(schema):
          "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
                    "records": [dict(dt=0, id=0x1A0, extended=False, fd=False,
                                     rtr=False, len=9, payload="00" * 9)]}},
+        # `len` is the field a receiver uses to walk the batch, so a `len`
+        # that disagrees with the payload behind it is a frame whose remaining
+        # records are at the wrong offsets. Both directions, because an encoder
+        # that pads and an encoder that truncates are the same defect with
+        # different symptoms -- and the C adapter did one of each before these
+        # existed, answering `ok` to both.
+        {"name": "can-len-longer-than-payload",
+         "record": "can_batch", "must_refuse": True,
+         "desc": "SPEC.md 6 -- len 8 with one byte of payload. Padding to "
+                 "eight publishes seven bytes the caller never supplied, on a "
+                 "bus signal a client will decode as a measurement.",
+         "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
+                   "records": [dict(dt=0, id=0x1A0, extended=False, fd=False,
+                                    rtr=False, len=8, payload="00")]}},
+        {"name": "can-len-shorter-than-payload",
+         "record": "can_batch", "must_refuse": True,
+         "desc": "SPEC.md 6 -- len 0 with one byte of payload. Discarding it "
+                 "silently drops data the caller asked to send.",
+         "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
+                   "records": [dict(dt=0, id=0x1A0, extended=False, fd=False,
+                                    rtr=False, len=0, payload="aa")]}},
         {"name": "gps-latitude-beyond-the-pole",
          "record": "gps_fix", "must_refuse": True,
          "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position "
                  "bit set so the range rule applies.",
          "input": {"fix": dict(seq=0, validity=V["position"], lat=910_000_000,
                                lon=0, ext_count=0)}},
+        {"name": "gps-rtk-float-and-fixed",
+         "record": "gps_fix", "must_refuse": True,
+         "desc": "SPEC.md 5.3 -- the two RTK bits are exclusive.",
+         "input": {"fix": dict(seq=0, validity=0, fix_flags=0b0000_0111,
+                               ext_count=0)}},
+        {"name": "gps-rtk-without-differential",
+         "record": "gps_fix", "must_refuse": True,
+         "desc": "SPEC.md 5.3 -- an RTK solution is a differentially "
+                 "corrected one, so the bit is implied and not optional.",
+         "input": {"fix": dict(seq=0, validity=0, fix_flags=0b0000_0010,
+                               ext_count=0)}},
         {"name": "gps-ext-count-disagrees",
          "record": "gps_fix", "must_refuse": True,
          "desc": "SPEC.md 5.5 -- three extensions declared, none supplied.",
@@ -1939,6 +2042,14 @@ def vectors(schema):
          "input": {"page": dict(total=2, index=0, count=2),
                    "entries": [dict(slot=0, channel=1, max_age=10),
                                dict(slot=0, channel=7, max_age=10)]}},
+        {"name": "monitor-channel-with-no-deadline",
+         "record": "monitor_list", "must_refuse": True,
+         "desc": "SPEC.md 13.5 -- every declared channel carries a deadline. "
+                 "A channel with none is a value a device can go on "
+                 "displaying forever after the client stopped sending it.",
+         "input": {"page": dict(total=2, index=0, count=2),
+                   "entries": [dict(slot=0, channel=1, max_age=20),
+                               dict(slot=1, channel=3, max_age=0)]}},
         {"name": "monitor-asks-for-more-than-fits",
          "record": "monitor_list", "must_refuse": True,
          "desc": "SPEC.md 13.4 -- more channels than fit in one complete write.",
@@ -1981,12 +2092,12 @@ def vectors(schema):
          "desc": "Distinct slots, inside the channel cap.",
          "input": {"page": dict(total=2, index=0, count=2),
                    "entries": [dict(slot=0, channel=1, max_age=10),
-                               dict(slot=1, channel=3, max_age=0)]},
+                               dict(slot=1, channel=3, max_age=255)]},
          "expect_hex": (
              encode(schema, "monitor_page",
                     dict(total=2, index=0, count=2, reserved=0))
              + encode(schema, "monitor_channel", dict(slot=0, channel=1, max_age=10))
-             + encode(schema, "monitor_channel", dict(slot=1, channel=3, max_age=0))
+             + encode(schema, "monitor_channel", dict(slot=1, channel=3, max_age=255))
          ).hex()},
         {"name": "imu-ordinary-batch",
          "record": "imu_batch", "must_refuse": False,

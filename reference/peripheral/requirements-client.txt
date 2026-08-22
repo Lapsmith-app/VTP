@@ -4,5 +4,9 @@
 # different libraries, and a smoke test of the radio needs the other end of the
 # link from everything else in this directory.
 #
+# smoketest.py decodes with reference/python/vtp1.py, which reads
+# schema/vtp1.yaml, so the root requirements come too.
+#
 # Needs a real Bluetooth adapter. Nothing in CI installs this.
+-r ../../requirements.txt
 bleak==0.22.3

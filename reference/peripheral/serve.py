@@ -99,24 +99,81 @@ CHAR_NAMES = {}
 
 
 class ConnectionTracker:
-    """Edge detection over a connection flag.
+    """Edge detection over "a central is being served".
 
     Separated out and kept pure because the two things that hang off an edge
-    are not cosmetic: a rising edge is where SPEC.md §8.2 restarts sequence
-    numbers and §9.2 clears the subscription table, and a device that never
+    are not cosmetic: a rising edge is where SPEC.md 8.2 restarts sequence
+    numbers and 9.2 clears the subscription table, and a device that never
     sees an edge never does either. This peripheral did not, for its whole
     life, because the transport never told it.
+
+    WHAT THIS EDGE ACTUALLY IS, which is not what it looks like
+    ----------------------------------------------------------
+    It is NOT a physical connect or disconnect. A CoreBluetooth peripheral is
+    never told about either one: the delegate has exactly two central-facing
+    callbacks, `didSubscribeToCharacteristic` and
+    `didUnsubscribeFromCharacteristic`, and no connect/disconnect pair at all.
+    bless 0.3.0's `is_connected()` therefore reports
+    `len(_central_subscriptions) > 0` -- "at least one central is subscribed to
+    at least one characteristic". That is the only link-ish signal the platform
+    offers a peripheral, and this file used to call it a connection without
+    saying so.
+
+    The difference is visible: a client that unsubscribes from every
+    characteristic while staying connected looks exactly like a disconnect, and
+    resubscribing looks exactly like a new connection.
+
+    WHY THE EDGE IS STILL TAKEN, AMBIGUITY AND ALL
+    ---------------------------------------------
+    Because the two possible mistakes are not symmetric.
+
+      * Resetting on a resubscribe that was not a reconnection costs the
+        client its CAN subscription table and restarts `seq`. A client must
+        already tolerate both -- they are what every real reconnection does --
+        and it can see the restart in the very next notification.
+
+      * NOT resetting on a reconnection that was not a resubscribe hands the
+        next connection the previous one's sequence numbers and subscription
+        table. SPEC.md 8.2 exists so a client never has to tell a reconnection
+        from a wrap, and 9.2 exists so it never inherits state it did not
+        install. A client cannot detect either failure.
+
+    The second is unrecoverable and silent, so where the signal is ambiguous
+    this errs towards resetting. `central` is tracked alongside so the log can
+    say which of the two it probably was -- a same-identity rising edge is
+    most likely a resubscribe, a different identity is certainly a new central
+    -- but both reset, because "probably" is not something to bet a client's
+    subscription table on.
+
+    A backend that does expose a real link edge (the fake transport in
+    gattsim.py can be told to, and a BlueZ peripheral has one) feeds it in here
+    unchanged and gets exactly the semantics the names suggest.
     """
 
     def __init__(self):
         self.connected = False
+        self.central = None
 
-    def update(self, is_connected):
-        """Return 'connected', 'disconnected', or None when nothing changed."""
+    def update(self, is_connected, central=None):
+        """Return 'connected', 'disconnected', or None when nothing changed.
+
+        `central` is the identity of the central being served, when the backend
+        exposes one. It never suppresses an edge; it is carried so the caller
+        can describe what it saw.
+        """
         if is_connected == self.connected:
+            # A different central without the flag ever dropping: on a backend
+            # that reports subscriptions, one central replacing another between
+            # two polls. Definitely a new connection.
+            if is_connected and central is not None and central != self.central:
+                self.central = central
+                return "connected"
             return None
         self.connected = is_connected
-        return "connected" if is_connected else "disconnected"
+        if is_connected:
+            self.central = central
+            return "connected"
+        return "disconnected"
 
 
 def _describe_request(value):
@@ -292,6 +349,10 @@ class Peripheral:
         self.server = None
         self.screen = screen
         self._link = ConnectionTracker()
+        # The identity served by the PREVIOUS link, kept past the reset so the
+        # log can say whether a rising edge was a new central or the same one
+        # resubscribing.
+        self._last_central = None
         # Everything the debug panel shows. Kept here rather than in the device
         # because it is transport truth, not device truth: how many
         # notifications the stack accepted is not something the device knows.
@@ -422,6 +483,21 @@ class Peripheral:
             (time.strftime("%H:%M:%S"),
              _describe_request(request).split(" params=")[0], status))
 
+    def _central_identity(self):
+        """Which central bless believes it is serving, or None.
+
+        The keys of `_central_subscriptions` are central UUID strings. Note
+        that CoreBluetooth keeps a CBCentral's identifier STABLE across
+        connections to the same peer, so an unchanged identity does not mean
+        the link never dropped -- it is a hint for the log, never a reason to
+        skip a reset. See ConnectionTracker.
+        """
+        try:
+            subs = self.server.peripheral_manager_delegate._central_subscriptions
+        except AttributeError:
+            return None
+        return sorted(subs)[0] if subs else None
+
     def _subscribed(self):
         """Characteristic names a central has enabled notifications on.
 
@@ -542,18 +618,28 @@ class Peripheral:
     # that idempotent -- whichever loses the race sees no edge at all.
 
     def _observe_link_up(self):
-        """A GATT callback is itself evidence that a central is connected."""
-        if self._link.update(True) == "connected":
+        """A GATT callback is itself evidence that a central is being served."""
+        if self._link.update(True, self._central_identity()) == "connected":
             self._on_connected()
 
     def _on_connected(self):
         # A connection starts from a known state. Without this the device
         # carries the previous client's subscriptions and sequence numbers into
         # the next connection, which 9.2 forbids.
+        same = (self._last_central is not None
+                and self._last_central == self._link.central)
+        self._last_central = self._link.central
         self.device.on_connect()
         self._reset_transport_state()
         log.info("CLIENT CONNECTED — sequence numbers restarted, "
                  "subscription table cleared")
+        if same:
+            # Worth saying out loud, because it is the one case where this
+            # peripheral resets state on a link that may never have dropped.
+            log.info("  (the same central identity as before: on this backend "
+                     "a reconnection and a resubscribe are indistinguishable, "
+                     "and SPEC.md 9.2 is the safe way to be wrong — see "
+                     "ConnectionTracker)")
 
     def _on_disconnected(self):
         # 9.2 clears the table when the LINK DROPS, not when the next one
@@ -566,6 +652,10 @@ class Peripheral:
             log.warning("%d control response(s) undelivered when the link "
                         "dropped", undelivered)
         log.info("CLIENT DISCONNECTED — subscription table cleared")
+        log.info("  (strictly: no central is subscribed to anything. This "
+                 "backend cannot tell that from a dropped link, so a client "
+                 "that unsubscribes from everything and stays connected "
+                 "reaches here too)")
 
     def _reset_transport_state(self):
         """Everything this transport holds on behalf of ONE link.
@@ -733,7 +823,8 @@ class Peripheral:
             # A GATT callback may already have taken the rising edge; the
             # tracker makes that idempotent, so this handles whichever the pump
             # is first to see, and nothing twice.
-            event = self._link.update(await self.server.is_connected())
+            event = self._link.update(await self.server.is_connected(),
+                                      self._central_identity())
             if event == "connected":
                 self._on_connected()
             elif event == "disconnected":

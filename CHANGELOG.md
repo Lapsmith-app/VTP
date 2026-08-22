@@ -8,6 +8,117 @@ conformance vector.
 
 ## [Unreleased]
 
+### Review of PR #24 — checks that gave misleading results
+
+Four of these sat behind a green CI run, which is the reason they matter more
+than their size suggests.
+
+- **Producer conformance could certify broken output.** The C adapter never
+  compared the payload supplied against the declared CAN `len`, so `len` of 8
+  behind one byte silently padded seven zeroes onto a bus signal and `len` of 0
+  behind one byte silently discarded it — both answered `ok`, while the Python
+  encoder refused both. The adapter reshaping its input is the exact defect the
+  producer suite exists to find, one layer further out. Two mismatch vectors
+  now pin both directions.
+
+- **`conformance/produce.py` ignored the implementation's exit status.** A
+  wrapper printing all correct answers and then exiting 7 was reported as a
+  pass. The runner deliberately tolerates *short* output, so a crash is
+  attributed to the case it happened on rather than invalidating the run, and
+  that tolerance had quietly swallowed the exit status too. They are separate
+  questions and both are asked now. (`run.py` already checked; `produce.py`
+  did not.)
+
+- **The real-radio smoke test could false-pass and false-fail.** It collected
+  GPS, CAN and IMU one after another and then required their device-clock
+  windows to overlap, which a healthy device cannot do — three streams gathered
+  in series have three disjoint windows. All three are now subscribed together,
+  gathered once, and stopped. Conversely an empty stream was only a note, so a
+  device that connected, answered Info and sent nothing at all passed. GPS and
+  IMU silence is now a failure when Info reports a non-zero current rate; CAN
+  silence stays a note, because a real bus can be quiet — but the
+  `CAN_SUBSCRIBE` that gates it is checked, where it used to be written and
+  slept on. No data on any stream is a failure outright.
+
+- **Monitor freshness still had two rules and a third to reconcile them.**
+  `max_age` of zero meant "no deadline of its own", and a derived device-wide
+  *liveness bound* — the largest deadline declared — then expired those
+  channels anyway. The canonical four-channel vector satisfied none of it, with
+  every channel at zero. **Every declared channel now MUST carry a non-zero
+  `max_age`**, and the liveness bound is gone. A channel that changes rarely
+  takes the 25.5 s ceiling rather than an exemption. Both decoders reject a
+  zero deadline, both encoders refuse to emit one.
+
+- **The connection-race fix claimed more than it delivered.** `serve.py` treated
+  bless's `is_connected()` as a physical link edge. In pinned bless 0.3.0 that
+  method returns `len(_central_subscriptions) > 0` — "at least one central is
+  subscribed" — because a CoreBluetooth peripheral is never told about a
+  connect or a disconnect at all; the delegate has `didSubscribe` and
+  `didUnsubscribe` and no connect/disconnect pair.
+
+  The behaviour is kept and the claim is corrected, because the two possible
+  mistakes are not equal: resetting on a resubscribe costs a CAN table and a
+  `seq` restart the client must already tolerate and can see, while failing to
+  reset on a real reconnection hands the next connection the previous one's
+  state in a way §8.2 and §9.2 exist to prevent and no client can detect. The
+  tracker now carries the central's identity so the log can say which it
+  probably was, `gattsim.py` can reproduce the backend's semantics
+  (`bless_semantics=True`), and `transport_selftest.py` pins the behaviour.
+  `reference/peripheral/README.md` has the table of what this backend can and
+  cannot tell you.
+
+- **Inert characteristics were too expensive.** §4.1 required a GPS-only device
+  to answer `unsupported_opcode` on Control, which means parsing opcodes and
+  implementing indications for a role it does not have. An inert characteristic
+  now **rejects writes with an ATT error** and implements nothing else, and the
+  CCCD requirements are conditional on the capability bit. A GPS-only build is a
+  service declaration, four inert attributes and one notify path.
+
+  The same section forbade properties beyond those listed and then permitted a
+  readable `gps` two sentences later. A device MUST expose at least the listed
+  properties and MAY expose more; a client MUST NOT rely on any that are not
+  listed.
+
+### Fixed — smaller
+
+- **Appendix A is generated.** It was hand-written and had drifted: it listed
+  `fix_flags` bits 4–7 as reserved after bit 4 was assigned to
+  `solution_epoch`. A table restating what the schema already says is a table
+  that drifts.
+
+- **`can_header.flags`, `imu_header.flags` and `info.clock_flags` are proper
+  schema bitmasks.** They were plain `u8` fields with a prose description, so
+  nothing derived their reserved ranges: Appendix A listed them by hand and
+  neither encoder masked them, which is the one rule SPEC.md §2 states about
+  reserved bits. Both encoders now zero them from the generated masks.
+
+- **The RTK combinations are enforced, not just described.** `rtk_float` and
+  `rtk_fixed` are mutually exclusive and either implies `differential`; both
+  decoders reject a fix that breaks either rule and both encoders refuse to
+  produce one. The prose said "treat the pair as unknown" while the codecs
+  rejected — the specification now says reject, consistently with every other
+  self-contradictory record.
+
+- **`reference/peripheral/requirements.txt` includes the root requirements.**
+  It named only `bless`, so the documented standalone install failed on
+  `import yaml` at the first line that mattered — and the peripheral's own
+  README told people to run exactly that. Same for the new client requirements.
+
+- **A length vector stopped isolating its own rule.** Requiring a non-zero
+  `max_age` gave `monitor/long-page` a second reason to reject, which masked
+  the trailing-bytes check from the mutation sweep. Caught by the sweep, which
+  is what it is for; the vector now carries a valid deadline so only its length
+  is wrong.
+
+### Changed
+
+- **SPEC.md is a specification again.** The postmortems — "this used to say
+  X", "the runner enforced a rule the specification did not state" — are the
+  reasoning behind a rule, not the rule, and they belong where the reasoning
+  lives. They have moved to RATIONALE.md, which gains a section on the
+  contradictions this review closed and one on what the reference peripheral's
+  backend cannot observe. The history stays here in the changelog.
+
 ### The consistency pass — third review
 
 The reviewer's second pass was made against a production standards-body bar and
