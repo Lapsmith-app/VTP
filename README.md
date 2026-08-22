@@ -12,6 +12,80 @@ clock, with no lossy packing.
 
 ---
 
+## Why VTP/1 exists
+
+A DIY logger has three things bolted to it: a GNSS receiver, a CAN transceiver
+and an IMU. Getting all three into an app currently means two unrelated
+protocols, over two transports, on two clocks that have no defined relationship
+— so you cannot say where the car was when the driver lifted, only roughly. CAN
+frames make it worse: they carry no timestamp at all, so the client stamps
+arrival, folding in Bluetooth stack latency and connection-event jitter. Tens of
+milliseconds, unbounded at the top end, and systematically worse under load —
+which is exactly when the data matters.
+
+VTP/1 carries all three over one BLE link, timestamped by the device against one
+monotonic clock, so cross-channel alignment is arithmetic instead of guesswork.
+
+### This is a budget increase, not a disagreement
+
+[RaceChrono's DIY BLE API](https://github.com/aollin/racechrono-ble-diy-device)
+established that a published, vendor-neutral contract for hand-built loggers is
+worth having, and it has served that ecosystem for the better part of a decade —
+a longer run than most protocols manage, and worth more than any single
+improvement listed below. It was designed when a BLE notification carried
+**20 bytes**: the default ATT MTU of 23 minus three bytes of header, and on the
+hardware of the day not a default you could negotiate away.
+
+Twenty bytes for a complete position solution is a severe budget, and nearly
+every difference below is something that budget forced. **What changed is the
+budget, not the judgement.** A negotiated ATT MTU of 185 is universal on
+mainstream phones today and 247 is common, so VTP/1 is what the same problem
+looks like when a notification carries roughly twelve times as much. Several
+decisions are carried over unchanged because they were right and are not obvious
+— equations rather than DBC for CAN decoding, the device as a dumb pipe, per-id
+rate limiting enforced in the device.
+
+### What the extra room buys
+
+| Where the 20-byte budget lands | What VTP/1 does instead |
+| --- | --- |
+| **No shared clock.** GPS carries a UTC-derived timestamp, CAN carries none, and the IMU is on a different protocol entirely. | One monotonic device clock across all three streams. Every CAN frame carries a 10 µs offset measured by the device at bus arrival. Alignment becomes arithmetic. |
+| **Absence is a magic value**, because a validity mask does not fit. Latitude `0x7FFFFFFF` decodes to 214.7°, HDOP `0xFF` to 25.5 — a missed check yields a plausible number, and a plausible number survives review. | A 32-bit validity bitmask, and a hard rule that a field whose bit is clear MUST be zero and MUST be reported absent. No value anywhere means "no data", so there is no check to forget. |
+| **Motion data lives somewhere else** — a board with an IMU reaches for a second, NMEA-shaped stream over RFCOMM or TCP/IP, with a different data model and no CAN. | IMU is a first-class role on the same service, batched and stamped against the same clock. At 200 Hz it costs about 2.4 kB/s and eleven notifications per second. |
+| **One CAN frame per notification.** BLE is bounded by notifications per connection event, so the ceiling sits near 270 frames/s — roughly 7% of a busy 500 kbit/s bus. | Batched frames: fifteen classic frames in one notification at a 247-byte MTU, and a ceiling near 4,000 frames/s. Fewer, fuller packets also occupy *less* airtime for the same frame rate, so everything else on the phone's radio is better off. |
+| **Loss is invisible.** With no sequence number and no drop counter, "the bus went quiet" and "I lost four hundred frames" look identical. | Every stream carries a sequence number, a count of what the device discarded, and a flag for active load shedding. Loss becomes a number a user interface can show. |
+| **Capacity is never expressed.** How many filters will it hold, what rate will it sustain, does it speak CAN FD? Filters are write-only: no read-back, no per-command result, no error when the table is full. | Info declares slots, rate ceilings and payload support; the control channel is tagged request/response with typed failures (`table_full`, `rate_exceeded`); and `CAN_LIST` returns the installed table, so a client verifies state rather than assuming it. |
+| **"What is this device?" needs a connection**, an MTU negotiation and a GATT enumeration, to learn about three bits. | Capability bits and the minor version go in the advertisement, so scanning, labelling and ranking need no connection. The 24-byte Info read stays per-connection — that part is inherent to hardware its owner reflashes, not a protocol defect. |
+| **A fix does not fit**, so it is split across two characteristics matched by a 3-bit counter, and fields trade range against resolution behind mode flags. | One 74-byte record carrying an absolute microsecond device timestamp and an absolute UTC timestamp, and one linear encoding per field, sized to its range. No second characteristic, no counter, no rollover case, nothing to select between. |
+| **No version field anywhere**, so forward compatibility is left to convention. | Major versions get separate service UUIDs, so an unsupported major is something a client never discovers rather than something it half-parses. Minor versions are additive by construction: frozen record sizes, length-prefixed extension records, reserved bits. |
+
+### One rule underneath all of it
+
+**No VTP/1 receiver may ever produce a plausible wrong value.** Where a choice
+trades bytes against ambiguity, this specification spends the bytes, and three
+commitments follow:
+
+- **Absence is a validity bit, never a magic value.** No field has a reserved
+  bit pattern meaning "no data", so there is no check you can forget.
+- **Unrecognised stays unrecognised.** An unknown enum value, bitmask bit or
+  extension type is reported as unknown, never coerced to a default.
+- **Malformed is rejected whole.** A receiver never decodes the prefix of a
+  short payload.
+
+### What it costs
+
+A rationale that only lists benefits is marketing, so: a fix is 74 bytes instead
+of 23. Hardware that cannot negotiate an ATT MTU of 100 cannot implement VTP/1
+at all, which deliberately excludes pre-2014 silicon. Batching trades a little
+first-byte latency for throughput and timestamp accuracy. Six characteristics
+and three batch formats is more surface to get wrong than one 20-byte struct,
+which is why the conformance corpus exists. And there are zero deployed devices,
+which is the largest cost by a wide margin.
+
+[RATIONALE.md](RATIONALE.md) is the full account — every row of that table at
+length, the decisions carried over unchanged, and these costs without the
+framing.
+
 ## Status
 
 > **`v0.9` release candidate.** The wire format is stable enough to build
@@ -43,26 +117,6 @@ The last row is the honest measure of a protocol's maturity. A specification
 with no second implementer is a file format with extra steps — but for a
 hobbyist protocol that is a reason to publish and find out, not a reason to
 wait.
-
-## What problem it solves
-
-A DIY logger has three things on it: a GNSS receiver, a CAN transceiver, and an
-IMU. Getting all three into an app currently means two unrelated protocols, two
-transports, and two clocks that have no defined relationship — so you cannot say
-where the car was when the driver lifted, only roughly.
-
-VTP/1 carries all three over one BLE link, timestamped against one monotonic
-device clock, so cross-channel alignment is arithmetic instead of guesswork.
-
-Three design commitments follow from one rule — *no receiver may ever produce a
-plausible wrong value*:
-
-- **Absence is a validity bit, never a magic value.** No field has a reserved
-  bit pattern meaning "no data", so there is no check you can forget.
-- **Unrecognised stays unrecognised.** An unknown enum value, bitmask bit or
-  extension type is reported as unknown, never coerced to a default.
-- **Malformed is rejected whole.** A receiver never decodes the prefix of a
-  short payload.
 
 ## Two roles, and the words for them
 
@@ -309,9 +363,8 @@ legal review stops at before an engineer ever reads it.
 ## Prior art
 
 VTP/1 exists because of [RaceChrono's DIY BLE
-API](https://github.com/aollin/racechrono-ble-diy-device), which established
-that a published, vendor-neutral contract for hand-built loggers is worth having
-and has served that ecosystem for the better part of a decade. Several of its
-decisions are carried over here unchanged — equations rather than DBC for CAN
-decoding, the device as a dumb pipe, per-id rate limiting in the device.
-[RATIONALE.md](RATIONALE.md) covers what changed and why.
+API](https://github.com/aollin/racechrono-ble-diy-device), and the lineage is
+described in [Why VTP/1 exists](#why-vtp1-exists) above.
+[RATIONALE.md](RATIONALE.md) covers what changed and why, what was already right
+and is kept unchanged, and what a protocol that lifts a throughput ceiling owes
+the other devices sharing the phone's radio.
