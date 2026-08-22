@@ -423,7 +423,56 @@ The alternative was four new extension mechanisms to specify, test and
 implement twice over, against a need nobody has yet articulated, in a
 repository whose own list of costs already names "more surface to get wrong".
 
-## 6. What VTP/1 costs
+## 6. Why subscriptions are addressed by mask
+
+A reasonable objection: masks belong in hardware. A CAN controller has a
+handful of acceptance filters and never enough of them, so `(id, mask)` is how
+you make four filter slots cover the traffic you want. A VTP/1 device is not
+in that position — it is unpacking every frame the controller gives it and
+repacking it into a notification, and at that point matching an exact
+identifier is a dictionary lookup. So what is the mask for?
+
+Three things, none of which is hardware filtering.
+
+**Slots are the scarce resource, and the protocol says so.**
+`can_subscription_slots` (SPEC.md §4) is a declared capacity a client must plan
+against, and a mask lets one slot stand for a family of identifiers. Buses
+allocate identifiers in blocks — a diagnostic range, an ECU whose low bits are
+a source address, an extended-id block from one supplier — and a client wanting
+such a block spends one slot on it instead of sixteen or two hundred and
+fifty-six. That is the difference between a table a modest device can hold and
+one it cannot.
+
+**A mask of zero is the whole bus, which nothing else can express.** Per-id
+subscription requires knowing every identifier in advance, which is exactly
+what a user reverse-engineering an unfamiliar car does not. One catch-all entry
+at a `periodic` rate is a survey of everything the bus carries, and the
+specificity ordering of SPEC.md §9.3 makes it compose: the catch-all governs
+whatever the specific entries do not, so a client can log the whole bus slowly
+and take four identifiers at full rate at the same time, with no overlap and no
+duplicate frames. The precedence rule exists for this case, and this case is
+why masks are worth their cost.
+
+**A device that does have filters can push the subscription down into them.**
+The mask arrives in the shape the controller wants. Going the other way — a
+device deriving hardware filters from a list of exact identifiers — means
+reconstructing masks the client already knew.
+
+The cost is real and is paid per frame. Matching stops being a lookup and
+becomes a scan of the table with a precedence rule to break ties
+(SPEC.md §9.3), on the one stream that can run at four thousand frames a
+second. It is also more specification: `CAN_UNSUBSCRIBE` takes a handle rather
+than an identifier (SPEC.md §9.2) precisely because an identifier stops being a
+unique name for an entry once masks exist.
+
+A device unwilling to pay any of that pays none of it. `masked_subscriptions`
+is `capabilities` bit 6, so a client knows before it composes a plan rather
+than by being refused, and a device that offers plain `CAN_SUBSCRIBE` and
+matches exact identifiers is fully conforming. The generality is available to
+the devices that want it and free to the ones that do not, which is the
+property that made it worth having in major version 1 rather than deferring.
+
+## 7. What VTP/1 costs
 
 Stating these plainly, because a rationale that only lists benefits is marketing:
 
