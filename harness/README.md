@@ -31,7 +31,7 @@ It cannot ask a device a question. So nothing in this repository tested:
 
 | | |
 | --- | --- |
-| §9 | the entire control plane — what a device *answers*, not what a client decodes |
+| §9 | the entire control plane — what a device *answers*, not what a client decodes, including `busy` when a client pipelines and the requirement that a request refused `busy` did not take effect |
 | §4.1 | that the attribute table is the fixed one, and that an absent capability leaves an *inert* characteristic rather than no characteristic |
 | §8.2 | that `seq` starts at 0 on the first notification of a connection |
 | §8.1 | that the three streams are on one clock rather than three |
@@ -201,7 +201,8 @@ uv run vtp1-harness --loopback --fault seq_starts_at_one
 Each entry in `transport.FAULTS` is a real mistake — a sequence number that
 starts at 1, a `TIME_SYNC` that reads its clock once and reports it as both
 timestamps, a subscription table that survives a reconnect, a `capabilities`
-word missing a bit another bit requires — and each exists
+word missing a bit another bit requires, a request answered `busy` and applied
+anyway — and each exists
 because some check here claims to catch it. The selftest fails if a fault is
 defined with no check named against it. It is the argument
 `tools/check_corpus.py` makes about the byte vectors, applied to the rules that
@@ -238,8 +239,11 @@ async def can_something(s):
 ```
 
 `requires` names capability bits from §4, so a device that never claimed a role
-is never failed for it. `raise Skip(...)` when something cannot be asked here and
-say why — the reason is printed under Not verified rather than swallowed.
+is never failed for it. `Fail(..., severity="MUST")` overrides the check's own
+severity for one finding, which a SHOULD check needs when its failure mode is
+worse than the rule it is mainly about — not implementing `GET_LINK_PARAMS` is a
+SHOULD, not answering it breaks a MUST. `raise Skip(...)` when something cannot
+be asked here and say why — the reason is printed under Not verified rather than swallowed.
 `raise Observe(...)` for a measurement that is nobody's pass or fail, so the
 report cannot accumulate green ticks for things nothing was asserted about.
 

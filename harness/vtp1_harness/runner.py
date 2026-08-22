@@ -146,7 +146,9 @@ class Runner:
         try:
             await check.fn(session)
         except Fail as exc:
-            return finish(check.failure_status, exc.message, exc.evidence)
+            severity = exc.severity or check.severity
+            return finish(Status.FAIL if severity == "MUST" else Status.WARN,
+                          exc.message, exc.evidence)
         except Skip as exc:
             return finish(Status.SKIP, exc.reason, exc.evidence)
         except Observe as exc:

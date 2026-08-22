@@ -22,6 +22,10 @@ UNALLOCATED_OPCODE = 0x7E
 #: high enough to be unlikely on a real bus.
 PROBE_ID = 0x7A0
 
+#: A second identifier, used only by the request a device must refuse `busy`.
+#: Kept distinct so that finding it installed proves the refusal was a lie.
+BUSY_PROBE_ID = 0x7A1
+
 
 def _control(s):
     if s.control is None:
@@ -179,62 +183,82 @@ async def control_opcode_capability(s):
         raise Fail("; ".join(problems))
 
 
-@check(id="control.four_outstanding", section="9", phase="control",
-       severity="MUST", requires=("control",),
-       title="Four requests outstanding at once are all answered")
-async def control_four_outstanding(s):
+@check(id="control.busy_when_outstanding", section="9", phase="control",
+       severity="MUST", requires=("control",), adversarial=True,
+       title="A request arriving while one is owed is answered busy, and not applied")
+async def control_busy_when_outstanding(s):
     c = _control(s)
-    inflight = []
-    for _ in range(4):
-        inflight.append(await c.send(UNALLOCATED_OPCODE))
-    answered, busy, lost = [], [], []
-    for tag, future in inflight:
-        try:
-            response = await c.await_response(UNALLOCATED_OPCODE, tag, future,
-                                              timeout=5.0)
-        except ControlTimeout:
-            lost.append(tag)
-            continue
-        (busy if response.status == refdec.STATUS_VALUE["busy"] else answered
-         ).append(response)
-    if lost:
-        raise Fail(
-            f"{len(lost)} of 4 requests went unanswered. §9 sets a floor of four "
-            f"outstanding requests and requires busy rather than a silent "
-            f"discard -- a client installing a table is otherwise held to one "
-            f"round trip per connection interval", unanswered=lost)
-    if busy:
-        raise Fail(f"{len(busy)} of 4 requests were refused busy; the floor is four",
-                   busy=[r.raw.hex() for r in busy])
-
-
-@check(id="control.duplicate_tag", section="9", phase="control", severity="MUST",
-       requires=("control",), adversarial=True,
-       title="A tag already outstanding is refused bad_params")
-async def control_duplicate_tag(s):
-    c = _control(s)
-    tag = 0x77
-    first = len(c.history)
-    uuid = refdec.CHAR["control"]
-    for _ in range(2):
-        await s.transport.write(uuid, bytes([UNALLOCATED_OPCODE, tag]),
-                                response=True)
-    await asyncio.sleep(1.5)
-    responses = [r for r in c.history[first:] if r.tag == tag]
-    if len(responses) < 2:
-        raise Fail(f"two requests sharing tag 0x{tag:02x} produced "
-                   f"{len(responses)} response(s); a device MUST respond to "
-                   f"every request",
-                   responses=[r.raw.hex() for r in responses])
-    if not any(r.status == refdec.STATUS_VALUE["bad_params"] for r in responses):
-        # If the device answered the first before the second arrived, the tag
-        # was never actually duplicated and there was nothing to detect. That is
-        # a limit of testing from a host, not a finding.
+    # This check deliberately breaks the client rule it is testing the other
+    # half of: §9 says a client MUST have at most one request outstanding, and
+    # the only way to see what a device does when one pipelines anyway is to
+    # pipeline. Nothing else in this harness writes a second request before the
+    # first is answered.
+    first_tag, first_future = await c.send(UNALLOCATED_OPCODE)
+    second = await _pipelined_second(s, c)
+    try:
+        first_response = await c.await_response(
+            UNALLOCATED_OPCODE, first_tag, first_future, timeout=5.0)
+    except ControlTimeout:
+        raise Fail("the first of two pipelined requests was never answered. A "
+                   "device MUST respond to every request it applies") from None
+    if second is None:
+        raise Fail("the second of two pipelined requests was never answered. §9 "
+                   "requires busy rather than silence: a device meeting a "
+                   "client that pipelines has to have something true to say")
+    if second.status == refdec.STATUS_VALUE["busy"]:
+        return
+    if second.t_write > first_response.t_recv:
+        # The device answered the first before the second was written, so the
+        # two were never outstanding together and there was nothing to detect.
+        # A limit of testing from a host, not a finding.
         raise Observe(
-            "both requests sharing a tag were answered ok; the device answered "
-            "the first before the second arrived, so the tags were never "
-            "outstanding together and this could not be tested from here",
-            responses=[r.raw.hex() for r in responses])
+            "the device answered the first request before the second was "
+            "written, so nothing was ever pipelined and this could not be "
+            "tested from here")
+    raise Fail(
+        f"a request written while the device still owed a response was answered "
+        f"{second.status_name}, not busy. §9 makes busy the one thing a device "
+        f"can say when its single outstanding slot is occupied -- the "
+        f"alternatives §9.6 forbids are silence, and applying a request it "
+        f"cannot answer", response=second.raw.hex())
+
+
+async def _pipelined_second(s, c):
+    """Write a second request immediately, and return whatever answers it.
+
+    Chosen to be observable: if the device applies it despite owing a response,
+    the subscription table says so and `control.busy_not_applied` finds it.
+    """
+    if s.has("can"):
+        opcode = refdec.OPCODE["CAN_SUBSCRIBE"]
+        params = struct.pack("<IBH", BUSY_PROBE_ID, 0, 0)
+    else:
+        opcode, params = UNALLOCATED_OPCODE, b""
+    tag, future = await c.send(opcode, params)
+    try:
+        return await c.await_response(opcode, tag, future, timeout=5.0)
+    except ControlTimeout:
+        return None
+
+
+@check(id="control.busy_not_applied", section="9", phase="control",
+       severity="MUST", requires=("control", "can"), adversarial=True,
+       title="A request refused busy did not take effect")
+async def control_busy_not_applied(s):
+    c = _control(s)
+    entries, _, last = await c.pages(refdec.OPCODE["CAN_LIST"], "can_list")
+    if not last.ok:
+        raise Skip(f"CAN_LIST was answered {last.status_name}")
+    applied = [e for e in entries if e["id"] == BUSY_PROBE_ID]
+    if applied:
+        # The failure the whole lifecycle is built to prevent: the client is
+        # told the request was refused, the device did it anyway, and the two
+        # disagree about the device's state for as long as the link lasts.
+        raise Fail(
+            f"a subscription written while the device owed a response is "
+            f"installed as handle {applied[0]['handle']}. A device MUST NOT "
+            f"apply a request it answers busy",
+            entry=applied[0])
 
 
 # ---------------------------------------------------------------------------

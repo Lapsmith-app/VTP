@@ -275,7 +275,9 @@ FAULTS = {
     "caps_reserved_bits": "SPEC.md §4 — a reserved capability bit is set",
     "absent_field_nonzero": "SPEC.md §5.1 — a field whose validity bit is clear is not zero",
     "clock_per_stream": "SPEC.md §8.1 — the streams are not on one clock",
-    "drop_fourth_request": "SPEC.md §9 — a fourth outstanding request is silently discarded",
+    "drops_a_response": "SPEC.md §9 — a request is silently discarded rather than answered",
+    "pipelines_silently": "SPEC.md §9 — a second request is applied instead of answered busy",
+    "busy_but_applied": "SPEC.md §9 — a request answered busy is applied anyway",
     "phy_half_reported": "SPEC.md §9.1 — the phy validity bit is set with only one PHY known",
     "list_reserved_nonzero": "SPEC.md §9.5 — a reserved page byte is not zero",
     "missing_characteristic": "SPEC.md §4.1 — a characteristic is absent rather than inert",
@@ -301,13 +303,17 @@ class LoopbackTransport(Transport):
     kind = "loopback"
 
     def __init__(self, *, faults=(), mtu=247, gps_hz=10, imu_hz=100,
-                 poll_interval=0.005, device_kwargs=None):
+                 poll_interval=0.005, control_latency=0.03, device_kwargs=None):
         unknown = set(faults) - set(FAULTS)
         if unknown:
             raise ValueError(f"unknown fault(s): {sorted(unknown)}")
         self.faults = set(faults)
         self._mtu = mtu
         self._poll_interval = poll_interval
+        # Roughly one connection interval: long enough that a client writing two
+        # requests back to back has the second arrive while the first is owed.
+        self._control_latency = control_latency
+        self._owed = False
         self._device_kwargs = dict(device_kwargs or {})
         self._device_kwargs.setdefault("gps_hz", gps_hz)
         self._device_kwargs.setdefault("imu_hz", imu_hz)
@@ -316,7 +322,6 @@ class LoopbackTransport(Transport):
         self._subs = {}
         self._connected = False
         self._stale_subs = {}
-        self._requests = 0
 
     # -- lifecycle --------------------------------------------------------
 
@@ -372,7 +377,7 @@ class LoopbackTransport(Transport):
             self.device._subscriptions[self.device._allocate_handle()] = {
                 "id": 0, "mask": 0, "mode": 0, "arg": 0, "per_id": {}}
         self._connected = True
-        self._first_sent = set()
+        self._owed = False
         self._pump = asyncio.create_task(self._run())
 
     async def disconnect(self):
@@ -479,20 +484,53 @@ class LoopbackTransport(Transport):
             return
         t_rx = self.device.now_us()
         self._rates_before = (self.device.gps_hz, self.device.imu_hz)
-        if "drop_fourth_request" in self.faults:
-            self._requests += 1
-            if self._requests % 4 == 0:
-                return                              # answered by nobody
-        # A real device answers on its own schedule; the delay keeps requests
-        # genuinely outstanding so the overlap checks have something to see.
-        await asyncio.sleep(0)
+
+        # SPEC.md §9 -- a client has at most ONE request outstanding, and a
+        # device meeting one that pipelines anyway answers `busy` and MUST NOT
+        # apply the request. Modelled here rather than left to the device
+        # model, for the same reason serve.py holds it in the transport: it is
+        # a property of the response path, not of what the opcode does.
+        if self._owed:
+            if "pipelines_silently" not in self.faults:
+                if "busy_but_applied" in self.faults:
+                    self.device.handle_control(request, t_rx=t_rx)
+                if len(request) >= 2:
+                    self._deliver_control(bytes([request[0], request[1],
+                                                 refdec.STATUS_VALUE["busy"]]))
+                return
+
         response = self.device.handle_control(request, t_rx=t_rx)
         if response is None:
             return
+        if "drops_a_response" in self.faults and len(request) == 2 and \
+                request[0] == refdec.OPCODE["GET_LINK_PARAMS"]:
+            # Only the well-formed one, so exactly one check meets it. A device
+            # that drops responses drops them for every request, and any check
+            # making that request would catch it -- which would make WHICH check
+            # reports it an accident of ordering rather than a property worth
+            # asserting.
+            return                                  # answered by nobody
         response = self._corrupt_response(bytearray(response), request)
+        self._owed = True
+        asyncio.create_task(self._answer(bytes(response)))
+
+    async def _answer(self, response):
+        """Deliver on the device's own schedule, not the caller's.
+
+        The delay is what makes a request genuinely outstanding. Without it
+        every write is answered before the next one is written, and a check
+        about what a device does with two at once passes by never creating the
+        condition it is testing -- which is exactly how this harness came to
+        assert the opposite rule for a while without noticing.
+        """
+        await asyncio.sleep(self._control_latency)
+        self._deliver_control(response)
+        self._owed = False
+
+    def _deliver_control(self, response):
         cb = self._subs.get(refdec.CHAR["control"])
         if cb is not None:
-            cb(bytes(response), asyncio.get_running_loop().time())
+            cb(response, asyncio.get_running_loop().time())
 
     def _corrupt_response(self, response, request):
         opcode, status = response[0], response[2]

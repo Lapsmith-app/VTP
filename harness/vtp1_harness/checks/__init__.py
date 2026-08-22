@@ -24,11 +24,19 @@ class Status(enum.Enum):
 
 
 class Fail(Exception):
-    """The device did not do what the section requires."""
+    """The device did not do what the section requires.
 
-    def __init__(self, message, **evidence):
+    `severity` overrides the check's own for this one finding. A check can have
+    a failure mode more serious than the rule it is mainly about: implementing
+    GET_LINK_PARAMS is a SHOULD, but not ANSWERING it breaks the MUST in §9 that
+    every request gets a response, and reporting that as a warning because of
+    which check happened to notice would be reporting the wrong thing.
+    """
+
+    def __init__(self, message, severity=None, **evidence):
         super().__init__(message)
         self.message = message
+        self.severity = severity
         self.evidence = evidence
 
 

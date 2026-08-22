@@ -53,7 +53,9 @@ CAUGHT_BY = {
     "caps_reserved_bits": "info.reserved_capabilities",
     "absent_field_nonzero": "gps.absent_fields_zero",
     "clock_per_stream": "clock.one_clock",
-    "drop_fourth_request": "control.four_outstanding",
+    "drops_a_response": "link.get_link_params",
+    "pipelines_silently": "control.busy_when_outstanding",
+    "busy_but_applied": "control.busy_not_applied",
     "phy_half_reported": "link.validity_groups",
     "list_reserved_nonzero": "can.list_matches_installed",
 }

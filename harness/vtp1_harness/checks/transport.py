@@ -46,7 +46,10 @@ async def link_get_link_params(s):
     try:
         response = await s.control.request(refdec.OPCODE["GET_LINK_PARAMS"])
     except ControlTimeout:
-        raise Fail("GET_LINK_PARAMS went unanswered") from None
+        # Implementing the opcode is a SHOULD; answering a request is not.
+        raise Fail("GET_LINK_PARAMS went unanswered. §9 requires a device to "
+                   "respond to every request it applies, whether or not the "
+                   "opcode itself is optional", severity="MUST") from None
     if response.status == refdec.STATUS_VALUE["unsupported_opcode"]:
         # A client MUST NOT treat this as non-conforming, so it is a SHOULD --
         # but it is the only window this specification gives onto 2.1-2.3, and

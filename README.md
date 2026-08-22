@@ -64,15 +64,34 @@ plausible wrong value*:
 - **Malformed is rejected whole.** A receiver never decodes the prefix of a
   short payload.
 
+## Two roles, and the words for them
+
+VTP/1 has exactly two ends, and the whole repository is organised around which
+one you are building. SPEC.md §1.2 defines them; in short:
+
+| | The **device** | The **client** |
+| --- | --- | --- |
+| What it is | The logger. A hand-built box with a GNSS receiver, a CAN transceiver and an IMU in it | The app. Phone or laptop software that connects to the logger |
+| Bluetooth role | **Peripheral** — it advertises and waits to be connected to | **Central** — it scans, connects and subscribes |
+| What it does | Produces the streams and answers questions about itself | Connects, subscribes, decodes and records |
+| Mostly | An **encoder** | A **decoder** |
+| You are building one if | you are writing firmware, or wiring up a dev board | you are writing an app that reads a logger |
+
+Both ends decode something, which is why the specification also says
+**receiver**: whichever end is decoding the payload under discussion. That is
+the client on the GPS, CAN and IMU streams — and the device on Monitor (§13),
+the one characteristic where the direction reverses and the app sends values
+for the logger's screen to show.
+
 ## Which of these is for you
 
-Five things here you might reach for, and which one depends on what you have
-built.
+Five things here you might reach for, and which one depends on which end you
+are building.
 
 | You have | Reach for | Which answers |
 | --- | --- | --- |
 | **A device** — firmware, or a prototype on a dev board | **[harness/](harness/)**, `uv run vtp1-harness` | Does my device behave correctly, on a real link, as a whole? |
-| **An app**, and no hardware to test it against | [reference/peripheral/](reference/peripheral/) | nothing — it *is* a device, synthetic, so a client can be built before any firmware exists |
+| **A client**, and no logger to test it against | [reference/peripheral/](reference/peripheral/) | nothing — it *is* a device, synthetic, so a client can be built before any firmware exists |
 | **A decoder** you wrote | `conformance/run.py` | Does my decoder read every payload correctly, including the ones it must refuse? |
 | **An encoder** you wrote, and can drive from a command line | `conformance/produce.py` | Does my encoder refuse to produce what the specification forbids? |
 | Nothing yet | [reference/c/](reference/c/), [reference/python/](reference/python/) | nothing — they are working implementations to read, and to check your own output against |
@@ -192,6 +211,61 @@ and the reference header cannot disagree.
 
 If you ship a device, open an issue — the implementations list is the only
 measure of this specification that matters.
+
+## Implementing a client
+
+A client is a decoder with a Bluetooth stack in front of it, so most of what
+you have to get right is reachable by the conformance corpus — which is why
+there is no harness pointed the other way.
+
+1. Read [SPEC.md](SPEC.md). §1.1 is the rule the rest follows from, and it lands
+   almost entirely on your side: **no receiver may ever produce a plausible
+   wrong value**, and you are the receiver for the three streams.
+2. Scan for the service UUID in `schema/uuids.json`. §3.2 lets you recognise a
+   VTP device whose major version you do not implement, and you SHOULD tell the
+   user that rather than let the device look absent.
+3. **Run the corpus against your decoder** — this is the client's equivalent of
+   pointing the harness at a device, and it is mechanical:
+
+   ```sh
+   python3 conformance/run.py --impl "./my-decoder"
+   ```
+
+   The runner is language-agnostic: anything that reads `record<TAB>hex` on
+   stdin and writes one JSON object per line can be tested, including an
+   implementation this repository has never seen. `conformance/README.md` has
+   the contract, and `--roles` narrows it to what you implement.
+
+   If you implement Monitor you are also an *encoder* — the client produces
+   those payloads — so run `conformance/produce.py` too.
+4. **Develop against [reference/peripheral/](reference/peripheral/).** It is a
+   real GATT peripheral over your laptop's own Bluetooth adapter, driving a
+   synthetic car around a circular circuit, so your app has GPS, CAN and IMU to
+   read before any firmware exists. `python3 reference/peripheral/selftest.py`
+   verifies it without a radio.
+5. Get the handful of rules the corpus cannot reach right, because they are
+   about what your client *does* rather than what it decodes:
+   - **Re-read Info on every connection** and never cache it across one (§4). A
+     DIY device is reflashed by its owner: its capabilities and rate ceilings
+     change while its address does not.
+   - **Enable indications on Control before your first write** (§9.6). A write
+     that precedes enablement is a request whose answer has nowhere to go.
+   - **One control request outstanding at a time** (§9). Write, wait for the
+     indication, then write the next. A device answers `busy` if you pipeline,
+     and `busy` says nothing about the request itself — wait, then retry.
+   - **Reprogram your subscriptions on every connection** (§9.2). They do not
+     survive a disconnect, by design, so you always find a known state.
+   - **A `seq` wrap from 65535 to 0 is not a gap** (§8.2), and `dropped` reading
+     65535 means *at least* that many, never exactly (§8.3).
+   - **Never substitute a default** for a field whose validity bit is clear, an
+     enum value you do not recognise, or a capacity Info did not give you.
+   - If you implement Monitor: read the declaration before writing, carry every
+     slot in every write, clear the `present` bit rather than sending a
+     placeholder, and refresh before `max_age` expires (§13).
+
+Nothing here tests those five for you. A client is checked by the corpus and by
+pointing it at the software peripheral; the behavioural half is on you, and it
+is the half worth re-reading §9.6 and §13.4 about.
 
 ## Versioning
 
