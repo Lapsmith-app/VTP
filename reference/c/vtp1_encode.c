@@ -28,6 +28,20 @@ static uint64_t gate64(uint64_t value, uint32_t validity, uint32_t bit) {
     return (validity & bit) ? value : 0u;
 }
 
+/* SPEC.md §2 -- reserved bits are ZERO on transmit. Whole reserved FIELDS were
+ * already forced to zero here; the reserved PORTION of a bitmask was not, so a
+ * caller handing this encoder a capabilities word with bit 19 set, or a gps
+ * validity word with bit 30 set, had it transmitted verbatim.
+ *
+ * Every conforming receiver is required to ignore those bits, which is exactly
+ * why writing them is forbidden: they are the only bits on the wire a later
+ * minor version may redefine, and a 1.0 device that sets one has published a
+ * claim it cannot make and that nothing can retract.
+ *
+ * The masks are generated from schema/vtp1.yaml, so a bit assigned in a later
+ * minor leaves the reserved region by editing the schema and nothing else. */
+#define KNOWN_BITS(value, mask) ((value) & (uint32_t)(mask))
+
 int vtp_encode_gps_fix(const vtp_gps_fix_t *f,
                        const uint8_t *ext, size_t ext_len,
                        uint8_t *out, size_t cap) {
@@ -57,7 +71,9 @@ int vtp_encode_gps_fix(const vtp_gps_fix_t *f,
     if (cap < (size_t)VTP_GPS_FIX_SIZE + ext_len) return -1;
     memset(out, 0, VTP_GPS_FIX_SIZE);
 
-    const uint32_t v = f->validity;
+    /* Reserved bits go no further than this line: gating below reads the
+     * caller's word, and the wire gets the normalised one. */
+    const uint32_t v = KNOWN_BITS(f->validity, VTP_GPS_VALIDITY_KNOWN);
 
     wr16(out + VTP_GPS_FIX_OFF_SEQ, f->seq);
     wr16(out + VTP_GPS_FIX_OFF_DROPPED, f->dropped);
@@ -89,7 +105,8 @@ int vtp_encode_gps_fix(const vtp_gps_fix_t *f,
     out[VTP_GPS_FIX_OFF_FIX_TYPE] = f->fix_type;
     out[VTP_GPS_FIX_OFF_NUM_SV] =
         (uint8_t)gate32(f->num_sv, v, VTP_GPS_VALIDITY_NUM_SV);
-    out[VTP_GPS_FIX_OFF_FIX_FLAGS] = f->fix_flags;
+    out[VTP_GPS_FIX_OFF_FIX_FLAGS] =
+        (uint8_t)KNOWN_BITS(f->fix_flags, VTP_FIX_FLAGS_KNOWN);
     out[VTP_GPS_FIX_OFF_EXT_COUNT] = f->ext_count;
 
     if (ext_len && ext) memcpy(out + VTP_GPS_FIX_SIZE, ext, ext_len);
@@ -117,6 +134,11 @@ static int vtp_fd_len_ok(uint8_t n) {
 int vtp_encode_can_batch(const vtp_can_header_t *h,
                          const vtp_can_frame_t *frames,
                          uint8_t *out, size_t cap) {
+    /* Before anything reads through it. A count with no array behind it used
+     * to reach frames[0].dt on the very next line and take the process down;
+     * a producer that segfaults on malformed input is not a producer that
+     * refused it, and refusing is the contract this file exists to keep. */
+    if (h->count && !frames) return -1;
     /* SPEC.md §6.1 -- record 0's dt is zero by t_base's own definition. */
     if (h->count && frames[0].dt != 0) return -1;
     size_t needed = VTP_CAN_HEADER_SIZE;
@@ -126,6 +148,14 @@ int vtp_encode_can_batch(const vtp_can_header_t *h,
          * read, and it finds out from the field rather than from a test.
          * SPEC.md §6.4 and §6.10. */
         const vtp_can_frame_t *v = &frames[i];
+        /* An identifier outside the arbitration field is not one to be
+         * trimmed to fit: masking made 0x3FFFFFFF into 0x1FFFFFFF, a frame
+         * the caller never asked for, on the field a client uses to decide
+         * what the bytes mean. Checked HERE, with the rest of validation,
+         * rather than in the write loop below -- the header had already been
+         * written by then, so a refused batch left the output buffer modified
+         * and contradicted this file's own "nothing written on -1" contract. */
+        if (v->id > 0x1FFFFFFFu)             return -1;
         if (!v->extended && v->id > 0x7FFu)  return -1;
         if (v->fd && v->rtr)                 return -1;
         if (v->rtr && v->len)                return -1;
@@ -152,11 +182,6 @@ int vtp_encode_can_batch(const vtp_can_header_t *h,
     size_t off = VTP_CAN_HEADER_SIZE;
     for (uint8_t i = 0; i < h->count; i++) {
         const vtp_can_frame_t *fr = &frames[i];
-        /* An identifier outside the arbitration field is not one to be
-         * trimmed to fit: masking made 0x3FFFFFFF into 0x1FFFFFFF, a frame
-         * the caller never asked for, on the field a client uses to decide
-         * what the bytes mean. */
-        if (fr->id > 0x1FFFFFFFu) return -1;
         uint32_t raw = fr->id;
         if (fr->extended) raw |= (1u << 29);
         if (fr->fd)       raw |= (1u << 30);
@@ -180,6 +205,12 @@ int vtp_encode_imu_batch(const vtp_imu_header_t *h,
         (size_t)VTP_IMU_HEADER_SIZE + (size_t)h->count * VTP_IMU_SAMPLE_SIZE;
     /* An encoder must not emit what its own decoder rejects. SPEC.md §7. */
     if (h->period == 0) return -1;
+    if (h->count == 0) return -1;      /* t_base names a sample 0 that is absent */
+    /* A count with no array behind it. The write loop only dereferenced a
+     * sample through a set presence flag, so this crashed for an accel batch
+     * and quietly emitted zeroed samples for a batch with neither flag --
+     * two different wrong answers to one malformed call. SPEC.md §7.1. */
+    if (h->count && !samples) return -1;
     if (cap < needed) return -1;
 
     memset(out, 0, needed);
@@ -211,13 +242,42 @@ int vtp_encode_imu_batch(const vtp_imu_header_t *h,
     return (int)needed;
 }
 
+/* SPEC.md §4.1 -- every capability bit set here brings the bits it requires. */
+static int capabilities_coherent(uint32_t caps) {
+    static const vtp_capability_rule_t rules[] = VTP_CAPABILITY_RULES;
+    for (size_t i = 0; i < VTP_CAPABILITY_RULE_COUNT; i++) {
+        if (!(caps & rules[i].bit)) continue;
+        if ((caps & rules[i].requires_) != rules[i].requires_) return 0;
+    }
+    return 1;
+}
+
 int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     if (cap < VTP_INFO_SIZE) return -1;
-    memset(out, 0, VTP_INFO_SIZE);
+    const uint32_t caps = KNOWN_BITS(v->capabilities, VTP_CAPABILITIES_KNOWN);
 
+    /* SPEC.md §4.1 -- an encoder must not emit what its own decoder rejects,
+     * and the profile matrix is now something the decoder rejects. Checked
+     * against the NORMALISED word, because that is what goes on the wire.
+     *
+     * The loop is duplicated from vtp1.c for the same reason vtp_fd_len_ok is:
+     * these are separate translation units on purpose, and a device links only
+     * this one. What is NOT duplicated is the rule -- VTP_CAPABILITY_RULES is
+     * generated from schema/vtp1.yaml, so both copies read the same table and
+     * neither can drift from the specification. */
+    if (!capabilities_coherent(caps)) return -1;
+    if (!(caps & VTP_CAPABILITIES_GPS)
+        && (v->gps_rate_hz || v->gps_max_rate_hz)) return -1;
+    if (!(caps & VTP_CAPABILITIES_CAN)
+        && (v->can_subscription_slots || v->can_max_frames_per_s
+            || v->can_max_payload)) return -1;
+    if (!(caps & VTP_CAPABILITIES_IMU)
+        && (v->imu_rate_hz || v->imu_max_rate_hz)) return -1;
+
+    memset(out, 0, VTP_INFO_SIZE);
     out[VTP_INFO_OFF_PROTOCOL_MAJOR] = v->protocol_major;
     out[VTP_INFO_OFF_PROTOCOL_MINOR] = v->protocol_minor;
-    wr32(out + VTP_INFO_OFF_CAPABILITIES, v->capabilities);
+    wr32(out + VTP_INFO_OFF_CAPABILITIES, caps);
     wr16(out + VTP_INFO_OFF_GPS_RATE_HZ, v->gps_rate_hz);
     wr16(out + VTP_INFO_OFF_GPS_MAX_RATE_HZ, v->gps_max_rate_hz);
     wr16(out + VTP_INFO_OFF_CAN_SUBSCRIPTION_SLOTS, v->can_subscription_slots);
@@ -236,6 +296,10 @@ int vtp_encode_monitor_list(const vtp_monitor_page_t *p,
     const size_t needed = (size_t)VTP_MONITOR_PAGE_SIZE
                         + (size_t)p->count * VTP_MONITOR_CHANNEL_SIZE;
     if (cap < needed) return -1;
+    /* The array first: the duplicate-slot sweep below reads through it, and
+     * reading through a null one is a crash rather than the refusal this
+     * function documents. It used to sit after the sweep. */
+    if (p->count && !entries) return -1;
     /* SPEC.md §13.3, §13.4 -- both already enforced by the decoder, so
      * emitting either produced a declaration this repository's own reader
      * refuses to read. */
@@ -243,7 +307,6 @@ int vtp_encode_monitor_list(const vtp_monitor_page_t *p,
     for (uint8_t i = 0; i < p->count; i++)
         for (uint8_t j = (uint8_t)(i + 1); j < p->count; j++)
             if (entries[i].slot == entries[j].slot) return -1;
-    if (p->count && !entries) return -1;
     memset(out, 0, needed);
 
     wr16(out + VTP_MONITOR_PAGE_OFF_TOTAL, p->total);
@@ -267,11 +330,13 @@ int vtp_encode_monitor_update(const vtp_monitor_header_t *h,
     const size_t needed = (size_t)VTP_MONITOR_HEADER_SIZE
                         + (size_t)h->count * VTP_MONITOR_VALUE_SIZE;
     if (cap < needed) return -1;
+    /* As in monitor_list: the array is checked before anything reads through
+     * it, not after. */
+    if (h->count && !values) return -1;
     /* SPEC.md §13.4 -- a slot twice, and nothing says which wins. */
     for (uint8_t i = 0; i < h->count; i++)
         for (uint8_t j = (uint8_t)(i + 1); j < h->count; j++)
             if (values[i].slot == values[j].slot) return -1;
-    if (h->count && !values) return -1;
     memset(out, 0, needed);
 
     wr16(out + VTP_MONITOR_HEADER_OFF_SEQ, h->seq);
@@ -281,13 +346,15 @@ int vtp_encode_monitor_update(const vtp_monitor_header_t *h,
     for (uint8_t i = 0; i < h->count; i++) {
         uint8_t *e = out + VTP_MONITOR_HEADER_SIZE
                    + (size_t)i * VTP_MONITOR_VALUE_SIZE;
+        const uint8_t validity =
+            (uint8_t)KNOWN_BITS(values[i].validity, VTP_MONITOR_VALIDITY_KNOWN);
         e[VTP_MONITOR_VALUE_OFF_SLOT] = values[i].slot;
-        e[VTP_MONITOR_VALUE_OFF_VALIDITY] = values[i].validity;
+        e[VTP_MONITOR_VALUE_OFF_VALIDITY] = validity;
         /* A client that clears the present bit cannot also ship the value it
          * was hiding -- the same rule as everywhere else, in the one place the
          * protocol reverses direction. */
         wr32(e + VTP_MONITOR_VALUE_OFF_VALUE,
-             gate32((uint32_t)values[i].value, values[i].validity,
+             gate32((uint32_t)values[i].value, validity,
                     VTP_MONITOR_VALIDITY_PRESENT));
     }
     return (int)needed;
@@ -323,9 +390,9 @@ int vtp_encode_link_params(const vtp_link_params_t *l, uint8_t *out, size_t cap)
     if (cap < VTP_LINK_PARAMS_SIZE) return -1;
     memset(out, 0, VTP_LINK_PARAMS_SIZE);
 
-    const uint32_t v = l->validity;
+    const uint32_t v = KNOWN_BITS(l->validity, VTP_LINK_VALIDITY_KNOWN);
 
-    wr16(out + VTP_LINK_PARAMS_OFF_VALIDITY, l->validity);
+    wr16(out + VTP_LINK_PARAMS_OFF_VALIDITY, (uint16_t)v);
     wr16(out + VTP_LINK_PARAMS_OFF_ATT_MTU,
          (uint16_t)gate32(l->att_mtu, v, VTP_LINK_VALIDITY_ATT_MTU));
     wr16(out + VTP_LINK_PARAMS_OFF_LL_MAX_TX_OCTETS,

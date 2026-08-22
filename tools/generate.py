@@ -62,6 +62,171 @@ def flush(check: bool) -> int:
 # schema validation
 # --------------------------------------------------------------------------
 
+PROPERTIES = {"read", "write", "write-without-response", "notify", "indicate"}
+CCCD = {"none", "notify", "indicate"}
+WRITE_TYPES = {"with-response", "without-response"}
+SIDES = {"device", "client"}
+
+
+def _validate_profile(schema, bitmasks):
+    """SPEC.md 4.1 -- the attribute table and the capability implications.
+
+    Unvalidated, `implies` naming a capability that does not exist would have
+    generated a matrix demanding a bit no device can set, and the encoders
+    would have enforced it.
+    """
+    problems = []
+    profile = schema.get("profile")
+    if not profile:
+        return ["schema: no `profile` block; SPEC.md 4.1 cannot be generated"]
+    cap_names = {b["name"] for b in bitmasks["capabilities"]["bits"]}
+    info_fields = {f["name"] for f in schema["records"]["info"]["fields"]}
+
+    seen = set()
+    for ch in profile["characteristics"]:
+        where = f"profile: characteristic {ch.get('name')!r}"
+        if ch["name"] in seen:
+            problems.append(f"{where}: named twice")
+        seen.add(ch["name"])
+        cap = ch["capability"]
+        if cap is not None and cap not in cap_names:
+            problems.append(f"{where}: unknown capability {cap!r}")
+        for prop in ch["properties"]:
+            if prop not in PROPERTIES:
+                problems.append(f"{where}: unknown GATT property {prop!r}")
+        if ch["cccd"] not in CCCD:
+            problems.append(f"{where}: unknown cccd {ch['cccd']!r}")
+        # A CCCD is what carries notifications and indications. Declaring one
+        # without the matching property, or the property without the CCCD,
+        # describes an attribute no stack can produce.
+        if ch["cccd"] == "notify" and "notify" not in ch["properties"]:
+            problems.append(f"{where}: cccd `notify` without the notify property")
+        if ch["cccd"] == "indicate" and "indicate" not in ch["properties"]:
+            problems.append(f"{where}: cccd `indicate` without the indicate property")
+        if ch["cccd"] == "none" and ({"notify", "indicate"} & set(ch["properties"])):
+            problems.append(
+                f"{where}: notifies or indicates but declares no CCCD, which "
+                f"no client could ever enable")
+        wt = ch.get("write_type")
+        if wt is not None and wt not in WRITE_TYPES:
+            problems.append(f"{where}: unknown write_type {wt!r}")
+        writes = {"write", "write-without-response"} & set(ch["properties"])
+        if writes and wt is None:
+            problems.append(f"{where}: writable but declares no write_type")
+        if wt is not None and not writes:
+            problems.append(f"{where}: declares a write_type but is not writable")
+        for side in ("written_by", "read_by"):
+            if ch[side] not in SIDES:
+                problems.append(f"{where}: {side} is {ch[side]!r}, not one of "
+                                f"{sorted(SIDES)}")
+        if ch["record"] not in schema["records"]:
+            problems.append(f"{where}: unknown record {ch['record']!r}")
+
+    # Every characteristic UUID has a profile row and vice versa: an attribute
+    # allocated but undescribed is an attribute nobody knows how to use.
+    allocated = set(json.loads(UUIDS.read_text())["characteristics"])
+    for name in sorted(allocated - seen):
+        problems.append(f"profile: characteristic {name!r} is allocated a UUID "
+                        f"but has no profile row")
+    for name in sorted(seen - allocated):
+        problems.append(f"profile: characteristic {name!r} has a profile row "
+                        f"but no allocated UUID")
+
+    for b in bitmasks["capabilities"]["bits"]:
+        for implied in b.get("implies") or []:
+            if implied not in cap_names:
+                problems.append(f"capabilities bit {b['name']!r}: implies "
+                                f"unknown capability {implied!r}")
+            elif implied == b["name"]:
+                problems.append(f"capabilities bit {b['name']!r}: implies itself")
+
+    for cap, fields in profile["capacity"].items():
+        if cap not in cap_names:
+            problems.append(f"profile: capacity names unknown capability {cap!r}")
+        for f in fields:
+            if f not in info_fields:
+                problems.append(f"profile: capacity {cap!r} names {f!r}, which "
+                                f"is not a field of `info`")
+    return problems
+
+
+def _validate_protocol(schema):
+    """The header block. Nothing downstream reads these twice, so a wrong one
+    is generated straight into every artefact without argument."""
+    problems = []
+    proto = schema["protocol"]
+    # SPEC.md 2: every field of every record, no exceptions. Both reference
+    # codecs hard-code "<" and would silently ignore a change here, so the
+    # schema must not be able to claim otherwise.
+    if proto.get("endianness") != "little":
+        problems.append(
+            f"protocol.endianness is {proto.get('endianness')!r}; VTP/1 is "
+            f"little-endian everywhere and both reference codecs assume it")
+    if proto.get("major") != 1:
+        problems.append(f"protocol.major is {proto.get('major')!r}; this file "
+                        f"defines major version 1")
+    minor = proto.get("minor")
+    if not isinstance(minor, int) or isinstance(minor, bool) or not 0 <= minor <= 255:
+        problems.append(f"protocol.minor is {minor!r}; it travels as a u8")
+    mtu = proto.get("min_att_mtu")
+    # 23 is the ATT default; below it the value is not an MTU at all. The
+    # Monitor channel cap and every batching bound are derived from this, so a
+    # nonsense value propagates into the C header and the corpus.
+    if not isinstance(mtu, int) or isinstance(mtu, bool) or not 23 <= mtu <= 517:
+        problems.append(
+            f"protocol.min_att_mtu is {mtu!r}; an ATT MTU is 23..517")
+    return problems
+
+
+PARAM_TYPES = {"u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64"}
+
+
+def _validate_control(schema):
+    """Opcode values and the parameter grammar SPEC.md 9 states.
+
+    `params` is a table column in SPEC.md and a parser contract in every
+    implementation. TIME_SYNC carried a literal em-dash here -- prose said it
+    was parameterless, the schema said its parameter list was the character
+    "-", and the generated table rendered that as a parameter named nothing.
+    """
+    problems = []
+    seen = set()
+    for op in schema["control"]["opcodes"]:
+        where = f"control opcode {op.get('name')!r}"
+        v = op["value"]
+        if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 0xFF:
+            problems.append(f"{where}: value {v!r} does not fit the u8 an "
+                            f"opcode travels in")
+        if op["name"] in seen:
+            problems.append(f"{where}: named twice")
+        seen.add(op["name"])
+        if "response" not in op:
+            problems.append(f"{where}: declares no response detail")
+        spec = op.get("params", "")
+        if not isinstance(spec, str):
+            problems.append(f"{where}: params must be a string")
+            continue
+        if spec.strip() and spec.strip() != spec:
+            problems.append(f"{where}: params {spec!r} has surrounding space")
+        if not spec:
+            continue
+        for part in spec.split(","):
+            part = part.strip()
+            if part.count(":") != 1:
+                problems.append(
+                    f"{where}: parameter {part!r} is not `name:type`. A "
+                    f"parameterless opcode is the empty string, never a dash.")
+                continue
+            pname, ptype = part.split(":")
+            if not pname.isidentifier():
+                problems.append(f"{where}: parameter name {pname!r} is not an "
+                                f"identifier")
+            if ptype not in PARAM_TYPES:
+                problems.append(f"{where}: parameter {pname!r} has unknown "
+                                f"type {ptype!r}")
+    return problems
+
+
 def validate(schema):
     """Structural invariants the schema must satisfy to mean anything.
 
@@ -178,6 +343,10 @@ def validate(schema):
     if len(set(opcodes)) != len(opcodes):
         problems.append("control: duplicate opcode values")
 
+    problems += _validate_profile(schema, bitmasks)
+    problems += _validate_protocol(schema)
+    problems += _validate_control(schema)
+
     if problems:
         for p in problems:
             print(f"SCHEMA: {p}", file=sys.stderr)
@@ -238,7 +407,14 @@ def spec_tables(schema):
     for name, bm in schema["bitmasks"].items():
         lines = ["| Bit | Name | Meaning |", "| --- | --- | --- |"]
         for b in bm["bits"]:
-            lines.append(f"| {b['bit']} | `{b['name']}` | {b.get('desc', '—')} |")
+            meaning = b.get("desc", "")
+            if b.get("implies"):
+                # Rendered here as well as in the 4.1 matrix, because a reader
+                # looking up one bit must not have to know the matrix exists.
+                req = ", ".join(f"`{i}`" for i in b["implies"])
+                meaning = ((meaning + " ") if meaning else "") + \
+                          f"**Requires {req}.**"
+            lines.append(f"| {b['bit']} | `{b['name']}` | {meaning or '—'} |")
         if "reserved_from" in bm:
             lines.append(f"| {bm['reserved_from']}+ | *reserved* | MUST be zero on transmit; "
                          f"MUST be ignored on receive |")
@@ -284,6 +460,40 @@ def spec_tables(schema):
                 else "No — closed for major version 1")
         lines.append(f"| `{name}` | {mark} | {FREQ.get(name, '—')} |")
     out["extensibility"] = "\n".join(lines)
+
+    # SPEC.md 4.1 -- the one place capability implications, the attribute
+    # table, GATT properties, CCCDs, write type and direction are stated. They
+    # used to be stated nowhere: the specification defined every capability bit
+    # independently, conformance/run.py made CAN and Monitor imply Control
+    # anyway, and nothing at all said which characteristic had which
+    # properties or who wrote to it.
+    caps = {b["name"]: b for b in schema["bitmasks"]["capabilities"]["bits"]}
+    profile = schema["profile"]
+    capacity = profile["capacity"]
+
+    lines = ["| Characteristic | Capability | Properties | CCCD | Written by | "
+             "Read by | When the capability bit is clear |",
+             "| --- | --- | --- | --- | --- | --- | --- |"]
+    for ch in profile["characteristics"]:
+        cap = ch["capability"]
+        bit = f"bit {caps[cap]['bit']} (`{cap}`)" if cap else "— always present"
+        props = ", ".join(f"`{x}`" for x in ch["properties"])
+        if ch.get("write_type"):
+            props += f" (write {ch['write_type']})"
+        cccd = {"none": "—", "notify": "**client MUST enable notifications**",
+                "indicate": "**client MUST enable indications**"}[ch["cccd"]]
+        lines.append(f"| `{ch['name']}` | {bit} | {props} | {cccd} | "
+                     f"{ch['written_by']} | {ch['read_by']} | {ch['inert']} |")
+    out["profile:attributes"] = "\n".join(lines)
+
+    lines = ["| Bit | Capability | Requires | Capacity fields that MUST be zero "
+             "when clear |", "| --- | --- | --- | --- |"]
+    for b in schema["bitmasks"]["capabilities"]["bits"]:
+        implies = b.get("implies") or []
+        req = ", ".join(f"bit {caps[i]['bit']} (`{i}`)" for i in implies) or "—"
+        zeroed = ", ".join(f"`{f}`" for f in capacity.get(b["name"], [])) or "—"
+        lines.append(f"| {b['bit']} | `{b['name']}` | {req} | {zeroed} |")
+    out["profile:capabilities"] = "\n".join(lines)
 
     uu = json.loads(UUIDS.read_text())
 
@@ -359,7 +569,57 @@ def c_header(schema):
     for name, bm in schema["bitmasks"].items():
         for b in bm["bits"]:
             L.append(f"#define VTP_{name.upper()}_{b['name'].upper()} (1u << {b['bit']})")
+        if "reserved_from" in bm:
+            # SPEC.md 2 -- reserved bits are zero on transmit. Generated as a
+            # mask rather than written by hand in each encoder, so a bit
+            # assigned in a later minor leaves the reserved region by editing
+            # the schema and nothing else.
+            width = bm["width"] * 8
+            assigned = ((1 << width) - 1) & ~((1 << bm["reserved_from"]) - 1)
+            suffix = "u" if width <= 32 else "ull"
+            L.append(f"#define VTP_{name.upper()}_RESERVED "
+                     f"0x{assigned:0{width // 4}X}{suffix}")
+            L.append(f"#define VTP_{name.upper()}_KNOWN "
+                     f"(~(uint32_t)VTP_{name.upper()}_RESERVED)"
+                     if width <= 32 else
+                     f"#define VTP_{name.upper()}_KNOWN "
+                     f"(~(uint64_t)VTP_{name.upper()}_RESERVED)")
         L.append("")
+
+    # SPEC.md 4.1 -- the capability matrix, as data a codec can loop over. Both
+    # references used to have no expression of it at all, so an Info claiming
+    # CAN without Control encoded and decoded without complaint.
+    caps = {b["name"]: b for b in schema["bitmasks"]["capabilities"]["bits"]}
+    L.append("/* SPEC.md 4.1 -- a capability bit and every bit it requires. */")
+    L.append("typedef struct { uint32_t bit, requires_; const char *name; }"
+             " vtp_capability_rule_t;")
+    L.append("#define VTP_CAPABILITY_RULES { \\")
+    for b in schema["bitmasks"]["capabilities"]["bits"]:
+        req = 0
+        for i in b.get("implies") or []:
+            req |= 1 << caps[i]["bit"]
+        L.append(f'    {{ (1u << {b["bit"]}), 0x{req:08X}u, "{b["name"]}" }}, \\')
+    L.append("}")
+    L.append(f"#define VTP_CAPABILITY_RULE_COUNT "
+             f"{len(schema['bitmasks']['capabilities']['bits'])}")
+    L.append("")
+
+    L.append("/* SPEC.md 4.1 -- info fields that MUST be zero when their")
+    L.append(" * capability bit is clear. Offset and size, so one loop covers all. */")
+    L.append("typedef struct { uint32_t bit; uint8_t offset, size; const char *field; }"
+             " vtp_capacity_rule_t;")
+    info_fields = {f["name"]: f for f in schema["records"]["info"]["fields"]}
+    rules = []
+    for cap, fields in schema["profile"]["capacity"].items():
+        for fname in fields:
+            f = info_fields[fname]
+            rules.append(f'    {{ (1u << {caps[cap]["bit"]}), {f["offset"]}, '
+                         f'{f["size"]}, "{fname}" }}, \\')
+    L.append("#define VTP_CAPACITY_RULES { \\")
+    L += rules
+    L.append("}")
+    L.append(f"#define VTP_CAPACITY_RULE_COUNT {len(rules)}")
+    L.append("")
     L += ["#endif /* VTP1_GENERATED_H */", ""]
     return "\n".join(L)
 
@@ -400,6 +660,45 @@ def _gate(schema, record, values):
     return out
 
 
+def reserved_mask(schema, bitmask):
+    """The bits of `bitmask` this version has assigned a meaning to.
+
+    SPEC.md 2 -- reserved bits are zero on transmit. Whole reserved FIELDS were
+    already zeroed by both encoders; the reserved portion of a bitmask was not,
+    so an encoder handed a capabilities word with bit 19 set, or a gps validity
+    word with bit 30 set, transmitted it. Every conforming receiver is required
+    to ignore those bits, which is exactly why writing them is forbidden: they
+    are the only bytes on the wire that a later minor version may redefine.
+    """
+    spec = schema["bitmasks"][bitmask]
+    rf = spec.get("reserved_from")
+    if rf is None:
+        return (1 << (spec["width"] * 8)) - 1
+    return (1 << rf) - 1
+
+
+def _normalise(schema, record, values):
+    """What a conforming encoder MUST turn these values into on transmit.
+
+    Three rules in one place, so "canonical" means one thing everywhere: a
+    field behind a cleared validity bit is zero (5.1), a reserved field is zero
+    (2), and the reserved portion of a bitmask is zero (2). The last of the
+    three had no expression anywhere and neither reference encoder applied it.
+    """
+    out = dict(values)
+    rec = schema["records"][record]
+    if rec.get("validity"):
+        for name in _gated_fields(schema, record, values):
+            out[name] = 0
+    for f in rec["fields"]:
+        if f.get("reserved"):
+            out[f["name"]] = 0
+        elif f.get("bitmask"):
+            out[f["name"]] = (out.get(f["name"], 0)
+                              & reserved_mask(schema, f["bitmask"]))
+    return out
+
+
 def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=None,
          canonical=True):
     # SPEC.md 5.1: a field whose validity bit is clear MUST be written as zero.
@@ -411,11 +710,13 @@ def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=Non
     # from the round-trip: it asserts that re-encoding NORMALISES those bytes to
     # zero, which is the only coverage the encoder's gating rule gets. Exempting
     # it left that rule completely untested.
-    gated = values
-    if schema["records"][record].get("validity"):
-        gated = _gate(schema, record, values)
-        if canonical:
-            values = gated
+    gated = _normalise(schema, record, values)
+    if canonical:
+        # A canonical vector IS its own normal form. Asserting that rather
+        # than assuming it means a case cannot claim to be canonical while
+        # carrying a stale value or a reserved bit -- the corpus held one such
+        # case, and only the encoder round-trip found it.
+        values = gated
 
     raw = encode(schema, record, values) + extra
     rec = schema["records"][record]
@@ -463,7 +764,9 @@ def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=Non
         c["note"] = note
     if not canonical and not reject:
         c["canonical"] = False
-        # What a conforming encoder MUST turn these bytes into.
+        # What a conforming encoder MUST turn these bytes into: SPEC.md 5.1's
+        # gating, SPEC.md 2's reserved fields, and SPEC.md 2's reserved bitmask
+        # bits.
         c["expect_roundtrip_hex"] = (encode(schema, record, gated) + extra).hex()
     return c
 
@@ -542,7 +845,16 @@ def vectors(schema):
         case(schema, "gps_fix", "reserved-validity-bits-set",
              dict(nominal, seq=7, validity=full | (1 << 20)),
              "A future minor set validity bit 20. A decoder MUST ignore the unknown bit "
-             "and decode every known field normally. Rejecting here breaks forward compatibility."),
+             "and decode every known field normally. Rejecting here breaks forward "
+             "compatibility. A VTP/1.0 encoder MUST NOT reproduce the bit: SPEC.md 2 "
+             "reserves it, and re-encoding therefore normalises it away.",
+             canonical=False,
+             note="Both halves matter and they pull opposite ways. On RECEIVE a "
+                  "reserved bit is ignored, so the known fields decode. On TRANSMIT it "
+                  "is zero, because those bits are the only ones a later minor may "
+                  "redefine and a 1.0 encoder that emits one has published a claim it "
+                  "cannot make. Neither reference encoder masked them until this "
+                  "vector stopped being marked canonical."),
         case(schema, "gps_fix", "with-unknown-extension",
              dict(nominal, seq=8, ext_count=1),
              "One extension record of an unknown type. A decoder MUST skip it by its "
@@ -964,6 +1276,18 @@ def vectors(schema):
                  + encode(schema, "imu_sample",
                           dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6))).hex(),
          "must_reject": "period-zero"},
+        {"name": "empty-batch",
+         "desc": "A header with no samples. SPEC.md 7 -- t_base IS the "
+                 "acquisition time of sample 0, so a batch with no sample 0 "
+                 "carries a timestamp naming a sample that does not exist. A "
+                 "device with nothing to report sends nothing. This is where "
+                 "IMU differs from CAN, whose count MAY be zero because a CAN "
+                 "t_base describes an observed bus rather than a sample.",
+         "record": "imu_batch",
+         "hex": encode(schema, "imu_header",
+                       dict(seq=23, dropped=0, t_base=7_000_000, period=1_200,
+                            count=0, flags=0b011)).hex(),
+         "must_reject": "empty-batch"},
         {"name": "count-exceeds-payload",
          "desc": "Header declares four samples, one is present. MUST be rejected: "
                  "a decoder that trusts count without checking the buffer reads "
@@ -1017,16 +1341,23 @@ def vectors(schema):
              "client MUST NOT infer a default."),
         case(schema, "info", "future-minor-unknown-capability",
              dict(protocol_major=1, protocol_minor=7,
-                  capabilities=C["gps"] | C["can"] | C["imu"] | C["can_fd"] | (1 << 19),
+                  capabilities=(C["gps"] | C["can"] | C["imu"] | C["can_fd"]
+                                | C["control"] | (1 << 19)),
                   gps_rate_hz=25, gps_max_rate_hz=25, can_subscription_slots=32,
                   can_max_frames_per_s=4000, imu_rate_hz=833, imu_max_rate_hz=833,
                   can_max_payload=64, clock_flags=0b11, max_notify_bytes=498),
              "Minor 7 with a capability bit this client has never heard of. A client MUST "
-             "ignore the unknown bit and use everything it does understand."),
+             "ignore the unknown bit and use everything it does understand, and a "
+             "VTP/1.0 encoder MUST NOT reproduce it (SPEC.md 2).",
+             canonical=False,
+             note="This vector used to declare CAN with no Control bit, which SPEC.md "
+                  "4.1 now forbids and which conformance/run.py had been quietly "
+                  "assuming the opposite of. `can_fd` requires `can` and `can` requires "
+                  "`control`, so the whole chain is present here."),
         case(schema, "info", "rate-below-maximum",
              dict(protocol_major=1, protocol_minor=0,
                   capabilities=C["gps"] | C["imu"] | C["control"],
-                  gps_rate_hz=10, gps_max_rate_hz=25, can_max_payload=8,
+                  gps_rate_hz=10, gps_max_rate_hz=25,
                   imu_rate_hz=100, imu_max_rate_hz=833, max_notify_bytes=244),
              "A device running below its ceiling: 10 Hz of a possible 25, 100 Hz of a "
              "possible 833. Current rate and maximum rate are separate fields and a "
@@ -1034,6 +1365,42 @@ def vectors(schema):
              note="The only vector where the current and maximum rates differ. Without "
                   "it a decoder can read gps_rate_hz from gps_max_rate_hz's offset and "
                   "pass the whole corpus -- found by tools/mutate.py, not by review."),
+        # SPEC.md 4.1 -- the capability matrix, in the direction that catches a
+        # device rather than a client. Each of these decoded happily before the
+        # matrix existed.
+        case(schema, "info", "can-without-control",
+             dict(protocol_major=1, protocol_minor=0,
+                  capabilities=C["gps"] | C["can"],
+                  gps_rate_hz=10, gps_max_rate_hz=10, can_subscription_slots=32,
+                  can_max_frames_per_s=2000, can_max_payload=8,
+                  max_notify_bytes=244),
+             "SPEC.md 4.1 -- `can` requires `control`. A CAN device with no Control "
+             "characteristic forwards nothing, because CAN_SUBSCRIBE is the only way "
+             "to ask it to, so this advertises a role no client can use.",
+             reject="capabilities"),
+        case(schema, "info", "monitor-without-control",
+             dict(protocol_major=1, protocol_minor=0,
+                  capabilities=C["gps"] | C["monitor"],
+                  gps_rate_hz=10, gps_max_rate_hz=10, max_notify_bytes=244),
+             "SPEC.md 4.1 -- `monitor` requires `control`. MONITOR_LIST is the only "
+             "way a device can say which channels it wants.",
+             reject="capabilities"),
+        case(schema, "info", "can-fd-without-can",
+             dict(protocol_major=1, protocol_minor=0,
+                  capabilities=C["can_fd"] | C["control"],
+                  can_max_payload=64, max_notify_bytes=244),
+             "SPEC.md 4.1 -- `can_fd` qualifies how CAN frames are carried, and "
+             "qualifies nothing on a device with no CAN.",
+             reject="capabilities"),
+        case(schema, "info", "capacity-without-capability",
+             dict(protocol_major=1, protocol_minor=0, capabilities=C["gps"],
+                  gps_rate_hz=10, gps_max_rate_hz=10,
+                  can_subscription_slots=32, can_max_frames_per_s=4000,
+                  max_notify_bytes=185),
+             "SPEC.md 4.1 -- every CAN capacity MUST be zero while the `can` bit is "
+             "clear. A client sizing a buffer from can_max_frames_per_s here has been "
+             "told something false about a role the device does not have.",
+             reject="capabilities"),
         {"name": "short-payload",
          "desc": "23 bytes. Info is fixed-size; a truncated read MUST be rejected.",
          "record": "info",
@@ -1382,7 +1749,9 @@ def vectors(schema):
                   ll_max_rx_octets=251, conn_interval=12, peripheral_latency=0,
                   supervision_timeout=500, phy_tx=2, phy_rx=2),
              "A future minor set link_validity bit 9. A decoder MUST ignore the unknown "
-             "bit and decode every known field normally."),
+             "bit and decode every known field normally, and a VTP/1.0 encoder MUST "
+             "normalise the bit away on transmit (SPEC.md 2).",
+             canonical=False),
         {"name": "short-payload",
          "desc": "15 bytes. A truncated control response MUST be rejected whole.",
          "record": "link_params",
@@ -1555,6 +1924,13 @@ def vectors(schema):
          "input": {"header": dict(seq=0, dropped=0, t_base=0, period=0, count=1,
                                   flags=0b011),
                    "samples": [dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6)]}},
+        {"name": "imu-empty-batch",
+         "record": "imu_batch", "must_refuse": True,
+         "desc": "SPEC.md 7 -- t_base names sample 0, so a batch with no "
+                 "samples timestamps one that does not exist.",
+         "input": {"header": dict(seq=0, dropped=0, t_base=0, period=1000,
+                                  count=0, flags=0b011),
+                   "samples": []}},
         {"name": "monitor-declaration-repeats-a-slot",
          "record": "monitor_list", "must_refuse": True,
          "desc": "SPEC.md 13.3 -- the decoder already rejected this, so an "
@@ -1583,19 +1959,139 @@ def vectors(schema):
          "desc": "SPEC.md 9.7 -- a negative round trip halved into an offset is "
                  "a confidently wrong clock.",
          "input": {"t_device_rx": 9_000_000, "t_device_tx": 8_999_000}},
-        # Two that MUST encode, so a harness refusing everything cannot pass.
+        # Cases that MUST encode, so a harness refusing everything cannot
+        # pass. Each pins the bytes as well: `expect_hex` is built here from
+        # the schema's own offsets, not from either reference encoder, so two
+        # implementations agreeing on it are agreeing with the source of truth
+        # rather than with each other.
         {"name": "can-ordinary-batch",
          "record": "can_batch", "must_refuse": False,
          "desc": "A frame at the top of the arbitration field, which is legal.",
          "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
                    "records": [dict(dt=0, id=0x1FFFFFFF, extended=True, fd=False,
-                                    rtr=False, len=1, payload="00")]}},
+                                    rtr=False, len=1, payload="00")]},
+         "expect_hex": (
+             encode(schema, "can_header",
+                    dict(seq=0, dropped=0, t_base=0, count=1, flags=0, reserved=0))
+             + encode(schema, "can_record",
+                      dict(dt=0, id=0x1FFFFFFF | (1 << 29), len=1))
+             + b"\x00").hex()},
         {"name": "monitor-well-formed-declaration",
          "record": "monitor_list", "must_refuse": False,
          "desc": "Distinct slots, inside the channel cap.",
          "input": {"page": dict(total=2, index=0, count=2),
                    "entries": [dict(slot=0, channel=1, max_age=10),
-                               dict(slot=1, channel=3, max_age=0)]}},
+                               dict(slot=1, channel=3, max_age=0)]},
+         "expect_hex": (
+             encode(schema, "monitor_page",
+                    dict(total=2, index=0, count=2, reserved=0))
+             + encode(schema, "monitor_channel", dict(slot=0, channel=1, max_age=10))
+             + encode(schema, "monitor_channel", dict(slot=1, channel=3, max_age=0))
+         ).hex()},
+        {"name": "imu-ordinary-batch",
+         "record": "imu_batch", "must_refuse": False,
+         "desc": "Accel and gyro both present, a non-zero period, two samples.",
+         "input": {"header": dict(seq=7, dropped=0, t_base=1_000_000,
+                                  period=10_000, count=2, flags=0b011),
+                   "samples": [dict(ax=1, ay=-2, az=1000, gx=4, gy=-5, gz=6),
+                               dict(ax=2, ay=-3, az=1001, gx=5, gy=-6, gz=7)]},
+         "expect_hex": (
+             encode(schema, "imu_header",
+                    dict(seq=7, dropped=0, t_base=1_000_000, period=10_000,
+                         count=2, flags=0b011, reserved=0))
+             + encode(schema, "imu_sample",
+                      dict(ax=1, ay=-2, az=1000, gx=4, gy=-5, gz=6))
+             + encode(schema, "imu_sample",
+                      dict(ax=2, ay=-3, az=1001, gx=5, gy=-6, gz=7))
+         ).hex()},
+        {"name": "time-sync-simultaneous",
+         "record": "time_sync", "must_refuse": False,
+         "desc": "SPEC.md 9.7 -- t_device_tx MUST NOT be EARLIER than "
+                 "t_device_rx, so equal readings are legal. A device whose "
+                 "clock cannot resolve the two instants apart reports them "
+                 "equal rather than inventing a gap.",
+         "input": {"t_device_rx": 9_000_000, "t_device_tx": 9_000_000},
+         "expect_hex": encode(schema, "time_sync",
+                              dict(t_device_rx=9_000_000,
+                                   t_device_tx=9_000_000)).hex()},
+        # SPEC.md 4.1, in the producer direction.
+        {"name": "info-can-without-control",
+         "record": "info", "must_refuse": True,
+         "desc": "SPEC.md 4.1 -- `can` requires `control`. A device that "
+                 "publishes this has advertised a role no client can use, "
+                 "because CAN_SUBSCRIBE is the only way to install one.",
+         "input": dict(protocol_major=1, protocol_minor=0,
+                       capabilities=C["gps"] | C["can"],
+                       gps_rate_hz=10, gps_max_rate_hz=10,
+                       can_subscription_slots=32, can_max_frames_per_s=2000,
+                       can_max_payload=8, max_notify_bytes=244)},
+        {"name": "info-capacity-without-capability",
+         "record": "info", "must_refuse": True,
+         "desc": "SPEC.md 4.1 -- every CAN capacity is zero while the `can` "
+                 "bit is clear. Masking the capacity instead would publish a "
+                 "different device from the one the caller described.",
+         "input": dict(protocol_major=1, protocol_minor=0,
+                       capabilities=C["gps"], gps_rate_hz=10,
+                       gps_max_rate_hz=10, can_max_frames_per_s=4000,
+                       max_notify_bytes=185)},
+        # SPEC.md 2, in the producer direction: reserved bits of a bitmask are
+        # ZERO on transmit. These MUST encode -- and MUST encode to bytes with
+        # the reserved bit gone. Neither reference encoder masked them.
+        {"name": "info-reserved-capability-bit",
+         "record": "info", "must_refuse": False,
+         "desc": "SPEC.md 2 -- capabilities bit 19 is reserved in VTP/1.0, so "
+                 "an encoder MUST normalise it away rather than publish a "
+                 "capability this version has not assigned.",
+         "input": dict(protocol_major=1, protocol_minor=0,
+                       capabilities=C["gps"] | (1 << 19), gps_rate_hz=10,
+                       gps_max_rate_hz=10, max_notify_bytes=244),
+         "expect_hex": encode(schema, "info",
+                              dict(protocol_major=1, protocol_minor=0,
+                                   capabilities=C["gps"], gps_rate_hz=10,
+                                   gps_max_rate_hz=10,
+                                   max_notify_bytes=244)).hex()},
+        {"name": "gps-reserved-validity-and-flag-bits",
+         "record": "gps_fix", "must_refuse": False,
+         "desc": "SPEC.md 2 -- gps_validity bit 20 and fix_flags bit 7 are "
+                 "both reserved. An encoder MUST zero both, and MUST still "
+                 "gate the fields behind the KNOWN validity bits.",
+         "input": {"fix": dict(seq=4, validity=V["position"] | (1 << 20),
+                               lat=515_074_000, lon=-1_397_000,
+                               alt_msl=35_000, fix_type=3,
+                               fix_flags=0b1000_0001, ext_count=0)},
+         "expect_hex": encode(schema, "gps_fix",
+                              dict(seq=4, validity=V["position"],
+                                   lat=515_074_000, lon=-1_397_000,
+                                   alt_msl=0, fix_type=3,
+                                   fix_flags=0b0000_0001, ext_count=0)).hex()},
+        {"name": "monitor-update-reserved-validity-bits",
+         "record": "monitor_update", "must_refuse": False,
+         "desc": "SPEC.md 2 -- monitor_validity bits 1-7 are reserved. The "
+                 "one place the protocol runs client-to-device is not an "
+                 "exception to the transmit rule.",
+         "input": {"header": dict(seq=1, count=1, reserved=0),
+                   "values": [dict(slot=2, validity=PRESENT | 0x80, value=42)]},
+         "expect_hex": (encode(schema, "monitor_header",
+                               dict(seq=1, count=1, reserved=0))
+                        + encode(schema, "monitor_value",
+                                 dict(slot=2, validity=PRESENT, value=42))).hex()},
+        {"name": "link-params-reserved-validity-bit",
+         "record": "link_params", "must_refuse": False,
+         "desc": "SPEC.md 2 -- link_validity bits 4-15 are reserved, and the "
+                 "fields behind the known bits are still gated.",
+         "input": dict(validity=L["att_mtu"] | (1 << 9), att_mtu=247,
+                       conn_interval=12, peripheral_latency=0,
+                       supervision_timeout=500, phy_tx=2, phy_rx=2),
+         "expect_hex": encode(schema, "link_params",
+                              dict(validity=L["att_mtu"], att_mtu=247)).hex()},
+        {"name": "control-detail-on-ok",
+         "record": "control_response", "must_refuse": False,
+         "desc": "SPEC.md 9 -- detail accompanies `ok`, and only `ok`. The "
+                 "refusal case above is only half the rule.",
+         "input": {"opcode": 0x02, "tag": 1, "status": 0, "detail_hex": "0700"},
+         "expect_hex": (encode(schema, "control_response",
+                               dict(opcode=0x02, tag=1, status=0))
+                        + bytes.fromhex("0700")).hex()},
     ]
 
     return files

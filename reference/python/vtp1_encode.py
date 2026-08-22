@@ -75,6 +75,39 @@ def _gate(name, values):
     return gated
 
 
+def _known_bits(bitmask):
+    """The bits of `bitmask` this version has assigned a meaning to.
+
+    SPEC.md §2 — reserved bits are ZERO on transmit. `_zero_reserved` below
+    already covered whole reserved FIELDS; the reserved PORTION of a bitmask
+    had no expression anywhere, so a caller handing this encoder a capabilities
+    word with bit 19 set, or a gps validity word with bit 30 set, had it
+    transmitted verbatim. Every conforming receiver is required to ignore those
+    bits, which is exactly why writing them is forbidden: they are the only
+    bits on the wire a later minor version may redefine, and a 1.0 device that
+    sets one has published a claim it cannot make.
+    """
+    spec = SCHEMA["bitmasks"][bitmask]
+    reserved_from = spec.get("reserved_from")
+    if reserved_from is None:
+        return (1 << (spec["width"] * 8)) - 1
+    return (1 << reserved_from) - 1
+
+
+def _normalise_bitmasks(name, values):
+    """Mask the reserved portion of every bitmask field of `name`."""
+    rec = _record(name)
+    masked = None
+    for f in rec["fields"]:
+        bm = f.get("bitmask")
+        if not bm:
+            continue
+        if masked is None:
+            masked = dict(values)
+        masked[f["name"]] = values.get(f["name"], 0) & _known_bits(bm)
+    return values if masked is None else masked
+
+
 def _zero_reserved(name, values):
     """SPEC.md §2 — a reserved field is zero on transmit.
 
@@ -93,6 +126,9 @@ def _zero_reserved(name, values):
 
 
 def _pack(name, values):
+    # Every record goes through the reserved-bit mask on its way to the wire,
+    # so no encoder function has to remember to apply it.
+    values = _normalise_bitmasks(name, values)
     rec = _record(name)
     buf = bytearray(rec["size"])
     for f in rec["fields"]:
@@ -228,6 +264,10 @@ def encode_imu_batch(header, samples):
         raise EncodeError(
             "imu_header.period is zero, which says every sample was taken at "
             "the same instant")
+    if not header.get("count"):
+        raise EncodeError(
+            "imu_header.count is zero, but t_base is the acquisition time of "
+            "sample 0; a device with nothing to report sends nothing")
     flags = header.get("flags", 0)
     accel = bool(flags & IMU_HAS_ACCEL)
     gyro = bool(flags & IMU_HAS_GYRO)
@@ -245,8 +285,40 @@ def encode_imu_batch(header, samples):
     return bytes(out)
 
 
+CAP_BIT = {b["name"]: b["bit"]
+           for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
+CAP_IMPLIES = {b["name"]: b.get("implies") or []
+               for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
+CAP_CAPACITY = SCHEMA["profile"]["capacity"]
+
+
 def encode_info(info):
-    """SPEC.md §4. No field is gated; a capacity of zero means none."""
+    """SPEC.md §4. No field is gated; a capacity of zero means none.
+
+    SPEC.md §4.1 is enforced here, because an encoder must not emit what its
+    own decoder rejects — and the profile matrix is now something the decoder
+    rejects. Checked against the NORMALISED capability word, since that is what
+    reaches the wire: a reserved bit cannot satisfy an implication it was never
+    allowed to be set for.
+    """
+    caps = info.get("capabilities", 0) & _known_bits("capabilities")
+    for name, implies in CAP_IMPLIES.items():
+        if not caps & (1 << CAP_BIT[name]):
+            continue
+        for req in implies:
+            if not caps & (1 << CAP_BIT[req]):
+                raise EncodeError(
+                    f"info.capabilities sets `{name}` without `{req}`, which "
+                    f"SPEC.md §4.1 requires it to imply")
+    for cap, fields in CAP_CAPACITY.items():
+        if caps & (1 << CAP_BIT[cap]):
+            continue
+        for field in fields:
+            if info.get(field):
+                raise EncodeError(
+                    f"info.{field} is {info[field]} while capability `{cap}` "
+                    f"is clear; SPEC.md §4.1 requires a capacity behind a "
+                    f"cleared bit to be zero")
     return _pack("info", info)
 
 

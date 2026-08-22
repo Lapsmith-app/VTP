@@ -8,6 +8,237 @@ conformance vector.
 
 ## [Unreleased]
 
+### The consistency pass — third review
+
+The reviewer's second pass was made against a production standards-body bar and
+then explicitly recalibrated to the right one: *can two reasonably competent
+hobbyists implement this independently, connect successfully, and understand
+failures without reading the author's mind?* This release is that list, plus
+the parts of the earlier one that were already done and are worth keeping.
+
+Contradictions come first, because a contradiction is the only defect here that
+can produce two conforming implementations that cannot talk to each other.
+
+### Fixed — contradictions that could produce incompatible implementations
+
+- **Nothing said whether CAN or Monitor requires Control.** The specification
+  defined every capability bit independently, while `conformance/run.py` had a
+  hard-coded table making `can` and `monitor` imply `control` — the runner
+  enforcing a rule the specification did not state. Canonical Info vectors
+  meanwhile blessed a CAN device with no Control characteristic, which no
+  client could install a subscription on. `conformance/README.md` compounded it
+  by calling Control bit 3; it is bit 4.
+
+  **SPEC.md §4.1 is now the one place any of this is stated**, generated from
+  `schema/vtp1.yaml`: capability implications, the attribute table, GATT
+  properties, CCCD requirements, write type, direction, and which capacity
+  fields must be zero behind a cleared bit. `can` and `monitor` require
+  `control`; `can_fd`, `masked_subscriptions` and `on_change_subscriptions`
+  require `can`. Both reference decoders reject an Info that breaks the matrix,
+  both encoders refuse to produce one, and `run.py` reads the implications from
+  the schema instead of asserting its own.
+
+  **The attribute table is fixed.** Every VTP/1 device exposes every
+  characteristic; a role it does not implement is inert rather than absent. The
+  alternative fails for a mundane reason: central stacks cache the attribute
+  table across connections, so a device whose table changes hands the client a
+  stale handle, and the symptom is a read of the wrong characteristic rather
+  than a missing one.
+
+- **`max_age` of zero meant two things.** The generated field description said
+  "0 never expires"; §13.5 said a zero `max_age` means no deadline *of its own*
+  and that the device's liveness bound still applies. The prose is the half
+  with the argument behind it, and the schema now matches it.
+
+- **A zero-channel Monitor declaration was legal and forbidden at once.** The
+  corpus carried one; §13.5 required a non-zero `max_age` on at least one
+  channel, which a device with no channels cannot satisfy. §13.5 now says a
+  device MAY declare no channels, that such a device has no liveness bound, and
+  what a client does about it.
+
+- **Device Information was a MUST in §2 and a SHOULD in §3.4.** An implementer
+  reading one built it and an implementer reading the other did not, and both
+  were conforming. It is a SHOULD, specified in §3.4, and §2 now says so.
+
+- **Rate setting was undefined in four ways.** New §9.8 states them: `hz` of 0
+  stops the stream and is not an error; a rate the device does not support is
+  `bad_params` and MUST NOT be silently rounded to a neighbour; a rate above
+  the published ceiling is `rate_exceeded`; the applied rate is read back from
+  Info rather than returned in the response; and the change takes effect within
+  one notification, with no batch spanning it.
+
+  There is deliberately no way to enumerate supported rates. Asking and finding
+  out is one round trip on a link the client already has, and a discovery
+  mechanism would be a list format and a second thing to keep in step with
+  Info.
+
+- **`rate_exceeded` still described CAN**, whose rate refusal §9.4 forbids
+  outright. It names the two rate setters now.
+
+- **`TIME_SYNC` declared a parameter.** `params` in the schema held a literal
+  em-dash — the *display* form of "no parameters" written into the source of
+  truth — so the schema said the opcode took one parameter whose name and type
+  were both `-` while §9 said it was parameterless. The generator now refuses
+  the dash outright.
+
+- **`rtk_float` and `rtk_fixed` could both be set.** The natural client reading
+  of that pair is "fixed wins", which upgrades an accuracy claim on the
+  strength of a bug. They are mutually exclusive, both-set decodes as neither,
+  and either implies `differential`.
+
+- **An IMU batch could carry no samples.** `t_base` is defined as the
+  acquisition time of sample 0, so an empty batch timestamps a sample that does
+  not exist. `count` of zero is now rejected by both decoders and refused by
+  both encoders. §6's CAN batch still permits it, and the difference is stated:
+  a CAN `t_base` describes an observed bus, an IMU `t_base` describes a sample.
+
+- **A FIFO discontinuity silently corrupted every later timestamp.** Samples
+  are derived as `t_base + i × period`, so a gap mid-batch shifts everything
+  after it — silently, and increasingly. §7 now requires a device to end the
+  batch at the discontinuity and reanchor, counting the loss in `dropped`.
+
+### Fixed — the C reference encoder
+
+- **Four malformed-input crashes.** `vtp_encode_can_batch` read `frames[0].dt`
+  before checking `frames`; `vtp_encode_monitor_list` and
+  `vtp_encode_monitor_update` ran their duplicate-slot sweeps before checking
+  their arrays; `vtp_encode_imu_batch` reached a sample only through a set
+  presence flag, so one malformed call crashed or quietly emitted a batch of
+  zeroed samples depending on one bit of the header. All reproduced under
+  ASan/UBSan first.
+
+- **A refusal left the caller's buffer modified.** `vtp_encode_can_batch`
+  validated the arbitration identifier inside its write loop, after the header
+  had gone into the buffer, contradicting the file's own documented "nothing is
+  written on -1" — and leaving the previous notification's bytes readable
+  behind a call the caller believes produced nothing.
+
+### Fixed — the reference peripheral
+
+- **A connection's first Control request could be applied and then erased.**
+  The pump polled `is_connected()` once a tick and ran the connect edge from
+  what it found. A GATT write is not polled: connect, enable indications, write
+  `CAN_SUBSCRIBE` can all land before the next poll. The request was admitted,
+  applied and queued — and then the pump noticed the connection it had already
+  been serving and cleared the queue and the device state out from under it.
+  The client's subscription had taken effect and was never answered, so it
+  retried a request that was already installed.
+
+  This is the ordinary path: no stall, no reconnection, nothing refused. The
+  transport self-test previously stepped the pump five ticks before writing and
+  described the loss as correct. The connection edge is now taken by whichever
+  comes first — a GATT callback, which is proof the link exists, or the poll —
+  and the test asserts the request survives.
+
+- **999 m was displayed as `999 km`.** The unit is part of the static cell
+  label and cannot change per value, but the formatter switched to bare metres
+  below 1 km. A thousand-fold error, rendered confidently, on the one screen a
+  driver reads at speed. Always kilometres to three places now.
+
+- **`peripheral_latency` of 0 read as "unknown".** The grouped-validity check
+  tested truthiness rather than presence, so the whole connection-parameter
+  group reported absent for the value §2 says a device SHOULD request while
+  streaming.
+
+- **Negotiated link state outlived its link.** The MTU and PHY a central
+  negotiated stayed in Info and `GET_LINK_PARAMS` until something replaced
+  them, so the next connection read the previous one's numbers back with the
+  validity bits set — which assert they are measurements of the link being
+  asked about.
+
+### Changed
+
+- **`max_notify_bytes` is a device ceiling, not the negotiated ATT payload**
+  (new §4.2). The two readings look interchangeable and are not: a client reads
+  Info as its first act after connecting, and a peripheral commonly does not
+  learn the negotiated maximum until a central subscribes, which is strictly
+  later. Defined as the live value it was a field whose correct answer did not
+  exist yet at the only moment anyone read it. Defined as a ceiling it always
+  has one, the device never exceeds it, and the negotiated value stays
+  available from `GET_LINK_PARAMS` — a request made *after* subscribing.
+
+- **`dropped` is explicitly a best-effort diagnostic** (§8.3). It exists to
+  separate "my link is bad" from "the device is overrun" and to put a number on
+  the second; it is not an audit trail and MUST NOT be used to reconcile
+  counts. A device MAY report a discard in the next notification rather than
+  the one it strictly belonged to. Attributing every lost item to exactly one
+  notification would mean owning the counter transactionally across encoding,
+  transmit-queue refusal and supersession — three places a firmware author
+  would have to get right, to make a diagnostic exact. `seq` is the field with
+  the exact guarantee, and it is exact because it is cheap to be.
+
+- **Reserved bits of a bitmask are normalised on transmit.** SPEC.md §2 was
+  already applied to whole reserved *fields*; the reserved *portion* of a
+  bitmask had no expression anywhere, so a capabilities word with bit 19 set,
+  or a GPS validity word with bit 30 set, was transmitted verbatim. Those bits
+  are the only ones on the wire a later minor may redefine. The masks are
+  generated from the schema, and the three vectors that carry a reserved bit
+  are now non-canonical: a decoder must ignore the bit, an encoder must
+  normalise it away, and each vector asserts both.
+
+### Added
+
+- **`conformance/produce.py` — producer conformance, language-neutral.** It
+  replaces `tools/check_encoders.py`, which imported the Python encoder as a
+  module. A green producer run was therefore a statement about one of this
+  repository's two reference encoders, and the C encoder's four crashes and
+  contract violation sat behind a green run for as long as they existed,
+  because none of them was ever called.
+
+  The runner drives a subprocess over a text contract, exactly as the decode
+  runner does, with adapters for both references (`reference/c/vtp1_producer`,
+  `reference/python/vtp1_produce.py`). It takes `--roles` and reads the same
+  role table. **A crash is not a refusal**: an implementation that dies partway
+  through has answered nothing for the case it died on, and every unanswered
+  case is a failure rather than an assumed refusal.
+
+  Cases that must encode may now pin their bytes with `expect_hex`, generated
+  from the schema's field offsets rather than from either encoder, so two
+  implementations agreeing on it are agreeing with the source of truth.
+
+- **`reference/c/encode_selftest.c` — the C API contract, under ASan/UBSan.**
+  Every producer case travels as JSON, so every array it describes exists; two
+  of the header's promises are therefore unreachable from there and both were
+  broken. `make -C reference/c san` runs this plus the whole suite sanitised.
+
+- **`reference/peripheral/smoketest.py` — a real client, over a real radio.**
+  The one thing this repository could not test, and the one gap the README now
+  names outright. It discovers by service UUID, checks Info against §4.1,
+  checks the negotiated MTU against §2's floor and every notification against
+  the published ceiling, writes `TIME_SYNC` and waits for a real indication,
+  decodes all three streams with the reference decoder, checks they share one
+  device clock, and reconnects to check §8.2's per-connection restart.
+
+  Its decode-and-inspect half runs in `selftest.py` against the software
+  device's own output, with a deliberately failing case, so the script pointed
+  at unfamiliar hardware is known to work on known-good input. **Its BLE half
+  has never met an adapter.**
+
+- **Schema validation before generation.** `protocol.endianness`, version and
+  MTU ranges, opcode values and the `name:type` parameter grammar, and the
+  whole §4.1 profile block: unknown capabilities, CCCDs declared without the
+  matching property, writable characteristics with no write type, an allocated
+  UUID with no profile row. It caught the `TIME_SYNC` em-dash on its first run.
+
+- **`tools/check_docs.py` checks the producer count** as well as the vector
+  count. The producer corpus was a second corpus with a second stated size and
+  nothing checking it.
+
+### Not done, and deliberately
+
+- **The real-radio smoke test has not been run.** No adapter was available. The
+  script and the two-machine procedure exist; the README status table says
+  plainly that nothing here has been over the air.
+
+- **No second independent implementation.** Still the honest measure of a
+  protocol's maturity, and still absent — but for a hobbyist protocol that is a
+  reason to publish and find out rather than a reason to wait.
+
+- **The specification patent gap is recorded, not resolved.** It needs a
+  lawyer, and it should not stop anyone experimenting in the meantime.
+
+## Earlier unreleased work
+
 ### Fixed — the producer direction
 Milestone 3 of the second review. Every defect reproduced before it was fixed.
 

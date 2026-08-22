@@ -333,6 +333,7 @@ class Peripheral:
     def read_request(self, characteristic, **kwargs):
         """Info is regenerated per read: SPEC.md §4 forbids a client caching it
         across connections precisely because it can change."""
+        self._observe_link_up()
         name = CHAR_NAMES.get(characteristic.uuid.lower(), characteristic.uuid)
         log.info("READ  %s", name)
         if characteristic.uuid.lower() == CHAR["info"].lower():
@@ -340,6 +341,11 @@ class Peripheral:
         return characteristic.value or b""
 
     def write_request(self, characteristic, value, **kwargs):
+        # BEFORE anything is applied. This write is itself proof the link is
+        # up, and taking the connection edge here is what stops the pump
+        # noticing the connection a moment later and clearing away a request it
+        # has already applied.
+        self._observe_link_up()
         uuid = characteristic.uuid.lower()
         if uuid == CHAR["monitor_values"].lower():
             # SPEC.md §13.4 — the one direction that runs client-to-device.
@@ -517,6 +523,50 @@ class Peripheral:
                         "requires; this link does not meet the specification",
                         att_mtu, dev.MIN_ATT_MTU)
 
+    # -- link edges -------------------------------------------------------
+    #
+    # SPEC.md 8.2 and 9.2 hang off these two, and the pump used to be the only
+    # thing that could see them: it polled `is_connected()` once a tick and ran
+    # the edge from what it found.
+    #
+    # A GATT callback is not polled. It arrives when the central's write
+    # arrives, which on every real stack can be BEFORE the next poll -- so a
+    # perfectly ordinary first request (the client connects, enables
+    # indications, writes CAN_SUBSCRIBE) was admitted, applied and queued, and
+    # then the pump noticed the connection it had already been serving and
+    # cleared the queue and the device state out from under it. The client's
+    # first request had taken effect and was never answered.
+    #
+    # The edge is therefore taken from whichever comes first: a GATT callback,
+    # which is proof the link exists, or the poll. `ConnectionTracker` makes
+    # that idempotent -- whichever loses the race sees no edge at all.
+
+    def _observe_link_up(self):
+        """A GATT callback is itself evidence that a central is connected."""
+        if self._link.update(True) == "connected":
+            self._on_connected()
+
+    def _on_connected(self):
+        # A connection starts from a known state. Without this the device
+        # carries the previous client's subscriptions and sequence numbers into
+        # the next connection, which 9.2 forbids.
+        self.device.on_connect()
+        self._reset_transport_state()
+        log.info("CLIENT CONNECTED — sequence numbers restarted, "
+                 "subscription table cleared")
+
+    def _on_disconnected(self):
+        # 9.2 clears the table when the LINK DROPS, not when the next one
+        # starts. Clearing only on connect left a disconnected device reporting
+        # three installed ids with nobody subscribed, which reads as a client
+        # fault.
+        self.device.on_disconnect()
+        undelivered = self._reset_transport_state()
+        if undelivered:
+            log.warning("%d control response(s) undelivered when the link "
+                        "dropped", undelivered)
+        log.info("CLIENT DISCONNECTED — subscription table cleared")
+
     def _reset_transport_state(self):
         """Everything this transport holds on behalf of ONE link.
 
@@ -680,26 +730,14 @@ class Peripheral:
             # previous central could be handed to a new one in the same tick
             # that reset the device: data from a link that no longer exists,
             # delivered under sequence numbers about to restart.
+            # A GATT callback may already have taken the rising edge; the
+            # tracker makes that idempotent, so this handles whichever the pump
+            # is first to see, and nothing twice.
             event = self._link.update(await self.server.is_connected())
             if event == "connected":
-                # A connection starts from a known state. Without this the
-                # device carries the previous client's subscriptions and
-                # sequence numbers into the next connection, which §9.2 forbids.
-                self.device.on_connect()
-                self._reset_transport_state()
-                log.info("CLIENT CONNECTED — sequence numbers restarted, "
-                         "subscription table cleared")
+                self._on_connected()
             elif event == "disconnected":
-                # §9.2 clears the table when the LINK DROPS, not when the next
-                # one starts. Clearing only on connect left a disconnected
-                # device reporting three installed ids with nobody subscribed,
-                # which reads as a client fault.
-                self.device.on_disconnect()
-                undelivered = self._reset_transport_state()
-                if undelivered:
-                    log.warning("%d control response(s) undelivered when the "
-                                "link dropped", undelivered)
-                log.info("CLIENT DISCONNECTED — subscription table cleared")
+                self._on_disconnected()
 
             subscribed = self._subscribed()
 

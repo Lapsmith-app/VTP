@@ -120,9 +120,11 @@ and no stream carries a clock of its own.
 A device MUST function correctly at an ATT MTU of 100 and MUST use up to the
 negotiated maximum when batching (§6, §7).
 
-A device MUST implement the Bluetooth SIG Device Information Service
-(`0x180A`) and MUST populate Manufacturer Name, Model Number and Firmware
-Revision.
+The Device Information Service is a SHOULD, and §3.4 is where it is specified.
+This paragraph used to state it as a MUST, so the specification required and
+merely recommended the same service four sections apart — an implementer
+reading §2 built it and an implementer reading §3.4 did not, and both were
+conforming.
 
 Signed integers are two's complement. Reserved fields MUST be written as zero
 and MUST be ignored on receive.
@@ -248,7 +250,7 @@ Total: **24 bytes**. All fields little-endian.
 | 18 | 2 | `u16` | `imu_max_rate_hz` | `Hz` |
 | 20 | 1 | `u8` | `can_max_payload` | 8 for classic CAN, 64 for CAN FD |
 | 21 | 1 | `u8` | `clock_flags` | bit0 GNSS-disciplined, bit1 clock survives reconnect |
-| 22 | 2 | `u16` | `max_notify_bytes` | `bytes` |
+| 22 | 2 | `u16` | `max_notify_bytes` | `bytes`; Largest notification this device will ever send; a fixed device ceiling, NOT the negotiated ATT payload (SPEC.md 4.2) |
 <!-- END GENERATED: info -->
 
 `capabilities` bits:
@@ -257,13 +259,13 @@ Total: **24 bytes**. All fields little-endian.
 | Bit | Name | Meaning |
 | --- | --- | --- |
 | 0 | `gps` | — |
-| 1 | `can` | — |
+| 1 | `can` | **Requires `control`.** |
 | 2 | `imu` | — |
-| 3 | `monitor` | Device asks the client for values to display (§13) |
+| 3 | `monitor` | Device asks the client for values to display (§13) **Requires `control`.** |
 | 4 | `control` | — |
-| 5 | `can_fd` | — |
-| 6 | `masked_subscriptions` | — |
-| 7 | `on_change_subscriptions` | — |
+| 5 | `can_fd` | **Requires `can`.** |
+| 6 | `masked_subscriptions` | **Requires `can`.** |
+| 7 | `on_change_subscriptions` | **Requires `can`.** |
 | 8+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:capabilities -->
 
@@ -277,6 +279,117 @@ service UUID, the client MUST treat the device as non-conforming and disconnect.
 
 A capacity field of zero means "none", not "unspecified". A client MUST NOT
 substitute a default for any capacity it did not read.
+
+### 4.1 The profile matrix
+
+Everything a capability bit changes is here, and nowhere else. Both tables are
+generated from `schema/vtp1.yaml`, so an implementation, the conformance
+runner and this section cannot disagree about what a bit requires.
+
+**The attribute table is fixed.** A VTP/1 device MUST expose the service and
+**every** characteristic in the first table, whatever its capabilities say. A
+characteristic whose capability bit is clear is **inert**, not absent, and the
+last column says exactly what inert means for it.
+
+<!-- BEGIN GENERATED: profile:attributes -->
+| Characteristic | Capability | Properties | CCCD | Written by | Read by | When the capability bit is clear |
+| --- | --- | --- | --- | --- | --- | --- |
+| `info` | — always present | `read` | — | device | client | never; Info is always meaningful |
+| `gps` | bit 0 (`gps`) | `notify` | **client MUST enable notifications** | device | client | notifications are never sent |
+| `can` | bit 1 (`can`) | `notify` | **client MUST enable notifications** | device | client | notifications are never sent |
+| `imu` | bit 2 (`imu`) | `notify` | **client MUST enable notifications** | device | client | notifications are never sent |
+| `control` | bit 4 (`control`) | `write`, `indicate` (write with-response) | **client MUST enable indications** | client | client | every opcode answers unsupported_opcode |
+| `monitor_values` | bit 3 (`monitor`) | `write` (write with-response) | — | client | device | every write answers with an ATT error and changes nothing |
+<!-- END GENERATED: profile:attributes -->
+
+A device MUST NOT add a characteristic to the VTP/1 service beyond these, and
+MUST NOT expose one with properties beyond those listed. A client MUST NOT
+require any property the table does not list — a device MAY, for example, also
+make `gps` readable, and a client MUST NOT read it in place of subscribing.
+
+The alternative — omitting the characteristics a device does not implement — is
+what this replaces, and it fails for a reason that has nothing to do with
+elegance. Central stacks **cache the attribute table** across connections, and
+several cache it across reboots of the phone. A device whose table changes
+between connections, because a capability was switched off in firmware or
+because a build shipped without a role, hands the client a stale handle. The
+client then reads or writes the wrong attribute rather than discovering a
+missing one, which is precisely the plausible-wrong-value failure §1.1 exists
+to prevent. A fixed table cannot produce it: discovery answers "is this
+VTP/1?", Info answers "what does it do?", and neither half-answers the other.
+
+**Capability implications are normative.**
+
+<!-- BEGIN GENERATED: profile:capabilities -->
+| Bit | Capability | Requires | Capacity fields that MUST be zero when clear |
+| --- | --- | --- | --- |
+| 0 | `gps` | — | `gps_rate_hz`, `gps_max_rate_hz` |
+| 1 | `can` | bit 4 (`control`) | `can_subscription_slots`, `can_max_frames_per_s`, `can_max_payload` |
+| 2 | `imu` | — | `imu_rate_hz`, `imu_max_rate_hz` |
+| 3 | `monitor` | bit 4 (`control`) | — |
+| 4 | `control` | — | — |
+| 5 | `can_fd` | bit 1 (`can`) | — |
+| 6 | `masked_subscriptions` | bit 1 (`can`) | — |
+| 7 | `on_change_subscriptions` | bit 1 (`can`) | — |
+<!-- END GENERATED: profile:capabilities -->
+
+A device MUST NOT set a capability bit without also setting every bit the
+second column names. A client MUST treat an Info whose capabilities break an
+implication as non-conforming, exactly as it treats a `protocol_major`
+mismatch, and MUST NOT guess which half was meant.
+
+`can` and `monitor` require `control` because neither role is reachable
+without it. A CAN device forwards nothing until a client has sent
+`CAN_SUBSCRIBE` (§9.2), and a Monitor device cannot say which channels it wants
+except through `MONITOR_LIST` (§13.3). A device advertising either without
+Control is advertising a role no client can use, and this specification used to
+permit exactly that while `conformance/run.py` quietly required the opposite —
+the runner enforcing a rule the specification did not state.
+
+`can_fd`, `masked_subscriptions` and `on_change_subscriptions` require `can`
+for the same reason: each qualifies how CAN subscriptions behave, and qualifies
+nothing at all on a device with no CAN.
+
+**Capacity fields follow the bit.** Every field in the third column MUST be
+zero when its capability bit is clear. This is what makes "a capacity of zero
+means none" checkable rather than a promise: a device reporting
+`can_max_frames_per_s` of 4000 with the `can` bit clear has published a
+capability it does not have, and a client sizing a buffer from it has been told
+something false.
+
+**Direction.** The "written by" and "read by" columns say which end produces
+each record. Two of the six run client-to-device — `control` requests and
+`monitor_values` — and everything else runs device-to-client. A conformance
+role covers both directions of the records it names (`conformance/README.md`).
+
+### 4.2 `max_notify_bytes` is a device ceiling
+
+`max_notify_bytes` is the largest notification the **device** will ever send,
+on any link. It is a property of the device, fixed for the connection, and it
+is **not** the negotiated ATT payload.
+
+Those two readings look interchangeable and are not, because of when each
+becomes available. A client reads Info as its first act after connecting. A
+peripheral commonly does not learn the negotiated maximum until a central
+subscribes, which is strictly later — on CoreBluetooth the only object that
+knows it arrives in the subscribe callback. A `max_notify_bytes` defined as the
+negotiated value is therefore a field whose correct value does not exist yet at
+the only moment anyone reads it, and a device answering it can only report the
+previous link's number or a configured guess.
+
+Defined as a ceiling, it has an answer at every instant: a client sizes its
+receive buffer once, from a number that cannot change underneath it, and a
+device that would exceed the ceiling on a generous link simply does not.
+
+A device MUST NOT send a notification larger than the `max_notify_bytes` it
+published, and MUST size batches to the negotiated ATT payload when that is
+**smaller** — the ceiling bounds the device, the link bounds the notification,
+and the smaller of the two always wins.
+
+A client that wants the negotiated value asks for it with `GET_LINK_PARAMS`
+(§9.1), which is a request made after subscribing rather than a value read
+before it, and which reports `att_mtu` with a validity bit that is clear when
+the device genuinely cannot see it.
 
 ---
 
@@ -411,6 +524,20 @@ measurement of zero. No field value anywhere in VTP/1 signals absence.
 | 4 | `solution_epoch` | t_device is the epoch of the solution; when clear it is when the fix reached the device (SPEC.md 5.6) |
 | 5+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:fix_flags -->
+
+`rtk_float` and `rtk_fixed` are **mutually exclusive**. A carrier-phase
+solution has either resolved its integer ambiguities or it has not, so a device
+MUST NOT set both, and a client that receives both MUST treat the pair as
+unknown — neither RTK state — rather than picking the better of the two.
+
+Both being set was legal until this paragraph existed, and the natural client
+reading of it is "fixed wins", which upgrades a device's accuracy claim on the
+strength of a bug. Reporting unknown is the §1.1 answer: an ambiguous statement
+about solution quality is worth less than no statement.
+
+Either RTK bit implies `differential`, since an RTK solution is by definition a
+differentially corrected one. A device that sets an RTK bit MUST also set
+`differential`.
 
 ### 5.4 Reference frames and derived quantities
 
@@ -772,8 +899,31 @@ Total: **12 bytes**. All fields little-endian.
 
 Samples are evenly spaced: sample *i* is at `t_base + i × period` microseconds.
 
+**`count` MUST NOT be zero.** `t_base` is defined as the acquisition time of
+sample 0, so a batch with no sample 0 has a timestamp naming a sample that does
+not exist. A device with nothing to report sends nothing; there is no empty-IMU
+notification and a receiver MUST reject one. This differs from §6's CAN batch,
+where `count` MAY be zero, and the difference is not an inconsistency: a CAN
+`t_base` describes a bus that was observed and found quiet, while an IMU
+`t_base` describes a sample.
+
 `t_base` MUST be the acquisition time of sample 0 — the instant the sensor
 took that reading — and not the instant the device read it out.
+
+**Every sample in one batch MUST be evenly spaced by `period`.** That is what
+lets a client derive each timestamp arithmetically, and it is a real constraint
+on a device draining a FIFO: if the FIFO overflowed, or the sensor was
+reconfigured, or a read was missed, the samples either side of the gap are no
+longer `period` apart and every timestamp the client derives after the gap is
+wrong by the size of it — silently, and increasingly, because the error is
+carried by `i × period` rather than announced.
+
+A device MUST therefore **end the batch at the discontinuity** and start the
+next one with a fresh `t_base` taken from the first sample after it. The
+samples lost across the gap are counted in `dropped` (§8.3) exactly as any
+other loss. Splitting costs one extra notification at the moment a device is
+already in trouble, which is the cheapest possible price for not shipping a
+timeline that is quietly wrong from that point on.
 
 Samples are commonly drained from a sensor's FIFO in bursts, so the read
 happens well after the earliest sample in the burst was taken: at 833 Hz a
@@ -963,6 +1113,25 @@ Together the two fields separate the two ways data goes missing, and neither can
 mask the other: `seq` gaps are the transport losing what the device sent, and
 `dropped` is the device losing what the source produced.
 
+**`dropped` is a best-effort diagnostic.** It is there so a client can tell "my
+link is bad" from "the device is overrun", and to put a number on the second.
+It is not an audit trail, and a client MUST NOT use it to reconcile counts.
+
+That is a deliberate limit on how hard a device has to work. Attributing every
+lost item to exactly one notification means owning the counter transactionally
+across encoding, transmit-queue refusal and supersession — three places a
+firmware author would otherwise have to get right — and the failure mode when
+they do not is that a count lands one notification late. A count that arrives
+one notification late still says the device is losing data, at roughly the rate
+it is losing it, which is the entire question the field exists to answer.
+
+So: a device MUST count every accepted-then-discarded item, MUST saturate
+rather than wrap, and MUST NOT report loss it did not have. A device MAY report
+a discard in the next notification rather than the one it strictly belonged to.
+`seq` is the field with the exact guarantee, and it is exact precisely because
+it is cheap to be: it counts notifications actually sent, and is committed when
+the transport accepts one.
+
 ---
 
 ## 9. Control characteristic — WRITE, response by INDICATE
@@ -1015,9 +1184,9 @@ an opcode it does not implement as opaque rather than malformed.
 | `0x03` | `CAN_SUBSCRIBE_MASK` | `id:u32, mask:u32, mode:u8, arg:u16` | `handle:u16` | — |
 | `0x04` | `CAN_UNSUBSCRIBE` | `handle:u16` | — | Removes one subscription by the handle its install returned |
 | `0x05` | `CAN_LIST` | `start:u16` | `can_list_page record` | One page of the table, starting at index `start` |
-| `0x10` | `GPS_SET_RATE` | `hz:u16` | — | — |
-| `0x20` | `IMU_SET_RATE` | `hz:u16` | — | — |
-| `0x30` | `TIME_SYNC` | `—` | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
+| `0x10` | `GPS_SET_RATE` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
+| `0x20` | `IMU_SET_RATE` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
+| `0x30` | `TIME_SYNC` | — | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
 | `0x31` | `GET_LINK_PARAMS` | — | `link_params record` | — |
 | `0x40` | `MONITOR_LIST` | `start:u16` | `monitor_page record` | One page of the channels this device asks the client to supply |
 <!-- END GENERATED: control -->
@@ -1031,7 +1200,7 @@ an opcode it does not implement as opaque rather than malformed.
 | 1 | `unsupported_opcode` | Opcode not implemented |
 | 2 | `bad_params` | Parameters malformed or out of range, or the tag is already outstanding |
 | 3 | `table_full` | No free subscription slot |
-| 4 | `rate_exceeded` | Would exceed can_max_frames_per_s |
+| 4 | `rate_exceeded` | Requested rate is above gps_max_rate_hz or imu_max_rate_hz (SPEC.md 9.8). Never used for CAN |
 | 5 | `busy` | No room for another outstanding request; retry (SPEC.md 9) |
 | 6 | `needs_encryption` | Allocated, never sent: encryption is enforced by GATT permission (SPEC.md 10) |
 | 7 | `unknown_handle` | No subscription with that handle |
@@ -1401,6 +1570,49 @@ exchange exists to expose, and a device that reads its clock once and reports
 it as both has silently reported the single-timestamp form while appearing to
 implement this one.
 
+### 9.8 Setting a rate
+
+`GPS_SET_RATE` and `IMU_SET_RATE` each take one `hz:u16` and answer with no
+detail. Four things follow, and none of them was stated:
+
+**Zero stops the stream.** `hz` of 0 is a valid request meaning "send nothing".
+The device stops producing notifications on that characteristic, keeps the
+client's GATT subscription, and reports `gps_rate_hz` or `imu_rate_hz` as 0 in
+Info. It is not an error and it is not a shorthand for "restore the default" —
+there is no default to restore, because §4 says a client MUST NOT substitute
+one.
+
+**A rate the device does not support is `bad_params`.** A device MAY support
+only a discrete set of rates; most GNSS and IMU parts do. It MUST NOT silently
+apply the nearest one it can manage. Answering `ok` for a rate the device did
+not adopt is a plausible wrong value in the sense of §1.1: the client believes
+it is receiving 25 Hz, the timestamps say otherwise, and nothing connects the
+two. A rate above `gps_max_rate_hz` or `imu_max_rate_hz` is `rate_exceeded`
+instead, because that ceiling is a fact the client could have read in advance.
+
+There is no way to enumerate the supported rates, and deliberately so. A client
+that wants a rate asks for it and finds out; that is one round trip against a
+device it is already talking to, and a discovery mechanism for it would be a
+list format, a paging scheme and a second thing to keep in step with Info.
+
+**The applied rate is read back from Info.** The response carries no detail, so
+a client that needs to know what it got re-reads the Info characteristic, where
+`gps_rate_hz` and `imu_rate_hz` are the rate **currently in effect** (§4). This
+is why those fields exist alongside the `_max_` ones. Putting the applied rate
+in the response as well would create two statements of it that a device could
+let disagree.
+
+**The change takes effect within one notification.** After an `ok`, at most one
+further notification MAY be produced at the old rate — the one already batched
+when the request arrived. Everything after it is at the new rate. A device MUST
+NOT reuse a batch across the change: §7's `period` and §6.1's `t_base` describe
+the batch they are in, so a batch spanning a rate change describes itself
+wrongly. The reference device flushes the batch the change invalidates, which
+is why `VtpDevice.handle_control` produces notifications outside `poll()`.
+
+Both opcodes are idempotent: setting a rate to the value it already holds is
+`ok` and changes nothing (§9.6).
+
 ---
 
 ## 10. Security
@@ -1614,8 +1826,11 @@ Lap time is the example that justifies the role. A logger has no idea where the
 start and finish line is — that is drawn on a map in the client — so a device
 can only ever display a lap time that the client sends it.
 
-A device implementing this role MUST set `capabilities` bit 3 and MUST expose
-the `monitor_values` characteristic (§3.1).
+A device implementing this role MUST set `capabilities` bit 3, which §4.1
+requires it to set `control` alongside. The `monitor_values` characteristic is
+present on every VTP/1 device whether or not the role is implemented (§4.1):
+without the bit it is inert, and a write to it is answered with an ATT error
+rather than silently accepted.
 
 ### 13.1 The device asks; the client supplies
 
@@ -1690,7 +1905,7 @@ Total: **4 bytes**. All fields little-endian.
 | --- | --- | --- | --- | --- |
 | 0 | 1 | `u8` | `slot` | The device's own name for this value; used in monitor_value |
 | 1 | 2 | `u16` | `channel` | enum `channel` |
-| 3 | 1 | `u8` | `max_age` | `100ms`; Longest this value may be shown without a refresh; 0 never expires (SPEC.md 13.5) |
+| 3 | 1 | `u8` | `max_age` | `100ms`; Longest this value may be shown without a refresh; 0 means no deadline of its own, but the device's liveness bound still applies (SPEC.md 13.5) |
 <!-- END GENERATED: monitor_channel -->
 
 `slot` is the device's own name for the value; the client quotes it back in
@@ -1775,10 +1990,24 @@ write that last carried it**, exactly as it renders one whose `present` bit is
 clear.
 
 `max_age` of zero means the value has **no deadline of its own** — not that it
-is immortal. A device MUST declare a non-zero `max_age` on at least one
-channel, and the largest `max_age` it declares is its **liveness bound**: when
-no write at all has arrived within that, **every** value becomes unavailable,
-including those whose own `max_age` is zero.
+is immortal. A device that declares any channel MUST declare a non-zero
+`max_age` on at least one of them, and the largest `max_age` it declares is its
+**liveness bound**: when no write at all has arrived within that, **every**
+value becomes unavailable, including those whose own `max_age` is zero.
+
+**A device MAY declare no channels at all.** `total` and `count` of zero is a
+legal declaration and is the state of a device that has not yet configured
+itself, or one whose display currently needs nothing from the client. It has no
+liveness bound, because it has nothing to keep alive and nothing to expire, and
+the paragraph above is vacuous rather than violated. A client MUST accept the
+empty declaration and MUST NOT write values to a device that asked for none —
+every slot it could name is a slot the device did not ask for, and §13.1
+already says those are ignored.
+
+That reading was previously left to the reader. The corpus carried a legal
+zero-channel declaration while this section said a device MUST declare a
+non-zero `max_age` on at least one channel, which a device with no channels
+cannot do, so the two documents disagreed about whether such a device conformed.
 
 Without that, "never expires" defeats the rule it sits beside. If the client is
 gone, a best lap time is as wrong as a lap timer — the session it belonged to

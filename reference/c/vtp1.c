@@ -204,6 +204,12 @@ int vtp_decode_imu_batch(const uint8_t *b, size_t len,
      * instant, which describes no measurement, and a client recovering a rate
      * from it divides by zero. */
     if (h->period == 0) { *err = "period-zero"; return -1; }
+    /* SPEC.md §7 -- t_base IS the acquisition time of sample 0, so a batch
+     * with no sample 0 carries a timestamp naming a sample that does not
+     * exist. A device with nothing to report sends nothing. §6's CAN batch
+     * differs deliberately: a CAN t_base describes a bus that was observed
+     * and found quiet, not a sample. */
+    if (h->count == 0) { *err = "empty-batch"; return -1; }
     return 0;
 }
 
@@ -220,9 +226,59 @@ void vtp_imu_sample_at(const uint8_t *b, const vtp_imu_header_t *h,
     o->t_device = h->t_base + (uint64_t)i * h->period;
 }
 
+/* SPEC.md §4.1 -- the capability matrix, checked against the bytes rather than
+ * against the decoded struct so a caller cannot skip it. Both tables are
+ * generated from schema/vtp1.yaml, so this and the specification cannot
+ * disagree about what a bit requires.
+ *
+ * Reserved bits take no part: §2 says to ignore them on receive, and a minor
+ * version this build has never heard of is exactly what they are for. Only the
+ * implications of bits this build knows are enforced. */
+int vtp_capabilities_coherent(uint32_t capabilities,
+                              const uint8_t *info, size_t len,
+                              const char **why) {
+    static const vtp_capability_rule_t rules[] = VTP_CAPABILITY_RULES;
+    static const vtp_capacity_rule_t capacities[] = VTP_CAPACITY_RULES;
+
+    for (size_t i = 0; i < VTP_CAPABILITY_RULE_COUNT; i++) {
+        if (!(capabilities & rules[i].bit)) continue;
+        if ((capabilities & rules[i].requires_) != rules[i].requires_) {
+            if (why) *why = rules[i].name;
+            return 0;
+        }
+    }
+    if (!info) return 1;
+    for (size_t i = 0; i < VTP_CAPACITY_RULE_COUNT; i++) {
+        if (capabilities & capacities[i].bit) continue;
+        if (len < (size_t)capacities[i].offset + capacities[i].size) continue;
+        uint32_t v = 0;
+        for (uint8_t k = 0; k < capacities[i].size; k++)
+            v |= (uint32_t)info[capacities[i].offset + k] << (8 * k);
+        /* A capacity of zero means "none" (§4). A non-zero one behind a
+         * cleared capability bit is a device publishing a role it does not
+         * have, and a client that sizes a buffer from it has been told
+         * something false. */
+        if (v) {
+            if (why) *why = capacities[i].field;
+            return 0;
+        }
+    }
+    return 1;
+}
+
 int vtp_decode_info(const uint8_t *b, size_t len,
                     vtp_info_t *o, const char **err) {
     if (len != VTP_INFO_SIZE) { *err = "length"; return -1; }
+
+    /* SPEC.md §4.1 -- an Info whose capabilities break the matrix is treated
+     * as non-conforming, exactly as a protocol_major mismatch is. Decoding it
+     * and leaving the contradiction to the caller is how a client ends up
+     * subscribing to a CAN stream on a device with no way to install a
+     * subscription. */
+    if (!vtp_capabilities_coherent(rd32(b + VTP_INFO_OFF_CAPABILITIES),
+                                   b, len, err)) {
+        return -1;
+    }
 
     o->protocol_major         = b[VTP_INFO_OFF_PROTOCOL_MAJOR];
     o->protocol_minor         = b[VTP_INFO_OFF_PROTOCOL_MINOR];

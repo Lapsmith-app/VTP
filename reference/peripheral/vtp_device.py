@@ -199,6 +199,11 @@ class VtpDevice:
         self._wall_origin_ms = int(time.time() * 1000)
 
         self.mtu = mtu
+        # SPEC.md 4 -- the ceiling Info publishes. Fixed for the life of the
+        # device: the ATT payload at the largest MTU this build will ever
+        # accept. `self.mtu` moves with the link; this does not.
+        self._device_mtu_ceiling = mtu
+        self._max_notify_bytes = mtu - 3
         self.gps_hz = gps_hz
         self.imu_hz = imu_hz
         self.circuit = circuit or Circuit()
@@ -313,6 +318,13 @@ class VtpDevice:
         self._can_pending, self._can_batch_t0 = [], None
         self._monitor_values.clear()
         self._monitor_seq = None
+        # Everything below was NEGOTIATED, so it describes a link that has
+        # gone. It used to persist until a new central happened to replace it,
+        # so the next connection read this one's MTU and PHY out of Info and
+        # GET_LINK_PARAMS -- reported with the validity bits set, which assert
+        # they are measurements of the link being asked about.
+        self._link = None
+        self.mtu = self._device_mtu_ceiling
 
     def simulate_loss(self, stream, count):
         """Pretend the device accepted `count` items and had to discard them.
@@ -392,9 +404,33 @@ class VtpDevice:
 
     @property
     def notify_bytes(self):
-        """ATT payload available for one notification: MTU minus the 3-byte
-        ATT notification header."""
+        """ATT payload available for one notification on the CURRENT link:
+        the negotiated MTU minus the 3-byte ATT notification header.
+
+        This is what batching is sized against, and it is NOT what Info
+        publishes -- see `max_notify_bytes`.
+        """
         return self.mtu - 3
+
+    @property
+    def max_notify_bytes(self):
+        """SPEC.md 4 -- the largest notification this DEVICE will ever send.
+
+        A ceiling the device chose, not the current link's negotiated value.
+        The two were the same field, and that could not work: a client reads
+        Info immediately after connecting, while this reference only learns the
+        negotiated maximum when a central subscribes, which is later. So the
+        number a client read described the previous link, or the --mtu default,
+        and by the time it was right nobody was going to read it again.
+
+        Making it a fixed ceiling removes the ordering problem rather than
+        solving it. A client sizes its receive buffer from a number that cannot
+        change under it, the device sizes each batch from the negotiated MTU as
+        it always did, and the negotiated value remains available -- properly
+        this time -- from GET_LINK_PARAMS (SPEC.md 9.1), which is a request
+        made after subscription rather than a value read before it.
+        """
+        return self._max_notify_bytes
 
     # -- Info -------------------------------------------------------------
 
@@ -413,7 +449,7 @@ class VtpDevice:
             "imu_max_rate_hz": 833,
             "can_max_payload": 8,
             "clock_flags": 0b10,      # survives reconnect; not GNSS-disciplined
-            "max_notify_bytes": self.notify_bytes,
+            "max_notify_bytes": self.max_notify_bytes,
         })
 
     # -- GPS --------------------------------------------------------------
@@ -665,11 +701,17 @@ class VtpDevice:
         Batch sizing had been driven entirely by the --mtu argument, so a
         device told 247 while the link negotiated 185 built notifications the
         link could not carry -- refused by the stack, or truncated, depending
-        on how forgiving it is. SPEC.md §9.1 also requires GET_LINK_PARAMS to
+        on how forgiving it is. SPEC.md 9.1 also requires GET_LINK_PARAMS to
         report the negotiated value or none at all, and a value taken from a
         command-line flag is neither.
+
+        This moves `self.mtu`, which sizes batches, and NOT the ceiling Info
+        publishes: SPEC.md 4 makes `max_notify_bytes` a property of the device
+        rather than of the link. Batches are also never sized above the
+        ceiling, so a central that negotiates a larger MTU than this build was
+        configured for does not silently get batches bigger than Info promised.
         """
-        self.mtu = att_mtu
+        self.mtu = min(att_mtu, self._device_mtu_ceiling)
         self.set_link_params(att_mtu=att_mtu)
 
     def handle_control(self, request, t_rx=None):
@@ -972,7 +1014,12 @@ class VtpDevice:
         )
         validity = 0
         for bit, names in GROUPS:
-            if all(link.get(n) for n in names):
+            # PRESENCE, not truthiness. `all(link.get(n) ...)` read a
+            # peripheral_latency of 0 as unknown, and 0 is not only valid but
+            # the value SPEC.md 2 says a device SHOULD request while streaming
+            # -- so the one connection-parameter group a conforming device is
+            # most likely to have reported the whole of every field as absent.
+            if all(link.get(n) is not None for n in names):
                 validity |= 1 << bit
                 for n in names:
                     fields[n] = link[n]

@@ -162,6 +162,23 @@
       }
     },
     {
+      "name": "imu-empty-batch",
+      "record": "imu_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 7 -- t_base names sample 0, so a batch with no samples timestamps one that does not exist.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "period": 1000,
+          "count": 0,
+          "flags": 3
+        },
+        "samples": []
+      }
+    },
+    {
       "name": "monitor-declaration-repeats-a-slot",
       "record": "monitor_list",
       "must_refuse": true,
@@ -277,7 +294,8 @@
             "payload": "00"
           }
         ]
-      }
+      },
+      "expect_hex": "000000000000000000000000010000000000ffffff3f0100"
     },
     {
       "name": "monitor-well-formed-declaration",
@@ -302,7 +320,170 @@
             "max_age": 0
           }
         ]
+      },
+      "expect_hex": "0200000002000001000a01030000"
+    },
+    {
+      "name": "imu-ordinary-batch",
+      "record": "imu_batch",
+      "must_refuse": false,
+      "desc": "Accel and gyro both present, a non-zero period, two samples.",
+      "input": {
+        "header": {
+          "seq": 7,
+          "dropped": 0,
+          "t_base": 1000000,
+          "period": 10000,
+          "count": 2,
+          "flags": 3
+        },
+        "samples": [
+          {
+            "ax": 1,
+            "ay": -2,
+            "az": 1000,
+            "gx": 4,
+            "gy": -5,
+            "gz": 6
+          },
+          {
+            "ax": 2,
+            "ay": -3,
+            "az": 1001,
+            "gx": 5,
+            "gy": -6,
+            "gz": 7
+          }
+        ]
+      },
+      "expect_hex": "0700000040420f000000000010270000020300000100feffe8030400fbff06000200fdffe9030500faff0700"
+    },
+    {
+      "name": "time-sync-simultaneous",
+      "record": "time_sync",
+      "must_refuse": false,
+      "desc": "SPEC.md 9.7 -- t_device_tx MUST NOT be EARLIER than t_device_rx, so equal readings are legal. A device whose clock cannot resolve the two instants apart reports them equal rather than inventing a gap.",
+      "input": {
+        "t_device_rx": 9000000,
+        "t_device_tx": 9000000
+      },
+      "expect_hex": "40548900000000004054890000000000"
+    },
+    {
+      "name": "info-can-without-control",
+      "record": "info",
+      "must_refuse": true,
+      "desc": "SPEC.md 4.1 -- `can` requires `control`. A device that publishes this has advertised a role no client can use, because CAN_SUBSCRIBE is the only way to install one.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 3,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_subscription_slots": 32,
+        "can_max_frames_per_s": 2000,
+        "can_max_payload": 8,
+        "max_notify_bytes": 244
       }
+    },
+    {
+      "name": "info-capacity-without-capability",
+      "record": "info",
+      "must_refuse": true,
+      "desc": "SPEC.md 4.1 -- every CAN capacity is zero while the `can` bit is clear. Masking the capacity instead would publish a different device from the one the caller described.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 1,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_max_frames_per_s": 4000,
+        "max_notify_bytes": 185
+      }
+    },
+    {
+      "name": "info-reserved-capability-bit",
+      "record": "info",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- capabilities bit 19 is reserved in VTP/1.0, so an encoder MUST normalise it away rather than publish a capability this version has not assigned.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 524289,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "max_notify_bytes": 244
+      },
+      "expect_hex": "0100010000000a000a00000000000000000000000000f400"
+    },
+    {
+      "name": "gps-reserved-validity-and-flag-bits",
+      "record": "gps_fix",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- gps_validity bit 20 and fix_flags bit 7 are both reserved. An encoder MUST zero both, and MUST still gate the fields behind the KNOWN validity bits.",
+      "input": {
+        "fix": {
+          "seq": 4,
+          "validity": 1048580,
+          "lat": 515074000,
+          "lon": -1397000,
+          "alt_msl": 35000,
+          "fix_type": 3,
+          "fix_flags": 129,
+          "ext_count": 0
+        }
+      },
+      "expect_hex": "040000000400000000000000000000000000000000000000d067b31ef8aeeaff000000000000000000000000000000000000000000000000000000000000000000000000000003000100"
+    },
+    {
+      "name": "monitor-update-reserved-validity-bits",
+      "record": "monitor_update",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- monitor_validity bits 1-7 are reserved. The one place the protocol runs client-to-device is not an exception to the transmit rule.",
+      "input": {
+        "header": {
+          "seq": 1,
+          "count": 1,
+          "reserved": 0
+        },
+        "values": [
+          {
+            "slot": 2,
+            "validity": 129,
+            "value": 42
+          }
+        ]
+      },
+      "expect_hex": "0100010002012a000000"
+    },
+    {
+      "name": "link-params-reserved-validity-bit",
+      "record": "link_params",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- link_validity bits 4-15 are reserved, and the fields behind the known bits are still gated.",
+      "input": {
+        "validity": 513,
+        "att_mtu": 247,
+        "conn_interval": 12,
+        "peripheral_latency": 0,
+        "supervision_timeout": 500,
+        "phy_tx": 2,
+        "phy_rx": 2
+      },
+      "expect_hex": "0100f700000000000000000000000000"
+    },
+    {
+      "name": "control-detail-on-ok",
+      "record": "control_response",
+      "must_refuse": false,
+      "desc": "SPEC.md 9 -- detail accompanies `ok`, and only `ok`. The refusal case above is only half the rule.",
+      "input": {
+        "opcode": 2,
+        "tag": 1,
+        "status": 0,
+        "detail_hex": "0700"
+      },
+      "expect_hex": "0201000700"
     }
   ]
 }

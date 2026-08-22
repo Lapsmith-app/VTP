@@ -1,0 +1,8 @@
+# The CLIENT half, for reference/peripheral/smoketest.py only.
+#
+# bless presents a peripheral; bleak is a central. They are different roles and
+# different libraries, and a smoke test of the radio needs the other end of the
+# link from everything else in this directory.
+#
+# Needs a real Bluetooth adapter. Nothing in CI installs this.
+bleak==0.22.3

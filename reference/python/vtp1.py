@@ -180,6 +180,11 @@ def decode_imu_batch(buf):
     # describes no measurement, and a client recovering a rate divides by it.
     if hdr["period"] == 0:
         raise Reject("period-zero")
+    # SPEC.md §7 — t_base is the acquisition time of sample 0, so a batch with
+    # no sample 0 timestamps one that does not exist. Unlike §6's CAN batch,
+    # whose count MAY be zero because its t_base describes an observed bus.
+    if hdr["count"] == 0:
+        raise Reject("empty-batch")
     # SPEC.md §7.2 — "at least this much" is not "this much".
     hdr["saturated"] = bool(hdr["flags"] & IMU_SATURATED)
 
@@ -201,10 +206,55 @@ def decode_imu_batch(buf):
     return {"header": hdr, "samples": samples}
 
 
+# SPEC.md §4.1 — the profile matrix, read from the schema rather than restated.
+CAP_BIT = {b["name"]: b["bit"]
+           for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
+CAP_IMPLIES = {b["name"]: b.get("implies") or []
+               for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
+CAP_CAPACITY = SCHEMA["profile"]["capacity"]
+
+
+def capability_problem(info):
+    """The first way `info` breaks SPEC.md §4.1, or None.
+
+    Reserved bits take no part: §2 says to ignore them on receive, and a bit
+    from a minor version this build has never heard of is exactly what they are
+    for. Only the implications of bits this build knows are enforced.
+    """
+    caps = info["capabilities"]
+    for name, implies in CAP_IMPLIES.items():
+        if not caps & (1 << CAP_BIT[name]):
+            continue
+        for req in implies:
+            if not caps & (1 << CAP_BIT[req]):
+                return (f"capabilities: `{name}` requires `{req}`, which is "
+                        f"clear; SPEC.md §4.1")
+    for cap, fields in CAP_CAPACITY.items():
+        if caps & (1 << CAP_BIT[cap]):
+            continue
+        for field in fields:
+            # A capacity of zero means "none" (§4). A non-zero one behind a
+            # cleared capability bit is a device publishing a role it does not
+            # have, and a client sizing a buffer from it has been told
+            # something false.
+            if info.get(field):
+                return (f"capabilities: {field} is {info[field]} while `{cap}` "
+                        f"is clear; SPEC.md §4.1")
+    return None
+
+
 def decode_info(buf):
     if len(buf) != _size("info"):
         raise Reject("length")
-    return _unpack("info", buf)
+    info = _unpack("info", buf)
+    # SPEC.md §4.1 — an Info that breaks the matrix is non-conforming, exactly
+    # as a protocol_major mismatch is. Decoding it and leaving the
+    # contradiction to the caller is how a client ends up subscribing to a CAN
+    # stream on a device with no way to install a subscription.
+    problem = capability_problem(info)
+    if problem:
+        raise Reject(problem)
+    return info
 
 
 def decode_can_list(buf):

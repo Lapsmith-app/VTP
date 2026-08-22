@@ -43,7 +43,7 @@ permission has to be granted again.
 ### Linux
 
 ```sh
-pip install bless
+pip install -r requirements.txt   # pinned; see the note in that file
 python3 serve.py                  # add --no-display for headless
 ```
 
@@ -51,8 +51,59 @@ python3 serve.py                  # add --no-display for headless
 
 ```sh
 python3 selftest.py               # verifies the device against the reference decoder
+python3 transport_selftest.py     # verifies the pump against a fake GATT link
 python3 display.py                # the panel alone, with fake data
 ```
+
+---
+
+## The real-radio smoke test
+
+Everything else in this repository — the conformance corpus, `selftest.py`,
+`transport_selftest.py` — runs with no Bluetooth adapter. That covers the
+protocol thoroughly and covers **the radio not at all**. `smoketest.py` is the
+missing half: a real client, over a real link, checking the things a fake link
+cannot reach.
+
+It needs **two machines**, because a host adapter cannot usefully scan for a
+peripheral it is itself presenting.
+
+```sh
+# machine A — the device
+python3 serve.py --no-display
+
+# machine B — the client
+pip install -r requirements-client.txt      # bleak, the central-role library
+python3 reference/peripheral/smoketest.py
+```
+
+What it checks, and why each one needs hardware:
+
+| Check | Why a fake link cannot reach it |
+| --- | --- |
+| Discovery by service UUID | The advertisement has to fit in 31 bytes and actually be broadcast (§3.3) |
+| Info decodes and satisfies §4.1 | Nothing else reads Info off a real characteristic |
+| Negotiated ATT MTU ≥ 100 | §2's floor is a property of the two stacks, not of this code |
+| No notification exceeds `max_notify_bytes` | §4.2 — the ceiling bounds the device on a link it did not choose |
+| An indication arrives on Control | §9's response path is a CCCD write and an ATT indication |
+| `TIME_SYNC` returns `t_device_tx ≥ t_device_rx` | §9.7, measured across a real round trip |
+| Every stream decodes with the reference decoder | The bytes have crossed a radio |
+| Device timestamps advance, and the streams overlap | §8.1's one clock, observed in real time |
+| `seq` restarts at 0 on the second connection | §8.2 — needs a link that genuinely dropped |
+
+A sequence *gap* is reported but is not a failure: §8.2 makes a gap the
+transport losing what the device sent, which is a fact about the link and the
+distance between the two machines rather than a device fault. A *repeat* is a
+failure.
+
+`--no-reconnect` skips the second connection, and says so — §8.2's
+per-connection restart then goes unchecked.
+
+**This has not been run yet.** The script's decode and inspection half is
+exercised by `selftest.py` against the software device's own output, including
+a deliberately failing case, so it is known to work on known-good input. Its
+BLE half has never met an adapter. That is the single largest gap in this
+repository and the README says so on purpose.
 
 ---
 

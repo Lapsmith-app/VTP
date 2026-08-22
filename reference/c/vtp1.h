@@ -122,6 +122,15 @@ typedef struct {
 int vtp_decode_info(const uint8_t *buf, size_t len,
                     vtp_info_t *out, const char **err);
 
+/* SPEC.md §4.1 -- non-zero when this capability word satisfies the profile
+ * matrix: every implication met, and every capacity field zero behind a
+ * cleared bit. `info` may be NULL to check only the implications, which is
+ * what an ENCODER has before it has written anything. On a false result `why`
+ * (when not NULL) names the bit or field that failed. */
+int vtp_capabilities_coherent(uint32_t capabilities,
+                              const uint8_t *info, size_t len,
+                              const char **why);
+
 /* ---- CAN subscription table ------------------------------------------ */
 
 /* SPEC.md §9.5 — one page of the installed table, as CAN_LIST returns it. */

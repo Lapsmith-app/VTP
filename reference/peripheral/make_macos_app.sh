@@ -98,8 +98,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-echo "==> installing dependencies into the bundle"
-"$APP/Contents/MacOS/VTPPeripheral" -m pip install -q --break-system-packages bless pyyaml
+# From the pinned files, not from floating names. `pip install bless pyyaml`
+# resolved whatever was newest on the day the bundle happened to be built, so
+# two people following these instructions a month apart ran different bless
+# versions against the same peripheral -- and the bundle is exactly the thing
+# nobody rebuilds, so the drift is invisible until the radio misbehaves.
+echo "==> installing pinned dependencies into the bundle"
+"$APP/Contents/MacOS/VTPPeripheral" -m pip install -q --break-system-packages \
+    -r "$HERE/requirements.txt" -r "$HERE/../../requirements.txt"
 
 echo "==> signing"
 codesign --force --deep --sign - "$APP"

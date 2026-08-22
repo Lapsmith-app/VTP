@@ -47,6 +47,9 @@ HEADING = re.compile(r"^#{2,4}\s+(?:Appendix\s+)?(\d+(?:\.\d+)*)\.?\s")
 REFERENCE = re.compile(
     r"(SPEC|RATIONALE)?(?:\.md)?\s*§\s?(\d+(?:\.\d+)*)")
 COUNT = re.compile(r"(\d+)\s+vectors\s+across\s+(\d+)\s+record\s+types")
+# The producer corpus is a second corpus with a second count, and it was
+# stated in prose and checked by nobody.
+PRODUCERS = re.compile(r"(\d+)\s+producer\s+cases")
 # Everything from the first released heading onward is history.
 RELEASED = re.compile(r"^##\s+\[(?!Unreleased\])")
 
@@ -87,6 +90,8 @@ def check_counts(problems):
     files = sorted(VECTORS.glob("*.json"))
     actual_cases = sum(len(json.loads(p.read_text())["cases"]) for p in files)
     actual_files = len(files)
+    actual_producers = len(json.loads(
+        (ROOT / "conformance" / "encoders.json").read_text())["cases"])
 
     seen = False
     for name in ("README.md", "CHANGELOG.md"):
@@ -108,6 +113,11 @@ def check_counts(problems):
                         f"{name}:{n}: claims {cases} vectors across {records} "
                         f"record types; the corpus holds {actual_cases} across "
                         f"{actual_files}")
+            for stated in PRODUCERS.findall(line):
+                if int(stated) != actual_producers:
+                    problems.append(
+                        f"{name}:{n}: claims {stated} producer cases; "
+                        f"conformance/encoders.json holds {actual_producers}")
     if not seen:
         problems.append(
             "no document states the corpus size; README.md's status table "

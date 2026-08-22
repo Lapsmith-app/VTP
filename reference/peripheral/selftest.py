@@ -537,6 +537,47 @@ def main():
     check(dev.MIN_ATT_MTU == 100,
           "SPEC.md §2's minimum ATT MTU should come from the schema")
 
+    # SPEC.md §4.2 — max_notify_bytes is a DEVICE ceiling, so it does not move
+    # when the link does. It used to be the negotiated payload, which a client
+    # cannot ever read at the right moment: Info is read on connect, and this
+    # peripheral does not learn the negotiated maximum until a central
+    # subscribes, which is later.
+    ceiling = vtp1.decode_info(sized.info())["max_notify_bytes"]
+    check(ceiling == 247 - 3,
+          f"max_notify_bytes must be the device ceiling (244), not the "
+          f"negotiated {sized.notify_bytes}; got {ceiling}")
+    sized.set_negotiated_mtu(517)
+    check(vtp1.decode_info(sized.info())["max_notify_bytes"] == ceiling,
+          "a larger negotiated MTU must NOT raise the ceiling Info published; "
+          "a client sized its buffer from that number")
+    check(sized.notify_bytes <= ceiling,
+          f"batches must never exceed the published ceiling: sizing for "
+          f"{sized.notify_bytes} against a ceiling of {ceiling}")
+
+    # ...and nothing negotiated may outlive the link that negotiated it.
+    sized.on_disconnect()
+    after = vtp1.decode_link_params(
+        sized.handle_control(bytes([dev.GET_LINK_PARAMS, 2]))[3:])
+    check("att_mtu" in after["absent"],
+          "after the link dropped, GET_LINK_PARAMS still reported the ATT MTU "
+          "that link negotiated — with the validity bit set, which asserts it "
+          "is a measurement of the link being asked about")
+
+    # SPEC.md §9.1 — a grouped validity bit is set when every field of the
+    # group is KNOWN. `peripheral_latency` of 0 is known, and is the value §2
+    # says a device SHOULD request while streaming; a truthiness test read it
+    # as missing and reported the whole group absent.
+    latent = dev.VtpDevice(now_us=lambda: 0, mtu=247)
+    latent.set_link_params(conn_interval=12, peripheral_latency=0,
+                           supervision_timeout=500)
+    group = vtp1.decode_link_params(
+        latent.handle_control(bytes([dev.GET_LINK_PARAMS, 3]))[3:])
+    check("peripheral_latency" not in group["absent"],
+          "a peripheral_latency of 0 is a value, not an absence")
+    check(group["peripheral_latency"] == 0 and group["conn_interval"] == 12,
+          f"the connection-parameter group must report what it was told: "
+          f"{group}")
+
     try:
         serve.encrypted_characteristics("sometimes")
         check(False, "an unknown posture MUST be rejected, not silently "
@@ -804,6 +845,15 @@ def main():
           "a positive delta MUST show its sign, or it reads as a fast lap")
     check(disp.format_value(disp.DELTA_BEST, -1_250, True) == "-1.250",
           "a negative delta should render negative")
+    # The unit is part of the static cell label, so the formatter must never
+    # change units under it. It used to: below 1 km it rendered bare metres
+    # beneath a heading that said "km".
+    check(disp.format_value(disp.SESSION_DISTANCE, 999, True) == "0.999",
+          f"999 m must render as 0.999 km, not as 999 under a km heading; "
+          f"got {disp.format_value(disp.SESSION_DISTANCE, 999, True)!r}")
+    check(disp.format_value(disp.SESSION_DISTANCE, 12_345, True) == "12.345",
+          f"12345 m must render as 12.345 km; got "
+          f"{disp.format_value(disp.SESSION_DISTANCE, 12_345, True)!r}")
     check(disp.format_value(disp.SPEED, 38_000, True) == "136.8",
           "speed is mm/s on the wire and km/h on a dash")
     for channel in (disp.LAP_TIME, disp.DELTA_BEST, disp.SPEED,
@@ -893,6 +943,59 @@ def main():
     check(serve.MAX_NAME_CHARS == 8,
           f"31 - 3 flags - 18 UUID - 2 header leaves 8 characters, not "
           f"{serve.MAX_NAME_CHARS}")
+
+    # ---- The smoke test's own checks, without a radio -------------------
+    # smoketest.py is the only thing here that needs an adapter, which makes it
+    # the only thing here nobody runs before pushing. Its BLE half genuinely
+    # cannot be tested without hardware; its DECODE and INSPECT half can, and
+    # that is where a client author's bugs live. Run it over the software
+    # device's own output, so the script that gets pointed at unfamiliar
+    # hardware is at least known to work against known-good input.
+    import argparse
+    import contextlib
+    import io
+    import smoketest
+
+    def run_smoke(result):
+        """Run smoketest.inspect quietly and return the problems it found.
+
+        Quietly because one of the two runs below is a deliberate failure, and
+        a passing suite that prints FAIL lines is a suite nobody reads."""
+        smoketest.problems.clear()
+        smoketest.notes.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            smoketest.inspect(result, argparse.Namespace(seconds=4))
+        return list(smoketest.problems)
+
+    smoke_clock = [0]
+    smoke_dev = dev.VtpDevice(now_us=lambda: smoke_clock[0], gps_hz=10,
+                              imu_hz=100)
+    smoke_dev.on_connect()
+    smoke_dev.handle_control(
+        bytes([dev.CAN_SUBSCRIBE, 1]) + (0x1A0).to_bytes(4, "little")
+        + bytes([0]) + (0).to_bytes(2, "little"))
+    captured = {"gps": [], "can": [], "imu": []}
+    for _ in range(4000):
+        smoke_clock[0] += 1000
+        for name, payload in smoke_dev.poll():
+            captured[name].append(smoke_dev.stamp_seq(name, payload))
+            smoke_dev.commit_seq(name)
+    found = run_smoke(dict(captured, mtu=247,
+                           info=vtp1.decode_info(smoke_dev.info())))
+    check(not found,
+          f"smoketest.py rejects this repository's own device: {found}")
+    check(all(captured[n] for n in ("gps", "can", "imu")),
+          "the smoke-test fixture produced no notifications, so its checks "
+          "passed by having nothing to look at")
+
+    # ...and it must be able to fail. A notification larger than the ceiling
+    # Info published is exactly what SPEC.md 4.2 forbids, and is the check most
+    # likely to matter on real hardware with an unexpected MTU.
+    overrun = vtp1.decode_info(smoke_dev.info())
+    overrun["max_notify_bytes"] = 8
+    check(run_smoke(dict(captured, mtu=247, info=overrun)),
+          "smoketest.py passed a device whose notifications exceed the "
+          "max_notify_bytes it published (SPEC.md 4.2)")
 
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)
