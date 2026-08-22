@@ -56,6 +56,9 @@ CH_SPEED, CH_SESSION_DISTANCE, CH_SESSION_TIME = 7, 8, 9
 MONITOR_PRESENT = 0x01
 
 PROTOCOL_MAJOR, PROTOCOL_MINOR = 1, 0
+# SPEC.md §2 — read from the schema rather than restated, so the one place it
+# is defined stays the only place it is defined.
+MIN_ATT_MTU = enc.SCHEMA["protocol"]["min_att_mtu"]
 
 ST_OK, ST_UNSUPPORTED, ST_BAD_PARAMS = 0, 1, 2
 ST_TABLE_FULL, ST_RATE_EXCEEDED = 3, 4
@@ -254,14 +257,26 @@ class VtpDevice:
         counted honestly — every record carries the time it was taken, so a
         late batch misrepresents nothing except by being late.
         """
-        if stream == "gps":
-            items = 1
-        else:
-            record = {"can": "can_header", "imu": "imu_header"}[stream]
-            fields = enc.SCHEMA["records"][record]["fields"]
-            offset = next(f["offset"] for f in fields if f["name"] == "count")
-            items = payload[offset] if len(payload) > offset else 0
-        self._dropped[stream] += items
+        record = {"gps": "gps_fix", "can": "can_header",
+                  "imu": "imu_header"}[stream]
+        fields = enc.SCHEMA["records"][record]["fields"]
+
+        def field(name):
+            f = next(g for g in fields if g["name"] == name)
+            if len(payload) < f["offset"] + f["size"]:
+                return 0
+            return int.from_bytes(
+                payload[f["offset"]:f["offset"] + f["size"]], "little")
+
+        # One GPS notification is one fix; CAN and IMU say how many they hold.
+        items = 1 if stream == "gps" else field("count")
+        # The header also *reported* a backlog, and building it zeroed the
+        # counter. Refusing the notification threw that report away with it,
+        # so a device that had already lost 500 frames went on to report the
+        # one it lost next. Credit both back: the items this payload was
+        # carrying, and the count it was carrying the news of.
+        self._dropped[stream] += items + field("dropped")
+        self._return_seq(stream)
         return items
 
     def on_disconnect(self):
@@ -287,9 +302,51 @@ class VtpDevice:
             raise ValueError(f"unknown stream {stream!r}")
         self._dropped[stream] += count
 
+    def _allocate_handle(self):
+        """SPEC.md §9.2 — a handle MUST NOT be reused while the subscription
+        it names still exists.
+
+        The counter wraps at 65535, and wrapping onto a live handle used to
+        overwrite it: the entry the client knew as handle 1 silently became a
+        different subscription, so CAN_UNSUBSCRIBE(1) removed something the
+        client had never installed. Reaching the wrap takes 65534 installs,
+        which a long session can do and a short test never will.
+
+        Skipping occupied handles terminates because the table holds at most
+        CAN_SUBSCRIPTION_SLOTS entries out of 65535 numbers, so a free one
+        always exists when a free slot does. The bound is belt and braces.
+        """
+        for _ in range(0xFFFF):
+            handle = self._next_handle
+            self._next_handle = (self._next_handle % 0xFFFF) + 1
+            if handle not in self._subscriptions:
+                return handle
+        return None
+
     def _next_seq(self, stream):
-        self._seq[stream] = (self._seq[stream] + 1) & 0xFFFF
-        return self._seq[stream]
+        """SPEC.md §8.2 — the FIRST notification after a connection carries 0.
+
+        Post-increment, not pre-increment. Returning the incremented value
+        made the first notification of every connection seq 1, so a client
+        counting from 0 saw a one-notification gap before anything had been
+        lost -- on every stream, on every connection.
+        """
+        n = self._seq[stream]
+        self._seq[stream] = (n + 1) & 0xFFFF
+        return n
+
+    def _return_seq(self, stream):
+        """Give back a sequence number whose notification was never sent.
+
+        SPEC.md §8.2 -- seq counts notifications *sent*. A notification the
+        transport refused was not sent, so consuming its number would leave a
+        gap, and §8.2 defines a gap as notifications the client did not
+        receive in transit. The loss is real but it happened inside the
+        device, which is what `dropped` is for; reporting it twice, in two
+        fields that mean different things, tells a client less than reporting
+        it once in the right one.
+        """
+        self._seq[stream] = (self._seq[stream] - 1) & 0xFFFF
 
     def _take_dropped(self, stream):
         """SPEC.md §8.3 — saturates at 65535 and MUST NOT wrap."""
@@ -536,8 +593,26 @@ class VtpDevice:
     # -- Control ----------------------------------------------------------
 
     def set_link_params(self, **kwargs):
-        """Called by the transport once it knows the negotiated link."""
-        self._link = kwargs
+        """Called by the transport as it learns each part of the link.
+
+        Merged rather than replaced: a host stack exposes these one at a time
+        and from different callbacks, and a later report of the PHY must not
+        erase an earlier report of the MTU.
+        """
+        self._link = dict(self._link or {}, **kwargs)
+
+    def set_negotiated_mtu(self, att_mtu):
+        """The real ATT MTU, as opposed to the one this device assumed.
+
+        Batch sizing had been driven entirely by the --mtu argument, so a
+        device told 247 while the link negotiated 185 built notifications the
+        link could not carry -- refused by the stack, or truncated, depending
+        on how forgiving it is. SPEC.md §9.1 also requires GET_LINK_PARAMS to
+        report the negotiated value or none at all, and a value taken from a
+        command-line flag is neither.
+        """
+        self.mtu = att_mtu
+        self.set_link_params(att_mtu=att_mtu)
 
     def handle_control(self, request):
         """SPEC.md §9. `[opcode][tag][params]` in, `[opcode][tag][status]
@@ -589,8 +664,9 @@ class VtpDevice:
                 if self._predicted_rate(mode, arg) > CAN_MAX_FRAMES_PER_S:
                     return reply(ST_RATE_EXCEEDED)
 
-            handle = self._next_handle
-            self._next_handle = (self._next_handle % 0xFFFF) + 1
+            handle = self._allocate_handle()
+            if handle is None:
+                return reply(ST_TABLE_FULL)
             self._subscriptions[handle] = {
                 "id": cid, "mask": mask, "mode": mode, "arg": arg,
                 # SPEC.md §6.8 — mode state is per matching identifier, not per

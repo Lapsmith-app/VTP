@@ -295,6 +295,85 @@ def main():
         check("info" not in protected,
               f"the {name} posture encrypts Info; §10.2 says to leave it "
               f"readable so an unpaired client can still identify the device")
+    # ---- Per-connection state -------------------------------------------
+    # SPEC.md §8.2 — the FIRST notification after a connection carries seq 0.
+    fresh_clock = [0]
+    fresh = dev.VtpDevice(now_us=lambda: fresh_clock[0], gps_hz=10, imu_hz=100)
+    fresh.on_connect()
+    firsts = {}
+    for _ in range(200):
+        fresh_clock[0] += 5_000
+        for characteristic, payload in fresh.poll():
+            if characteristic in firsts:
+                continue
+            # Not named `decode`: this function already has one, and
+            # shadowing it here broke the batch checks further down.
+            reader = {"gps": vtp1.decode_gps_fix,
+                      "imu": vtp1.decode_imu_batch}[characteristic]
+            got = reader(payload)
+            firsts[characteristic] = (got.get("seq")
+                                      if "seq" in got else got["header"]["seq"])
+    for characteristic, first in sorted(firsts.items()):
+        check(first == 0,
+              f"{characteristic}: the first notification of a connection "
+              f"carries seq {first}; §8.2 says 0")
+
+    # SPEC.md §9.2 — a handle MUST NOT be reused while its subscription lives.
+    wrapper = dev.VtpDevice(now_us=lambda: 0, gps_hz=0, imu_hz=0)
+    wrapper.on_connect()
+    live = struct.unpack("<H", wrapper.handle_control(
+        bytes([dev.CAN_SUBSCRIBE, 1])
+        + struct.pack("<IBH", 0x0C0, dev.SUB_EVERY_FRAME, 0))[3:])[0]
+    wrapper._next_handle = 0xFFFF          # one install short of wrapping
+    for tag, cid in ((2, 0x111), (3, 0x222)):
+        wrapper.handle_control(bytes([dev.CAN_SUBSCRIBE, tag])
+                               + struct.pack("<IBH", cid, dev.SUB_EVERY_FRAME, 0))
+    check(wrapper._subscriptions[live]["id"] == 0x0C0,
+          f"handle {live} was reassigned when the counter wrapped; the client "
+          f"would unsubscribe a subscription it never installed")
+    check(len(set(wrapper._subscriptions)) == len(wrapper._subscriptions),
+          "the wrap produced a duplicate handle")
+
+    # SPEC.md §8.2 and §8.3 — a refused notification was never sent, so it
+    # neither consumes a sequence number nor discards the backlog its header
+    # was reporting.
+    rclock = [0]
+    refuser = dev.VtpDevice(now_us=lambda: rclock[0], gps_hz=0, imu_hz=0)
+    refuser.on_connect()
+    refuser.handle_control(bytes([dev.CAN_SUBSCRIBE, 1])
+                           + struct.pack("<IBH", 0x0C0, dev.SUB_EVERY_FRAME, 0))
+    refuser._dropped["can"] = 500
+    rclock[0] += 100_000
+    batch = next(p for c, p in refuser.poll() if c == "can")
+    was = vtp1.decode_can_batch(batch)["header"]
+    refuser.record_refused("can", batch)
+    rclock[0] += 100_000
+    now_hdr = vtp1.decode_can_batch(
+        next(p for c, p in refuser.poll() if c == "can"))["header"]
+    check(now_hdr["seq"] == was["seq"],
+          f"a refused notification consumed seq {was['seq']}; the next one is "
+          f"{now_hdr['seq']}, so the client sees a gap for data that never "
+          f"went out")
+    check(now_hdr["dropped"] == was["dropped"] + was["count"],
+          f"the refused header reported {was['dropped']} dropped and carried "
+          f"{was['count']} record(s), but the next reports "
+          f"{now_hdr['dropped']}; the backlog was thrown away with the "
+          f"notification")
+
+    # SPEC.md §9.1 — the negotiated MTU is reported, and drives batch sizing.
+    sized = dev.VtpDevice(now_us=lambda: 0, mtu=247)
+    roomy = sized._can_capacity()
+    sized.set_negotiated_mtu(185)
+    check(sized._can_capacity() < roomy,
+          "a smaller negotiated MTU MUST shrink the batch, or the device "
+          "builds notifications the link cannot carry")
+    reported = vtp1.decode_link_params(
+        sized.handle_control(bytes([dev.GET_LINK_PARAMS, 1]))[3:])
+    check(reported["att_mtu"] == 185 and "att_mtu" not in reported["absent"],
+          "GET_LINK_PARAMS MUST report the negotiated ATT MTU once known")
+    check(dev.MIN_ATT_MTU == 100,
+          "SPEC.md §2's minimum ATT MTU should come from the schema")
+
     try:
         serve.encrypted_characteristics("sometimes")
         check(False, "an unknown posture MUST be rejected, not silently "
@@ -403,9 +482,11 @@ def main():
     fresh = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=10, imu_hz=0)
     first = run(fresh, clock, 0.5)
     first_gps = [decode(c, p) for c, p in first if c == "gps"]
-    check(first_gps and first_gps[0]["seq"] == 1,
-          "seq MUST start from 0 and reach 1 on the first notification of a "
-          "connection, so a client never confuses a reconnection with a wrap")
+    check(first_gps and first_gps[0]["seq"] == 0,
+          "SPEC.md §8.2: seq restarts at 0 ON the first notification of a "
+          "connection. This had asserted 1, encoding the device's own "
+          "pre-increment rather than the rule, so the check agreed with the "
+          "bug it existed to catch")
 
     # A device that never loses anything cannot demonstrate that it reports
     # loss, which is why simulate_loss exists.
@@ -431,7 +512,7 @@ def main():
     check(table["page"]["total"] == 0,
           "subscriptions MUST NOT survive a reconnection")
     reconnected = [decode(c, p) for c, p in run(fresh, clock, 0.3) if c == "gps"]
-    check(reconnected and reconnected[0]["seq"] == 1,
+    check(reconnected and reconnected[0]["seq"] == 0,
           "seq MUST restart at 0 on a new connection")
 
     # ---- A stall must lose samples, not replay them (§8.3) --------------

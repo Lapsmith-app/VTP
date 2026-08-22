@@ -8,6 +8,52 @@ conformance vector.
 
 ## [Unreleased]
 
+### Fixed — device behaviour
+- **The first notification of every connection carried `seq` 1, not 0.**
+  `_next_seq` pre-incremented, so a client counting from 0 saw a
+  one-notification gap on every stream of every connection before anything had
+  been lost. §8.2 is now stated as a property of the notification — the first
+  carries 0, the second 1 — rather than of the counter, because the counter
+  phrasing is what permitted the bug: "restarts at 0" can be read as zeroing
+  the counter and then taking the next value.
+
+  The peripheral's own conformance check had been written to match, asserting
+  the first notification carried 1, so the test agreed with the bug it existed
+  to catch. That is the more useful half of this entry.
+
+- **A wrapped subscription handle silently overwrote a live one.** The counter
+  cycled 1..65535 without checking what was installed, so on wrapping, the
+  entry a client knew as handle 1 became a different subscription and
+  `CAN_UNSUBSCRIBE(1)` removed something the client had never installed —
+  §9.2's one prohibition on handles. Allocation now skips occupied handles,
+  which terminates because at most `can_subscription_slots` of 65535 numbers
+  are ever in use.
+
+- **A refused notification consumed a sequence number and discarded the
+  backlog it was reporting.** Building a batch zeroes `dropped`; if the
+  transport then refused it, `record_refused` credited back only the records
+  that batch carried. A device that had already lost 500 frames went on to
+  report the one it lost next, and 500 vanished from the accounting. It also
+  kept the `seq` it had consumed, so the client saw a gap — which §8.2 defines
+  as loss in transit — for a notification that never went out. Both are now
+  returned: the count, and the number.
+
+- **The device never learned the negotiated ATT MTU.** Batch sizing came
+  entirely from `--mtu`, so a device told 247 on a link that negotiated 185
+  built notifications the link could not carry. `set_link_params` was defined
+  and never called, which also meant `GET_LINK_PARAMS` reported nothing at
+  all. The transport now reads `maximumUpdateValueLength` from the subscribing
+  central, resizes batches, reports the value through §9.1, and warns when the
+  link is below the minimum §2 requires.
+
+- **The link edge was detected at the display refresh rate.** The connect and
+  disconnect handling sat inside the `ticks % every` block, so it ran at 10 Hz
+  and up to 100 ms late — tied to a setting with nothing to do with it. In
+  that window the device numbered notifications from the previous connection
+  and then reset, so a client saw `seq` run 1500, 1501, 0: not a gap, which
+  §8.2 defines, but a jump backwards, which it does not. Checked every tick
+  now.
+
 ### Changed — wire format
 - **§10 no longer requires any device to encrypt anything, and requires every
   client to support a device that does.** The requirement had been on Control

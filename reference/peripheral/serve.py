@@ -315,6 +315,8 @@ class Peripheral:
         # itself. Counted rather than assumed.
         self._ready_callbacks = 0
         self._timeouts = 0
+        # The MTU the link actually negotiated, once a central tells us.
+        self._observed_mtu = None
         # Control responses awaiting delivery. A notification may be discarded
         # and reported (SPEC.md §8.3); a control response may NOT. §9 requires
         # a device to respond to every request, and a client that never sees an
@@ -461,6 +463,55 @@ class Peripheral:
         setattr(Delegate, name, patched)
         Delegate._vtp_ready_hook = True
 
+    def _install_mtu_hook(self):
+        """Learn the ATT MTU the link actually negotiated.
+
+        bless keeps only a central's UUID string, so the CBCentral -- the one
+        object that knows `maximumUpdateValueLength` -- is reachable only from
+        the delegate callback it arrives in. Wrapped on the class for the same
+        reason as the ready hook, and for the same one-peripheral-per-process
+        caveat.
+
+        Until this existed the device sized every batch from --mtu and never
+        found out it was wrong. iOS commonly negotiates 185, not the 247 this
+        peripheral assumed, and a notification built for 247 on a 185-byte
+        link is one the stack will not carry.
+        """
+        from bless.backends.corebluetooth.peripheral_manager_delegate import (
+            PeripheralManagerDelegate as Delegate)
+        name = "peripheralManager_central_didSubscribeToCharacteristic_"
+        if getattr(Delegate, "_vtp_mtu_hook", False):
+            return
+        original = getattr(Delegate, name)
+        peripheral = self
+
+        def patched(delegate_self, manager, central, characteristic):
+            try:
+                # maximumUpdateValueLength is the ATT payload, so the MTU is
+                # three bytes more: opcode plus handle.
+                peripheral._note_mtu(int(central.maximumUpdateValueLength()) + 3)
+            except Exception:
+                log.debug("central reported no maximum update length",
+                          exc_info=True)
+            return original(delegate_self, manager, central, characteristic)
+
+        setattr(Delegate, name, patched)
+        Delegate._vtp_mtu_hook = True
+
+    def _note_mtu(self, att_mtu):
+        if att_mtu == self._observed_mtu:
+            return
+        self._observed_mtu = att_mtu
+        assumed = self.device.mtu
+        self.device.set_negotiated_mtu(att_mtu)
+        log.info("ATT MTU negotiated at %d (assumed %d); batches now sized "
+                 "for %d payload bytes", att_mtu, assumed,
+                 self.device.notify_bytes)
+        if att_mtu < dev.MIN_ATT_MTU:
+            log.warning("negotiated ATT MTU %d is below the %d SPEC.md 2 "
+                        "requires; this link does not meet the specification",
+                        att_mtu, dev.MIN_ATT_MTU)
+
     def _deliver(self, characteristic, payload, sent, refused):
         """One attempt. Returns True when the stack took it."""
         uuid = self._notify[characteristic]
@@ -560,6 +611,12 @@ class Peripheral:
             log.warning("could not hook the ready-to-send callback; the "
                         "peripheral will pace on a timer instead",
                         exc_info=True)
+        try:
+            self._install_mtu_hook()
+        except Exception:
+            log.warning("could not hook the subscribe callback; the device "
+                        "will size batches from --mtu and GET_LINK_PARAMS "
+                        "will report no ATT MTU", exc_info=True)
         log.info("advertising %s as %r", SERVICE, self.name)
         log.info("a client matching on the service UUID needs that UUID in the "
                  "advertisement; name is %d of %d permitted characters",
@@ -642,28 +699,35 @@ class Peripheral:
                 last_counts = dict(sent)
                 next_rate = now_wall + span
 
-            if ticks % every == 0:
-                event = self._link.update(await self.server.is_connected())
-                if event == "connected":
-                    # SPEC.md §8.2 and §9.2: a connection starts from a known
-                    # state. Without this the device carries the previous
-                    # client's subscriptions and sequence numbers into the next
-                    # connection, which is exactly what §9.2 forbids.
-                    self.device.on_connect()
-                    log.info("CLIENT CONNECTED — sequence numbers restarted, "
-                             "subscription table cleared")
-                elif event == "disconnected":
-                    # SPEC.md §9.2 clears the table when the LINK DROPS, not
-                    # when the next one starts. Clearing only on connect left
-                    # a disconnected device reporting three installed ids with
-                    # nobody subscribed, which reads as a client fault.
-                    self.device.on_disconnect()
-                    # The client is gone; nothing is owed to it any more.
-                    undelivered = self._control.discard_all()
-                    if undelivered:
-                        log.warning("%d control response(s) undelivered when "
-                                    "the link dropped", undelivered)
-                    log.info("CLIENT DISCONNECTED — subscription table cleared")
+            # Every tick, not once per screen refresh. This had been inside
+            # the `ticks % every` block, so the link edge was detected at the
+            # DISPLAY rate -- 10 Hz, up to 100 ms late, and tied to a setting
+            # that has nothing to do with it. In that window the device went on
+            # numbering notifications from the previous connection and then
+            # reset, so a client saw seq run 1500, 1501, 0: not a gap, which
+            # §8.2 defines, but a jump backwards, which it does not.
+            event = self._link.update(await self.server.is_connected())
+            if event == "connected":
+                # SPEC.md §8.2 and §9.2: a connection starts from a known
+                # state. Without this the device carries the previous client's
+                # subscriptions and sequence numbers into the next connection,
+                # which is exactly what §9.2 forbids.
+                self.device.on_connect()
+                log.info("CLIENT CONNECTED — sequence numbers restarted, "
+                         "subscription table cleared")
+            elif event == "disconnected":
+                # SPEC.md §9.2 clears the table when the LINK DROPS, not when
+                # the next one starts. Clearing only on connect left a
+                # disconnected device reporting three installed ids with
+                # nobody subscribed, which reads as a client fault.
+                self.device.on_disconnect()
+                self._observed_mtu = None
+                # The client is gone; nothing is owed to it any more.
+                undelivered = self._control.discard_all()
+                if undelivered:
+                    log.warning("%d control response(s) undelivered when the "
+                                "link dropped", undelivered)
+                log.info("CLIENT DISCONNECTED — subscription table cleared")
 
             now = self.device.now_us() / 1e6
             if now >= next_report:
