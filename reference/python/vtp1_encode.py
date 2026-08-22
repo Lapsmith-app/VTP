@@ -75,6 +75,39 @@ def _gate(name, values):
     return gated
 
 
+def _known_bits(bitmask):
+    """The bits of `bitmask` this version has assigned a meaning to.
+
+    SPEC.md §2 — reserved bits are ZERO on transmit. `_zero_reserved` below
+    already covered whole reserved FIELDS; the reserved PORTION of a bitmask
+    had no expression anywhere, so a caller handing this encoder a capabilities
+    word with bit 19 set, or a gps validity word with bit 30 set, had it
+    transmitted verbatim. Every conforming receiver is required to ignore those
+    bits, which is exactly why writing them is forbidden: they are the only
+    bits on the wire a later minor version may redefine, and a 1.0 device that
+    sets one has published a claim it cannot make.
+    """
+    spec = SCHEMA["bitmasks"][bitmask]
+    reserved_from = spec.get("reserved_from")
+    if reserved_from is None:
+        return (1 << (spec["width"] * 8)) - 1
+    return (1 << reserved_from) - 1
+
+
+def _normalise_bitmasks(name, values):
+    """Mask the reserved portion of every bitmask field of `name`."""
+    rec = _record(name)
+    masked = None
+    for f in rec["fields"]:
+        bm = f.get("bitmask")
+        if not bm:
+            continue
+        if masked is None:
+            masked = dict(values)
+        masked[f["name"]] = values.get(f["name"], 0) & _known_bits(bm)
+    return values if masked is None else masked
+
+
 def _zero_reserved(name, values):
     """SPEC.md §2 — a reserved field is zero on transmit.
 
@@ -93,6 +126,16 @@ def _zero_reserved(name, values):
 
 
 def _pack(name, values):
+    # Every record goes through BOTH normalisations on its way to the wire, so
+    # no encoder function has to remember either.
+    #
+    # `_zero_reserved` used to be called by hand, per record, by the functions
+    # that happened to have a reserved field when they were written --
+    # `encode_info` did not, because Info had none. It gained one the moment
+    # `can_max_payload` became derivable, and the encoder went on transmitting
+    # whatever the caller left there. A rule applied by remembering is a rule
+    # that lapses when the schema changes.
+    values = _zero_reserved(name, _normalise_bitmasks(name, values))
     rec = _record(name)
     buf = bytearray(rec["size"])
     for f in rec["fields"]:
@@ -130,6 +173,29 @@ def _check_gps_ranges(fix):
                 f"gps_fix.head_mot {fix['head_mot']} is outside 0°..360°")
 
 
+FIX_FLAG = {b["name"]: 1 << b["bit"]
+            for b in SCHEMA["bitmasks"]["fix_flags"]["bits"]}
+
+
+def _check_fix_flags(fix):
+    """SPEC.md 5.3 -- a carrier-phase solution has either resolved its
+integer ambiguities or it has not, so both RTK bits at once is a claim about
+solution quality that means nothing. The natural client reading of the pair is
+"fixed wins", which upgrades a device's accuracy claim on the strength of a
+bug. And either RTK bit implies `differential`, because an RTK solution IS a
+differentially corrected one."""
+    flags = fix.get("fix_flags", 0)
+    rtk = flags & (FIX_FLAG["rtk_float"] | FIX_FLAG["rtk_fixed"])
+    if rtk == (FIX_FLAG["rtk_float"] | FIX_FLAG["rtk_fixed"]):
+        raise EncodeError(
+            "gps_fix.fix_flags sets both rtk_float and rtk_fixed; a "
+            "carrier-phase solution is one or the other")
+    if rtk and not flags & FIX_FLAG["differential"]:
+        raise EncodeError(
+            "gps_fix.fix_flags claims an RTK solution without differential; "
+            "an RTK solution is a differentially corrected one")
+
+
 def encode_gps_fix(fix, ext=b""):
     """SPEC.md §5. `ext` is appended verbatim and MUST match `ext_count`.
 
@@ -143,6 +209,7 @@ def encode_gps_fix(fix, ext=b""):
     to follow them to the end.
     """
     _check_gps_ranges(fix)
+    _check_fix_flags(fix)
     ext = bytes(ext)
     declared = fix.get("ext_count", 0)
     off, seen = 0, 0
@@ -170,7 +237,11 @@ def encode_can_batch(header, records):
         raise EncodeError(
             f"can_header.count is {header.get('count', 0)} but "
             f"{len(records)} record(s) were supplied")
-    if records and records[0].get("dt", 0) != 0:
+    if not records:
+        raise EncodeError(
+            "can_header.count is zero, but t_base is the bus-arrival time of "
+            "record 0; a quiet bus is reported by sending nothing")
+    if records[0].get("dt", 0) != 0:
         raise EncodeError(
             f"can_record[0].dt is {records[0]['dt']}; t_base is record 0's "
             f"arrival time, so its offset from t_base is zero (SPEC.md §6.1)")
@@ -228,6 +299,10 @@ def encode_imu_batch(header, samples):
         raise EncodeError(
             "imu_header.period is zero, which says every sample was taken at "
             "the same instant")
+    if not header.get("count"):
+        raise EncodeError(
+            "imu_header.count is zero, but t_base is the acquisition time of "
+            "sample 0; a device with nothing to report sends nothing")
     flags = header.get("flags", 0)
     accel = bool(flags & IMU_HAS_ACCEL)
     gyro = bool(flags & IMU_HAS_GYRO)
@@ -245,8 +320,40 @@ def encode_imu_batch(header, samples):
     return bytes(out)
 
 
+CAP_BIT = {b["name"]: b["bit"]
+           for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
+CAP_IMPLIES = {b["name"]: b.get("implies") or []
+               for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
+CAP_CAPACITY = SCHEMA["profile"]["capacity"]
+
+
 def encode_info(info):
-    """SPEC.md §4. No field is gated; a capacity of zero means none."""
+    """SPEC.md §4. No field is gated; a capacity of zero means none.
+
+    SPEC.md §4.1 is enforced here, because an encoder must not emit what its
+    own decoder rejects — and the profile matrix is now something the decoder
+    rejects. Checked against the NORMALISED capability word, since that is what
+    reaches the wire: a reserved bit cannot satisfy an implication it was never
+    allowed to be set for.
+    """
+    caps = info.get("capabilities", 0) & _known_bits("capabilities")
+    for name, implies in CAP_IMPLIES.items():
+        if not caps & (1 << CAP_BIT[name]):
+            continue
+        for req in implies:
+            if not caps & (1 << CAP_BIT[req]):
+                raise EncodeError(
+                    f"info.capabilities sets `{name}` without `{req}`, which "
+                    f"SPEC.md §4.1 requires it to imply")
+    for cap, fields in CAP_CAPACITY.items():
+        if caps & (1 << CAP_BIT[cap]):
+            continue
+        for field in fields:
+            if info.get(field):
+                raise EncodeError(
+                    f"info.{field} is {info[field]} while capability `{cap}` "
+                    f"is clear; SPEC.md §4.1 requires a capacity behind a "
+                    f"cleared bit to be zero")
     return _pack("info", info)
 
 
@@ -268,11 +375,11 @@ MONITOR_MAX_CHANNELS = (
     // SCHEMA["records"]["monitor_value"]["size"])
 
 
-def encode_monitor_list(page, entries):
-    """SPEC.md §13.3."""
-    if len(entries) != page.get("count", 0):
+def encode_monitor_list(declaration, entries):
+    """SPEC.md §13.3 — the whole declaration, never a page of it."""
+    if len(entries) != declaration.get("count", 0):
         raise EncodeError(
-            f"monitor_page.count is {page.get('count', 0)} but "
+            f"monitor_declaration.count is {declaration.get('count', 0)} but "
             f"{len(entries)} entr(ies) were supplied")
     # SPEC.md §13.3, §13.4 — both already enforced by the decoder, so emitting
     # either produced a declaration this repository's own reader refuses.
@@ -281,12 +388,20 @@ def encode_monitor_list(page, entries):
         raise EncodeError(
             "monitor_list: a slot appears twice, so every later update naming "
             "it would be ambiguous")
-    if page.get("total", 0) > MONITOR_MAX_CHANNELS:
+    if declaration.get("count", 0) > MONITOR_MAX_CHANNELS:
         raise EncodeError(
-            f"monitor_page.total is {page.get('total')}, more than the "
-            f"{MONITOR_MAX_CHANNELS} that fit in one complete write at the "
-            f"minimum ATT MTU")
-    out = bytearray(_pack("monitor_page", _zero_reserved("monitor_page", page)))
+            f"monitor_declaration.count is {declaration.get('count')}, more "
+            f"than the {MONITOR_MAX_CHANNELS} that fit in one complete write "
+            f"at the minimum ATT MTU")
+    # SPEC.md §13.5 — every declared channel carries a deadline.
+    for e in entries:
+        if not e.get("max_age"):
+            raise EncodeError(
+                f"monitor_channel slot {e.get('slot')} declares max_age 0; "
+                f"a channel with no deadline is a value that can be displayed "
+                f"forever after the client stopped sending it")
+    out = bytearray(_pack("monitor_declaration",
+                          _zero_reserved("monitor_declaration", declaration)))
     for e in entries:
         out += _pack("monitor_channel", _zero_reserved("monitor_channel", e))
     return bytes(out)
@@ -298,6 +413,11 @@ def encode_monitor_update(header, values):
         raise EncodeError(
             f"monitor_header.count is {header.get('count', 0)} but "
             f"{len(values)} value(s) were supplied")
+    if not values:
+        raise EncodeError(
+            "monitor_update carries no values; SPEC.md §13.4 makes a write a "
+            "complete statement of what the client can supply, and a client "
+            "with nothing to supply clears the present bit on every slot")
     slots = [v["slot"] for v in values]
     if len(set(slots)) != len(slots):
         raise EncodeError(
@@ -340,7 +460,7 @@ ENCODERS = {
     "info": encode_info,
     "link_params": encode_link_params,
     "can_list": lambda d: encode_can_list(d["page"], d["entries"]),
-    "monitor_list": lambda d: encode_monitor_list(d["page"], d["entries"]),
+    "monitor_list": lambda d: encode_monitor_list(d["declaration"], d["entries"]),
     "monitor_update": lambda d: encode_monitor_update(d["header"], d["values"]),
     "control_response": encode_control_response,
     "time_sync": encode_time_sync,

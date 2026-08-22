@@ -473,8 +473,59 @@
       "note": "Falling back to a plausible default is the sentinel mistake in a different costume."
     },
     {
+      "name": "rtk-float-and-fixed",
+      "desc": "Both RTK bits set. MUST be rejected: a carrier-phase solution has either resolved its integer ambiguities or it has not, so the pair is a quality claim that means nothing.",
+      "record": "gps_fix",
+      "hex": "0b000000ff0f000015cd5b0700000000007ccd2d9b010000d067b31ef8aeeaffb8880000743a0100a861000080f3ffff9600000040291c0252030000780500005a0000008c0003110700",
+      "must_reject": "rtk-both"
+    },
+    {
+      "name": "rtk-without-differential",
+      "desc": "rtk_fixed without differential. MUST be rejected: an RTK solution IS a differentially corrected one, so this describes no receiver.",
+      "record": "gps_fix",
+      "hex": "0c000000ff0f000015cd5b0700000000007ccd2d9b010000d067b31ef8aeeaffb8880000743a0100a861000080f3ffff9600000040291c0252030000780500005a0000008c0003110400",
+      "must_reject": "rtk-without-differential"
+    },
+    {
+      "name": "rtk-fixed-well-formed",
+      "desc": "rtk_fixed with differential and a disciplined clock, which is what a working RTK receiver reports.",
+      "record": "gps_fix",
+      "hex": "0d000000ff0f000015cd5b0700000000007ccd2d9b010000d067b31ef8aeeaffb8880000743a0100a861000080f3ffff9600000040291c0252030000780500005a0000008c0003110d00",
+      "expect": {
+        "seq": 13,
+        "dropped": 0,
+        "validity": 4095,
+        "t_device": 123456789,
+        "t_utc": 1766000000000,
+        "lat": 515074000,
+        "lon": -1397000,
+        "alt_msl": 35000,
+        "alt_ellipsoid": 80500,
+        "vel_n": 25000,
+        "vel_e": -3200,
+        "vel_d": 150,
+        "head_mot": 35400000,
+        "h_acc": 850,
+        "v_acc": 1400,
+        "s_acc": 90,
+        "p_dop": 140,
+        "fix_type": 3,
+        "num_sv": 17,
+        "fix_flags": 13,
+        "ext_count": 0,
+        "fix_type_known": true
+      },
+      "expect_absent": [],
+      "expect_scaled": {
+        "lat": 51.5074,
+        "lon": -0.1397,
+        "head_mot": 354.0,
+        "p_dop": 1.4
+      }
+    },
+    {
       "name": "reserved-validity-bits-set",
-      "desc": "A future minor set validity bit 20. A decoder MUST ignore the unknown bit and decode every known field normally. Rejecting here breaks forward compatibility.",
+      "desc": "A future minor set validity bit 20. A decoder MUST ignore the unknown bit and decode every known field normally. Rejecting here breaks forward compatibility. A VTP/1.0 encoder MUST NOT reproduce the bit: SPEC.md 2 reserves it, and re-encoding therefore normalises it away.",
       "record": "gps_fix",
       "hex": "07000000ff0f100015cd5b0700000000007ccd2d9b010000d067b31ef8aeeaffb8880000743a0100a861000080f3ffff9600000040291c0252030000780500005a0000008c0003110900",
       "expect": {
@@ -507,7 +558,10 @@
         "lon": -0.1397,
         "head_mot": 354.0,
         "p_dop": 1.4
-      }
+      },
+      "note": "Both halves matter and they pull opposite ways. On RECEIVE a reserved bit is ignored, so the known fields decode. On TRANSMIT it is zero, because those bits are the only ones a later minor may redefine and a 1.0 encoder that emits one has published a claim it cannot make. Neither reference encoder masked them until this vector stopped being marked canonical.",
+      "canonical": false,
+      "expect_roundtrip_hex": "07000000ff0f000015cd5b0700000000007ccd2d9b010000d067b31ef8aeeaffb8880000743a0100a861000080f3ffff9600000040291c0252030000780500005a0000008c0003110900"
     },
     {
       "name": "with-unknown-extension",

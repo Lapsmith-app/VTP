@@ -48,7 +48,7 @@ int vtp_encode_control_response(const vtp_control_response_t *r,
                                 uint8_t *out, size_t cap);
 
 /* `page->count` entries are read from `entries`. */
-int vtp_encode_monitor_list(const vtp_monitor_page_t *page,
+int vtp_encode_monitor_list(const vtp_monitor_declaration_t *page,
                             const vtp_monitor_channel_t *entries,
                             uint8_t *out, size_t cap);
 

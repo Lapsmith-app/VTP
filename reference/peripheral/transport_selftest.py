@@ -44,11 +44,11 @@ def seqs(payloads, characteristic):
     return [reader[characteristic](p) for p in payloads]
 
 
-def build(gps_hz=10, imu_hz=0):
+def build(gps_hz=10, imu_hz=0, bless_semantics=False):
     clock = [0]
     device = dev.VtpDevice(now_us=lambda: clock[0], gps_hz=gps_hz, imu_hz=imu_hz)
     peripheral = serve.Peripheral(device, name="VTP")
-    server = gattsim.FakeServer(clock)
+    server = gattsim.FakeServer(clock, bless_semantics=bless_semantics)
     gattsim.FakeServer.bind(serve.CHAR)
     peripheral.server = server
     # The pump's own ready hook is CoreBluetooth-specific; this is the same
@@ -161,13 +161,42 @@ def main():
     # because a check that cannot fail is exactly what this repository keeps
     # finding in its own tooling.
 
+    # ---- The first request of a connection is not thrown away -----------
+    # The client connects, enables indications on Control, and writes its
+    # first request. All three can happen before the pump's next poll, because
+    # a GATT write is delivered by callback and `is_connected()` is polled.
+    #
+    # The request was admitted, applied and queued -- and then the pump saw the
+    # connection it had already been serving, ran the connect edge, and cleared
+    # the response queue and the device state out from under it. The client's
+    # CAN_SUBSCRIBE had taken effect and was never answered, so it retried a
+    # request that was already installed and eventually dropped the link.
+    #
+    # This is the ordinary path, not an exotic one: no stall, no reconnection,
+    # nothing refused. The previous version of this test stepped the pump five
+    # ticks before writing, and called the loss correct.
+    peripheral, server, _ = build(gps_hz=0)
+    server.connect(subscribe=("control",))
+    peripheral.write_request(
+        gattsim.FakeCharacteristic(serve.CHAR["control"]),
+        bytes([dev.CAN_SUBSCRIBE, 3]) + b"\xa0\x01\x00\x00\x00\x00\x00")
+    run(peripheral, 50)
+    answered = server.sent("control")
+    check(len(answered) == 1 and answered[0][1] == 3,
+          f"a request written before the pump first polled MUST still be "
+          f"answered; the wire holds {answered}")
+    check(len(peripheral.device.can_table()) == 1,
+          f"...and MUST still be in effect: the subscription table holds "
+          f"{peripheral.device.can_table()}")
+
+    # The other half of the same rule: a request that arrives before the pump
+    # has polled must not ALSO be applied twice, once per edge-taker.
+    check(peripheral._link.connected,
+          "the write should have taken the connection edge itself")
+
     # ---- A control response is owed, not offered ------------------------
     peripheral, server, _ = build(gps_hz=0)
     server.connect(subscribe=("control",))
-    # Let the pump see the connection before the write. A real stack cannot
-    # deliver a write to a link the device has not been told about, and the
-    # connect edge now clears everything held for the previous one -- so a
-    # request injected ahead of it is correctly thrown away.
     run(peripheral, 5)
     server.stall()
     peripheral.write_request(
@@ -183,13 +212,63 @@ def main():
           f"a refused control response MUST be retried until it lands, not "
           f"dropped; wire holds {got}")
 
+    # ---- What bless 0.3.0 actually reports ------------------------------
+    # `is_connected()` on that backend is `len(_central_subscriptions) > 0`,
+    # not a link flag: a CoreBluetooth peripheral is never told about a connect
+    # or a disconnect at all. So a client that unsubscribes from every
+    # characteristic while staying connected is indistinguishable from one that
+    # went away, and resubscribing is indistinguishable from a new connection.
+    #
+    # This pins what the peripheral DOES about that, because the behaviour is
+    # a deliberate choice between two unequal mistakes and not an accident:
+    # it resets, exactly as it would for a real reconnection. See
+    # serve.ConnectionTracker for why that is the safe direction.
+    peripheral, server, _ = build(gps_hz=25, bless_semantics=True)
+    server.connect(subscribe=("gps", "control"))
+    run(peripheral, 200)
+    peripheral.write_request(
+        gattsim.FakeCharacteristic(serve.CHAR["control"]),
+        bytes([dev.CAN_SUBSCRIBE, 4]) + b"\xa0\x01\x00\x00\x00\x00\x00")
+    run(peripheral, 50)
+    check(len(peripheral.device.can_table()) == 1,
+          "the fixture needs an installed subscription to say anything")
+    before = seqs(server.sent("gps"), "gps")
+    check(len(before) > 1, "the fixture needs several notifications delivered")
+
+    # Every CCCD cleared, link still up. On this backend that reads as a
+    # disconnect, and the peripheral treats it as one.
+    server.unsubscribe("gps")
+    server.unsubscribe("control")
+    run(peripheral, 20)
+    check(peripheral.device.can_table() == [],
+          "on a backend whose is_connected() means `something is subscribed`, "
+          "clearing every CCCD reads as a disconnect and MUST clear the "
+          "subscription table -- not resetting here would hand a genuine "
+          "reconnection the previous link's table (SPEC.md 9.2)")
+
+    server.clear_wire()
+    server.subscribe("gps")
+    run(peripheral, 300)
+    after = seqs(server.sent("gps"), "gps")
+    check(after and after[0] == 0,
+          f"resubscribing reads as a new connection on this backend, so seq "
+          f"MUST restart at 0; got {after[:1]}. The alternative -- carrying "
+          f"seq across what might have been a real reconnection -- is the one "
+          f"a client cannot detect (SPEC.md 8.2)")
+
+    # And the identity is carried, so the log can say which it probably was.
+    check(peripheral._link.central == server.central,
+          f"the tracker should be carrying the central's identity, got "
+          f"{peripheral._link.central!r}")
+
     if problems:
         print(f"\n{len(problems)} transport problem(s).", file=sys.stderr)
         return 1
     total = sum(len(v) for v in server.wire.values())
     print(f"Transport conforms: sequence integrity across subscription, "
           f"backpressure and reconnection; nothing outlives its link; control "
-          f"responses are retried.")
+          f"responses are retried; and the bless 0.3.0 subscription-as-link "
+          f"signal resets in the safe direction.")
     return 0
 
 
