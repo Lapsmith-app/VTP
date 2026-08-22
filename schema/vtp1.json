@@ -1212,7 +1212,7 @@
       {
         "value": 48,
         "name": "TIME_SYNC",
-        "params": "host_t_utc_ms:i64",
+        "params": "\u2014",
         "response": "time_sync record",
         "desc": "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"
       },

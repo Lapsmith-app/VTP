@@ -338,6 +338,6 @@ control:
     - {value: 0x05, name: CAN_LIST,           params: "start:u16",                    response: "can_list_page record",  desc: "One page of the table, starting at index `start`"}
     - {value: 0x10, name: GPS_SET_RATE,       params: "hz:u16",                       response: ""}
     - {value: 0x20, name: IMU_SET_RATE,       params: "hz:u16",                       response: ""}
-    - {value: 0x30, name: TIME_SYNC,          params: "host_t_utc_ms:i64",            response: "time_sync record",      desc: "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"}
+    - {value: 0x30, name: TIME_SYNC,          params: "—",                            response: "time_sync record",      desc: "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"}
     - {value: 0x31, name: GET_LINK_PARAMS,    params: "",                             response: "link_params record"}
     - {value: 0x40, name: MONITOR_LIST,       params: "start:u16",                    response: "monitor_page record",   desc: "One page of the channels this device asks the client to supply"}

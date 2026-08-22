@@ -120,6 +120,12 @@ int vtp_can_batch_begin(const uint8_t *b, size_t len,
     for (uint8_t i = 0; i < h->count; i++) {
         if (off + VTP_CAN_RECORD_SIZE > len) { *err = "truncated-record"; return -1; }
         size_t plen = b[off + VTP_CAN_RECORD_OFF_LEN];
+        /* SPEC.md §6.1 -- t_base IS record 0's arrival time, so its dt is zero
+         * by definition. A non-zero one means the sender and the receiver
+         * disagree about what t_base is. */
+        if (i == 0 && rd16(b + off + VTP_CAN_RECORD_OFF_DT) != 0) {
+            *err = "first-dt-nonzero"; return -1;
+        }
         {
             /* SPEC.md §6.4 — frames that cannot exist are rejected, not
              * repaired. Truncating an over-long standard identifier would

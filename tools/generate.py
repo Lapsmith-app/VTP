@@ -657,24 +657,30 @@ def vectors(schema):
                   "A 29-bit extended identifier. The extended flag lives in bit 29 of `id`, "
                   "and the arbitration id is bits 0-28 only.",
                   dict(seq=3, dropped=0, t_base=7_000_000, count=1, flags=0),
-                  [can_rec(5, 0x18DAF110, bytes.fromhex("AABB"), ext=True)],
-                  [{"dt": 5, "id": 0x18DAF110, "extended": True, "fd": False, "rtr": False,
-                    "len": 2, "payload": "aabb", "t_device_us": 7_000_050}]),
+                  [can_rec(0, 0x18DAF110, bytes.fromhex("AABB"), ext=True)],
+                  [{"dt": 0, "id": 0x18DAF110, "extended": True, "fd": False, "rtr": False,
+                    "len": 2, "payload": "aabb", "t_device_us": 7_000_000}]),
         can_batch("can-fd-64-byte",
                   "A CAN FD frame carrying the maximum 64-byte payload.",
                   dict(seq=4, dropped=0, t_base=9_000_000, count=1, flags=0),
-                  [can_rec(1, 0x2F0, bytes(range(64)), fd=True)],
-                  [{"dt": 1, "id": 0x2F0, "extended": False, "fd": True, "rtr": False,
+                  [can_rec(0, 0x2F0, bytes(range(64)), fd=True)],
+                  [{"dt": 0, "id": 0x2F0, "extended": False, "fd": True, "rtr": False,
                     "len": 64, "payload": bytes(range(64)).hex(),
-                    "t_device_us": 9_000_010}]),
+                    "t_device_us": 9_000_000}]),
         can_batch("t-base-near-wrap",
-                  "t_base within 100 us of the u64 ceiling, so t_base + dt*10 wraps. "
+                  "t_base within 100 us of the u64 ceiling. Record 0 sits ON t_base "
+                  "(SPEC.md 6.1), so the wrap is carried by record 1: t_base + 200 us "
+                  "exceeds the ceiling. "
                   "SPEC.md 8 defines the arithmetic as modulo 2^64; a decoder using "
                   "arbitrary-precision integers MUST still report the wrapped value.",
-                  dict(seq=11, dropped=0, t_base=(1 << 64) - 100, count=1, flags=0),
-                  [can_rec(20, 0x1A0, bytes.fromhex("00"))],
-                  [{"dt": 20, "id": 0x1A0, "extended": False, "fd": False, "rtr": False,
+                  dict(seq=11, dropped=0, t_base=(1 << 64) - 100, count=2, flags=0),
+                  [can_rec(0, 0x1A0, bytes.fromhex("00")),
+                   can_rec(20, 0x1A0, bytes.fromhex("01"))],
+                  [{"dt": 0, "id": 0x1A0, "extended": False, "fd": False, "rtr": False,
                     "len": 1, "payload": "00",
+                    "t_device_us": (1 << 64) - 100},
+                   {"dt": 20, "id": 0x1A0, "extended": False, "fd": False, "rtr": False,
+                    "len": 1, "payload": "01",
                     "t_device_us": ((1 << 64) - 100 + 200) & ((1 << 64) - 1)}],
                   note="Unreachable on real hardware -- a microsecond clock takes over "
                        "half a million years to get here -- but the two reference "
@@ -759,10 +765,23 @@ def vectors(schema):
                   "twelve is representable, eleven is not, and a decoder that "
                   "accepts any length up to 64 cannot tell them apart.",
                   dict(seq=17, dropped=0, t_base=9_000_000, count=1, flags=0),
-                  [can_rec(2, 0x2F0, bytes(range(12)), fd=True)],
-                  [{"dt": 2, "id": 0x2F0, "extended": False, "fd": True, "rtr": False,
+                  [can_rec(0, 0x2F0, bytes(range(12)), fd=True)],
+                  [{"dt": 0, "id": 0x2F0, "extended": False, "fd": True, "rtr": False,
                     "len": 12, "payload": bytes(range(12)).hex(),
-                    "t_device_us": 9_000_020}]),
+                    "t_device_us": 9_000_000}]),
+        {"name": "first-record-dt-nonzero",
+         "desc": "A batch whose first record claims a 50 us offset from t_base. "
+                 "MUST be rejected: SPEC.md 6.1 defines t_base AS record 0's "
+                 "arrival time, so a non-zero first dt means the sender and the "
+                 "receiver disagree about what t_base is, and the receiver "
+                 "cannot tell which reading to trust. Four vectors in this "
+                 "corpus carried non-zero first offsets while the specification "
+                 "said they could not, and both decoders accepted them.",
+         "record": "can_batch",
+         "hex": (encode(schema, "can_header",
+                        dict(seq=23, dropped=0, t_base=1_000_000, count=1, flags=0))
+                 + can_rec(5, 0x1A0, bytes.fromhex("00"))).hex(),
+         "must_reject": "first-dt-nonzero"},
         {"name": "classic-length-nine",
          "desc": "A Classic frame declaring nine payload bytes. A Classic frame "
                  "carries 0..8, so this length is impossible rather than merely "
