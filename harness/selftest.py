@@ -22,6 +22,9 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+from vtp1_harness import refdec                             # noqa: E402
+sys.path.insert(0, str(refdec.ROOT / "reference" / "peripheral"))
+
 from vtp1_harness.checks import Status                     # noqa: E402
 from vtp1_harness.runner import Runner                     # noqa: E402
 from vtp1_harness.transport import FAULTS, LoopbackTransport  # noqa: E402
@@ -30,6 +33,13 @@ from vtp1_harness.transport import FAULTS, LoopbackTransport  # noqa: E402
 #: transport.FAULTS has to appear here; the run asserts that too, so a fault
 #: added without a check to catch it fails this rather than sitting unused.
 CAUGHT_BY = {
+    "missing_characteristic": "gatt.attribute_table",
+    "extra_characteristic": "gatt.no_extra_characteristics",
+    "inert_cccd_rejected": "gatt.inert_cccd",
+    "implication_broken": "info.capability_implications",
+    "opcode_capability_late": "control.opcode_capability",
+    "rate_not_applied": "control.rate_readback",
+    "info_reserved_nonzero": "info.reserved_fields",
     "seq_starts_at_one": "seq.first_is_zero",
     "seq_repeats": "seq.advances",
     "detail_on_error": "control.detail_only_on_ok",
@@ -52,11 +62,32 @@ CAUGHT_BY = {
 #: to pay for the reconnection.
 NEEDS_RECONNECT = {"subs_survive_reconnect"}
 
+#: SPEC.md §4.1 -- some rules only exist on a device that does NOT implement a
+#: role: a CCCD write on an inert stream, an opcode whose owning capability is
+#: clear. They cannot be tested against a device that declares everything, so
+#: these faults are seeded into one that does not.
+PARTIAL = "gps+imu+control"
+NEEDS_PARTIAL = {"inert_cccd_rejected", "opcode_capability_late"}
+
 OBSERVE_SECONDS = 1.5
 
 
-async def run(faults=(), reconnect=False):
-    transport = LoopbackTransport(faults=faults)
+def capabilities(profile):
+    """A capability word, by name, using the peripheral's own constants."""
+    import vtp_device
+    bits = {"gps": vtp_device.CAP_GPS, "can": vtp_device.CAP_CAN,
+            "imu": vtp_device.CAP_IMU, "monitor": vtp_device.CAP_MONITOR,
+            "control": vtp_device.CAP_CONTROL}
+    word = 0
+    for name in profile.split("+"):
+        word |= bits[name]
+    return word
+
+
+async def run(faults=(), reconnect=False, profile=None):
+    device_kwargs = ({} if profile is None
+                     else {"capabilities": capabilities(profile)})
+    transport = LoopbackTransport(faults=faults, device_kwargs=device_kwargs)
     target = (await transport.scan(0))[0]
     runner = Runner(transport, observe_s=OBSERVE_SECONDS, reconnect=reconnect)
     return await runner.run(target)
@@ -98,10 +129,24 @@ async def main():
         problems.append(f"only {counts['pass']} checks passed against the "
                         f"reference peripheral; something is not running")
 
+    print("\nA device that implements some of the roles")
+    # SPEC.md §4.1 -- a device is never failed for a role it never claimed, and
+    # the inert half of the profile is only reachable on a device that has one.
+    for profile in (PARTIAL, "gps", "gps+control"):
+        report = await run(profile=profile)
+        counts = report.counts
+        print(f"  {profile:<16} {counts['pass']} passed, {counts['fail']} failed, "
+              f"{counts['skip']} skipped, {counts['error']} errors")
+        for result in report.failures + report.warnings + report.errors:
+            problems.append(f"a {profile} device was reported "
+                            f"{result.status.value} on {result.check.id}: "
+                            f"{result.message}")
+
     print("\nA device with one specific defect")
     ordered = sorted(CAUGHT_BY)
     reports = await asyncio.gather(*(
-        run(faults=[fault], reconnect=fault in NEEDS_RECONNECT)
+        run(faults=[fault], reconnect=fault in NEEDS_RECONNECT,
+            profile=PARTIAL if fault in NEEDS_PARTIAL else None)
         for fault in ordered))
 
     width = max(len(f) for f in ordered)

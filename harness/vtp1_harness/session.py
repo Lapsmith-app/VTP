@@ -233,6 +233,7 @@ class Session:
         self.advert = None
         self.info_raw = None
         self.info = None
+        self.info_reject = None
         self.capabilities = frozenset()
         self.chars = {}
         self.services = set()
@@ -270,10 +271,16 @@ class Session:
         self.info_raw = await self.transport.read(refdec.CHAR["info"])
         try:
             self.info = refdec.decode("info", self.info_raw)
-        except refdec.Reject:
+        except refdec.Reject as exc:
+            # Kept rather than reduced to None: the reason IS the finding, and
+            # SPEC.md §4.1 gives the decoder more ways to refuse an Info than a
+            # wrong length -- a capability bit without the bit it requires is
+            # one of them.
             self.info = None
+            self.info_reject = str(exc)
             self.capabilities = frozenset()
             return
+        self.info_reject = None
         caps = self.info["capabilities"]
         self.capabilities = frozenset(
             name for name, bit in refdec.CAPABILITIES.items()

@@ -61,27 +61,46 @@ IMU_SATURATED = 0x04
 MONITOR_PRESENT = 0x01
 
 # SPEC.md §13.5 — how long each channel may be displayed without a refresh, in
-# 100 ms units; 0 never expires. Per channel because the channels differ in
-# kind: a lap time ticking up is wrong within a second of going stale, while a
-# best lap stays true until it is beaten. Several times the expected update
-# interval, because this bounds how wrong a display may be rather than how
-# often a client must talk.
+# 100 ms units. Never zero: every declared channel carries a deadline, so a
+# value the client stops sending always stops being shown.
+#
+# Per channel because the channels differ in kind, and the spread here is the
+# argument for that. A lap time ticking up is wrong within a second of going
+# stale; a best lap stays true until it is beaten, so it gets the longest
+# deadline this field can express rather than none at all. Several times the
+# expected update interval throughout, because this bounds how wrong a display
+# may be rather than how often a client must talk.
+#
+# The three that read 0 used to mean "no deadline of its own", and SPEC.md then
+# derived a device-wide liveness bound to expire them anyway. One deadline per
+# channel replaced both rules; 255 is 25.5 s, the ceiling of a u8 in 100 ms
+# units, and is still a bound.
 MONITOR_MAX_AGE = {
     CH_LAP_TIME: 20,             # 2 s — ticks continuously
     CH_PREDICTED_LAP_TIME: 20,
     CH_SPEED: 10,                # 1 s — changes fastest
     CH_SESSION_TIME: 20,
     CH_SESSION_DISTANCE: 30,
-    CH_LAST_LAP_TIME: 0,         # true until the next lap ends
-    CH_BEST_LAP_TIME: 0,         # true until it is beaten
+    CH_LAST_LAP_TIME: 255,       # 25.5 s — true until the next lap ends
+    CH_BEST_LAP_TIME: 255,       # true until it is beaten
     CH_DELTA_BEST: 20,
-    CH_LAP_NUMBER: 0,            # true until the next lap starts
+    CH_LAP_NUMBER: 255,          # true until the next lap starts
 }
 
 PROTOCOL_MAJOR, PROTOCOL_MINOR = 1, 0
 # SPEC.md §2 — read from the schema rather than restated, so the one place it
 # is defined stays the only place it is defined.
 MIN_ATT_MTU = enc.SCHEMA["protocol"]["min_att_mtu"]
+
+# SPEC.md 9 -- which capability bit owns each opcode, read from the schema
+# rather than restated. A device without the bit answers unsupported_opcode,
+# and answers it BEFORE parsing parameters.
+_CAP_BIT = {b["name"]: 1 << b["bit"]
+            for b in enc.SCHEMA["bitmasks"]["capabilities"]["bits"]}
+OPCODE_CAPABILITY = {
+    op["value"]: (_CAP_BIT[op["capability"]] if op["capability"] else 0)
+    for op in enc.SCHEMA["control"]["opcodes"]
+}
 
 ST_OK, ST_UNSUPPORTED, ST_BAD_PARAMS = 0, 1, 2
 ST_TABLE_FULL, ST_RATE_EXCEEDED = 3, 4
@@ -192,13 +211,28 @@ class VtpDevice:
     rather than sleeping; the default is a real monotonic clock.
     """
 
+    # SPEC.md 4.1 -- what this build declares. Configurable rather than a
+    # constant because three of the bits change how the control plane ANSWERS,
+    # and a device that hard-codes them can only ever demonstrate one half of
+    # each rule. selftest.py builds a device without them to check the other.
+    DEFAULT_CAPABILITIES = (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
+                            | CAP_MONITOR | CAP_MASKED_SUBS
+                            | CAP_ONCHANGE_SUBS)
+
     def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
-                 circuit=None, monitor_channels=None):
+                 circuit=None, monitor_channels=None, capabilities=None):
         self._clock = now_us or self._monotonic_us
         self._origin_ns = time.monotonic_ns()
         self._wall_origin_ms = int(time.time() * 1000)
 
+        self.capabilities = (self.DEFAULT_CAPABILITIES if capabilities is None
+                             else capabilities)
         self.mtu = mtu
+        # SPEC.md 4 -- the ceiling Info publishes. Fixed for the life of the
+        # device: the ATT payload at the largest MTU this build will ever
+        # accept. `self.mtu` moves with the link; this does not.
+        self._device_mtu_ceiling = mtu
+        self._max_notify_bytes = mtu - 3
         self.gps_hz = gps_hz
         self.imu_hz = imu_hz
         self.circuit = circuit or Circuit()
@@ -234,6 +268,17 @@ class VtpDevice:
             monitor_channels if monitor_channels is not None else
             (CH_LAP_TIME, CH_LAST_LAP_TIME, CH_BEST_LAP_TIME,
              CH_DELTA_BEST, CH_LAP_NUMBER, CH_SPEED)))
+        # SPEC.md 13.4 -- more channels than fit in one complete client write
+        # is a device that has made its own rule unsatisfiable. Refused HERE,
+        # where the mistake is, rather than at the first MONITOR_LIST: the
+        # encoder would have caught it too, but by then the device is running
+        # and the traceback names the wrong thing.
+        if len(self._monitor_channels) > enc.MONITOR_MAX_CHANNELS:
+            raise ValueError(
+                f"{len(self._monitor_channels)} monitor channels, but SPEC.md "
+                f"13.4 allows {enc.MONITOR_MAX_CHANNELS}: every write must "
+                f"carry every slot, and more than that does not fit in one "
+                f"write at the minimum ATT MTU")
         # slot -> (value, present, written_at). Absent is a state the display
         # renders, not a value it substitutes -- and SPEC.md §13.5 makes an
         # expired value another way of being absent.
@@ -313,6 +358,13 @@ class VtpDevice:
         self._can_pending, self._can_batch_t0 = [], None
         self._monitor_values.clear()
         self._monitor_seq = None
+        # Everything below was NEGOTIATED, so it describes a link that has
+        # gone. It used to persist until a new central happened to replace it,
+        # so the next connection read this one's MTU and PHY out of Info and
+        # GET_LINK_PARAMS -- reported with the validity bits set, which assert
+        # they are measurements of the link being asked about.
+        self._link = None
+        self.mtu = self._device_mtu_ceiling
 
     def simulate_loss(self, stream, count):
         """Pretend the device accepted `count` items and had to discard them.
@@ -392,28 +444,62 @@ class VtpDevice:
 
     @property
     def notify_bytes(self):
-        """ATT payload available for one notification: MTU minus the 3-byte
-        ATT notification header."""
+        """ATT payload available for one notification on the CURRENT link:
+        the negotiated MTU minus the 3-byte ATT notification header.
+
+        This is what batching is sized against, and it is NOT what Info
+        publishes -- see `max_notify_bytes`.
+        """
         return self.mtu - 3
+
+    @property
+    def max_notify_bytes(self):
+        """SPEC.md 4 -- the largest notification this DEVICE will ever send.
+
+        A ceiling the device chose, not the current link's negotiated value.
+        The two were the same field, and that could not work: a client reads
+        Info immediately after connecting, while this reference only learns the
+        negotiated maximum when a central subscribes, which is later. So the
+        number a client read described the previous link, or the --mtu default,
+        and by the time it was right nobody was going to read it again.
+
+        Making it a fixed ceiling removes the ordering problem rather than
+        solving it. A client sizes its receive buffer from a number that cannot
+        change under it, the device sizes each batch from the negotiated MTU as
+        it always did, and the negotiated value remains available -- properly
+        this time -- from GET_LINK_PARAMS (SPEC.md 9.1), which is a request
+        made after subscription rather than a value read before it.
+        """
+        return self._max_notify_bytes
 
     # -- Info -------------------------------------------------------------
 
     def info(self):
+        """SPEC.md 4 and 4.1.
+
+        Every capacity follows its capability bit. A device declaring no GPS
+        that still reports gps_rate_hz has published a role it does not have,
+        and a client sizing anything from it has been told something false --
+        which is why the encoder refuses to emit one. This method used to
+        report all three groups unconditionally, and only ever ran on a build
+        that declared all three, so nothing noticed.
+        """
+        caps = self.capabilities
+        gps = bool(caps & CAP_GPS)
+        can = bool(caps & CAP_CAN)
+        imu = bool(caps & CAP_IMU)
         return enc.encode_info({
             "protocol_major": PROTOCOL_MAJOR,
             "protocol_minor": PROTOCOL_MINOR,
-            "capabilities": (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
-                             | CAP_MONITOR | CAP_MASKED_SUBS
-                             | CAP_ONCHANGE_SUBS),
-            "gps_rate_hz": self.gps_hz,
-            "gps_max_rate_hz": 25,
-            "can_subscription_slots": CAN_SUBSCRIPTION_SLOTS,
-            "can_max_frames_per_s": CAN_MAX_FRAMES_PER_S,
-            "imu_rate_hz": self.imu_hz,
-            "imu_max_rate_hz": 833,
-            "can_max_payload": 8,
+            "capabilities": caps,
+            "gps_rate_hz": self.gps_hz if gps else 0,
+            "gps_max_rate_hz": 25 if gps else 0,
+            "can_subscription_slots": CAN_SUBSCRIPTION_SLOTS if can else 0,
+            "can_max_frames_per_s": CAN_MAX_FRAMES_PER_S if can else 0,
+            "imu_rate_hz": self.imu_hz if imu else 0,
+            "imu_max_rate_hz": 833 if imu else 0,
             "clock_flags": 0b10,      # survives reconnect; not GNSS-disciplined
-            "max_notify_bytes": self.notify_bytes,
+            "max_notify_bytes": self.max_notify_bytes,
         })
 
     # -- GPS --------------------------------------------------------------
@@ -537,10 +623,19 @@ class VtpDevice:
         return max(1, (self.notify_bytes - header) // (7 + 8))
 
     def _flush_can(self, now):
+        """The pending batch, or None when there is nothing to send.
+
+        SPEC.md 6.2 -- t_base is the bus-arrival time of record 0, so a batch
+        with no record 0 has no honest timestamp to carry. A quiet bus is
+        reported by sending nothing, and the timer below therefore produces a
+        notification only when there is something in it.
+        """
+        if not self._can_pending:
+            return None
         header = {
             "seq": self.SEQ_PLACEHOLDER,   # stamped at delivery (§8.2)
             "dropped": self._take_dropped("can"),
-            "t_base": self._can_batch_t0 if self._can_pending else now,
+            "t_base": self._can_batch_t0,
             "count": len(self._can_pending),
             "flags": 0,
             "reserved": 0,
@@ -552,15 +647,23 @@ class VtpDevice:
     # -- polling ----------------------------------------------------------
 
     def poll(self):
-        """Notifications due now, as (characteristic, payload) pairs."""
+        """Notifications due now, as (characteristic, payload) pairs.
+
+        A stream is produced only if its capability bit is set. SPEC.md 4.1
+        says an inert characteristic never notifies, and this is where that
+        becomes true rather than merely stated: a device configured with only
+        `control` used to emit GPS and IMU regardless, because poll() had
+        never been told what the device claimed to be.
+        """
         now = self.now_us()
         out, self._deferred = self._deferred, []
+        caps = self.capabilities
 
-        if self.gps_hz and now >= self._next_gps_us:
+        if caps & CAP_GPS and self.gps_hz and now >= self._next_gps_us:
             out.append(("gps", self._gps_fix(now)))
             self._next_gps_us = now + round(1_000_000 / self.gps_hz)
 
-        if self.imu_hz:
+        if caps & CAP_IMU and self.imu_hz:
             # A device that has not been polled for a while must not replay the
             # gap. Delivering a backlog means stale samples arriving as fast as
             # the radio will take them, which is worse than losing them: the
@@ -583,14 +686,20 @@ class VtpDevice:
                 if len(self._imu_pending) >= self._imu_capacity():
                     out.append(("imu", self._flush_imu()))
 
-        for frame in self._due_can_frames(now):
+        # The CAN branch is already gated by `_subscriptions`, which stays
+        # empty on a device whose CAN opcodes all answer unsupported_opcode --
+        # but relying on a side effect of the control plane to enforce a
+        # capability is how the rule stops holding the moment either changes.
+        for frame in (self._due_can_frames(now) if caps & CAP_CAN else ()):
             if self._can_batch_t0 is None:
                 self._can_batch_t0 = frame["_t"]
             # SPEC.md §6.1 — dt is 10 us ticks from t_base and spans 655.35 ms,
             # so a batch MUST be flushed before it would overflow.
             dt = (frame["_t"] - self._can_batch_t0) // 10
             if dt > 0xFFFF or len(self._can_pending) >= self._can_capacity():
-                out.append(("can", self._flush_can(now)))
+                batch = self._flush_can(now)
+                if batch is not None:
+                    out.append(("can", batch))
                 self._can_batch_t0 = frame["_t"]
                 dt = 0
             self._can_pending.append({
@@ -601,8 +710,10 @@ class VtpDevice:
 
         # Flush partial batches on a timer so a quiet bus or a slow ODR still
         # delivers, rather than waiting for a batch that may never fill.
-        if self._subscriptions and now >= self._next_can_flush_us:
-            out.append(("can", self._flush_can(now)))
+        if caps & CAP_CAN and self._subscriptions and now >= self._next_can_flush_us:
+            batch = self._flush_can(now)
+            if batch is not None:
+                out.append(("can", batch))
             self._next_can_flush_us = now + 100_000
         return [(c, p) for c, p in out if p is not None]
 
@@ -665,11 +776,17 @@ class VtpDevice:
         Batch sizing had been driven entirely by the --mtu argument, so a
         device told 247 while the link negotiated 185 built notifications the
         link could not carry -- refused by the stack, or truncated, depending
-        on how forgiving it is. SPEC.md §9.1 also requires GET_LINK_PARAMS to
+        on how forgiving it is. SPEC.md 9.1 also requires GET_LINK_PARAMS to
         report the negotiated value or none at all, and a value taken from a
         command-line flag is neither.
+
+        This moves `self.mtu`, which sizes batches, and NOT the ceiling Info
+        publishes: SPEC.md 4 makes `max_notify_bytes` a property of the device
+        rather than of the link. Batches are also never sized above the
+        ceiling, so a central that negotiates a larger MTU than this build was
+        configured for does not silently get batches bigger than Info promised.
         """
-        self.mtu = att_mtu
+        self.mtu = min(att_mtu, self._device_mtu_ceiling)
         self.set_link_params(att_mtu=att_mtu)
 
     def handle_control(self, request, t_rx=None):
@@ -694,6 +811,23 @@ class VtpDevice:
         def reply(status, detail=b""):
             return bytes([opcode, tag, status]) + detail
 
+        # SPEC.md 9 -- availability before parameters. An opcode whose owning
+        # capability this device has not declared is unsupported_opcode, and a
+        # malformed one is STILL unsupported_opcode rather than bad_params:
+        # the two refusals mean different things to a client ("never on this
+        # device" against "try better arguments"), and getting them the wrong
+        # way round either loops a client forever or makes it give up on a
+        # device that would have worked.
+        #
+        # This gate is why `capabilities` is constructor state. Without it a
+        # device declaring only `control` answered ok to CAN_SUBSCRIBE,
+        # GPS_SET_RATE, IMU_SET_RATE and MONITOR_LIST alike.
+        needed = OPCODE_CAPABILITY.get(opcode)
+        if needed is None:
+            return reply(ST_UNSUPPORTED)          # not an opcode we know
+        if needed and not self.capabilities & needed:
+            return reply(ST_UNSUPPORTED)
+
         if opcode == CAN_RESET:
             # Parameterless. It used to clear the table regardless of what
             # followed the tag, so a malformed request still took effect --
@@ -706,6 +840,10 @@ class VtpDevice:
             return reply(ST_OK)
 
         if opcode in (CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK):
+            # SPEC.md 4.1's masked_subscriptions rule is the capability gate
+            # above: the schema names masked_subscriptions as the bit owning
+            # CAN_SUBSCRIBE_MASK. CAN_SUBSCRIBE is owned by `can`, because it
+            # is a separate opcode every CAN device implements.
             want = 7 if opcode == CAN_SUBSCRIBE else 11
             if len(params) != want:
                 return reply(ST_BAD_PARAMS)
@@ -715,6 +853,13 @@ class VtpDevice:
             else:
                 cid, mask, mode, arg = struct.unpack("<IIBH", params)
             if mode > SUB_EVERY_NTH:
+                return reply(ST_BAD_PARAMS)
+            # SPEC.md 4.1 -- refused, never silently substituted. Forwarding
+            # every frame where a client asked for changes only is the
+            # difference between a channel that updates on an event and one
+            # that floods, and the client would have no way to find out.
+            if (mode == SUB_ON_CHANGE
+                    and not self.capabilities & CAP_ONCHANGE_SUBS):
                 return reply(ST_BAD_PARAMS)
             # SPEC.md §6.8 — N of 0 selects no frames at all and is meaningless.
             if mode == SUB_EVERY_NTH and arg == 0:
@@ -803,10 +948,12 @@ class VtpDevice:
             return reply(ST_OK, self._link_params())
 
         if opcode == MONITOR_LIST:
-            if len(params) != 2:
+            # SPEC.md §13.3 — parameterless: the declaration is not paged, so
+            # there is no `start` to take. It used to take one, mirroring
+            # CAN_LIST, and the index could never be anything but zero.
+            if params:
                 return reply(ST_BAD_PARAMS)
-            (start,) = struct.unpack("<H", params)
-            return reply(ST_OK, self._monitor_page(start))
+            return reply(ST_OK, self._monitor_declaration())
 
         return reply(ST_UNSUPPORTED)
 
@@ -825,14 +972,17 @@ class VtpDevice:
 
     # -- Monitor (SPEC.md §13) --------------------------------------------
 
-    def _monitor_page(self, start):
-        room = (self.notify_bytes - 3 - 6) // 4
-        page = self._monitor_channels[start:start + max(0, room)]
+    def _monitor_declaration(self):
+        """SPEC.md §13.3 — every channel this device asks for, in one response.
+
+        No paging and no room calculation. §13.4 caps a device at 15 channels,
+        which is 2 + 15*4 = 62 bytes, and the smallest response this protocol
+        allows carries 97. The declaration always fits by construction.
+        """
         return enc.encode_monitor_list(
-            {"total": len(self._monitor_channels), "index": start,
-             "count": len(page), "reserved": 0},
+            {"count": len(self._monitor_channels), "reserved": 0},
             [{"slot": s, "channel": c, "max_age": MONITOR_MAX_AGE.get(c, 20)}
-             for s, c in page])
+             for s, c in self._monitor_channels])
 
     def handle_monitor_write(self, payload):
         """SPEC.md §13.4 — a client-to-device batch of values.
@@ -842,12 +992,23 @@ class VtpDevice:
         notification: a partly-applied update is a display showing a mixture of
         two moments.
         """
+        # SPEC.md 4.1 -- monitor_values is inert without the bit: the write is
+        # rejected and changes nothing. A device that quietly accepted values
+        # for a role it does not have would then display them.
+        if not self.capabilities & CAP_MONITOR:
+            return "monitor-not-supported"
         hsize, vsize = 4, 6
         if len(payload) < hsize:
             return "length"
         seq, count = struct.unpack_from("<HB", payload, 0)
         if len(payload) != hsize + count * vsize:
             return "length"
+        # SPEC.md §13.4 — a write naming no slots is not a complete statement.
+        # This device already rejected it (the completeness check below sees a
+        # subset of size zero); saying so explicitly is what makes the reason
+        # match the rule rather than arriving as "incomplete".
+        if count == 0:
+            return "empty-update"
 
         known = {slot for slot, _ in self._monitor_channels}
         staged, seen = {}, set()
@@ -911,28 +1072,21 @@ class VtpDevice:
         writing, so silence is the only symptom the device ever sees; without
         this the screen shows a lap time from four minutes ago and the driver
         reading it has no way to tell.
+
+        One rule, applied per channel. There used to be a second — a derived
+        device-wide "liveness bound", the largest max_age declared, which
+        expired the channels that declared none — and the two together were
+        what nobody could keep straight. Every channel carries a deadline now,
+        so the bound has nothing left to catch.
         """
         now = self.now_us()
-        # SPEC.md §13.5 — the liveness bound: the largest max_age declared. No
-        # write at all within it means the client is gone, and then NOTHING
-        # survives, including channels whose own max_age is zero. A best lap
-        # from a session that ended is as wrong as a stopped lap timer and only
-        # less obviously so.
-        bound = max((MONITOR_MAX_AGE.get(c, 20)
-                     for _, c in self._monitor_channels), default=0)
-        last = max((w for _, _, w in self._monitor_values.values()
-                    if w is not None), default=None)
-        client_gone = (bound and last is not None
-                       and now - last > bound * 100_000)
-
         out = []
         for slot, channel in self._monitor_channels:
             value, present, written_at = self._monitor_values.get(
                 slot, (0, False, None))
             max_age = MONITOR_MAX_AGE.get(channel, 20)
-            expired = (present and max_age and written_at is not None
-                       and now - written_at > max_age * 100_000)
-            if client_gone or expired:
+            if (present and written_at is not None
+                    and now - written_at > max_age * 100_000):
                 value, present = 0, False
             out.append((slot, channel, value, present))
         return out
@@ -972,7 +1126,12 @@ class VtpDevice:
         )
         validity = 0
         for bit, names in GROUPS:
-            if all(link.get(n) for n in names):
+            # PRESENCE, not truthiness. `all(link.get(n) ...)` read a
+            # peripheral_latency of 0 as unknown, and 0 is not only valid but
+            # the value SPEC.md 2 says a device SHOULD request while streaming
+            # -- so the one connection-parameter group a conforming device is
+            # most likely to have reported the whole of every field as absent.
+            if all(link.get(n) is not None for n in names):
                 validity |= 1 << bit
                 for n in names:
                     fields[n] = link[n]

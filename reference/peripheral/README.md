@@ -43,7 +43,7 @@ permission has to be granted again.
 ### Linux
 
 ```sh
-pip install bless
+pip install -r requirements.txt   # pinned; see the note in that file
 python3 serve.py                  # add --no-display for headless
 ```
 
@@ -51,8 +51,138 @@ python3 serve.py                  # add --no-display for headless
 
 ```sh
 python3 selftest.py               # verifies the device against the reference decoder
+python3 transport_selftest.py     # verifies the pump against a fake GATT link
 python3 display.py                # the panel alone, with fake data
 ```
+
+---
+
+## What this backend cannot tell you
+
+**A CoreBluetooth peripheral is never told about a connect or a disconnect.**
+The delegate has exactly two central-facing callbacks —
+`didSubscribeToCharacteristic` and `didUnsubscribeFromCharacteristic` — and no
+connect/disconnect pair at all. bless 0.3.0's `is_connected()` therefore
+returns `len(_central_subscriptions) > 0`: *at least one central is subscribed
+to at least one characteristic*.
+
+That is the only link-ish signal the platform offers, and it differs from a
+real connection in a way you can trip over:
+
+| What happened | What this peripheral sees |
+| --- | --- |
+| A central connects and subscribes | connected |
+| A central unsubscribes from **everything**, link still up | disconnected |
+| ...and then resubscribes | a new connection |
+| A central disconnects | disconnected |
+| The same phone reconnects | a new connection |
+
+Rows two and three are the ones that are not true. The peripheral resets
+anyway — sequence numbers restart and the CAN subscription table is cleared —
+and that is deliberate rather than an oversight, because the two possible
+mistakes are not equal:
+
+- Resetting on a resubscribe costs the client its CAN table and restarts `seq`.
+  A client already has to handle both, because that is what every reconnection
+  does, and it can see the restart in the next notification.
+- *Not* resetting on a real reconnection hands the new connection the old one's
+  sequence numbers and subscription table. SPEC.md §8.2 exists so a client
+  never has to tell a reconnection from a wrap and §9.2 so it never inherits
+  state it did not install; a client cannot detect either failure.
+
+The second is silent and unrecoverable, so the ambiguous case errs towards
+resetting. The log says which it probably was: a rising edge from the same
+central identity is most likely a resubscribe, a different identity is
+certainly a new central. CoreBluetooth keeps `CBCentral.identifier` stable
+across connections to the same peer, so identity is a hint for the log and
+never a reason to skip a reset.
+
+`reference/peripheral/gattsim.py` can be told to reproduce this
+(`bless_semantics=True`), and `transport_selftest.py` pins the behaviour above
+so it cannot drift.
+
+**A BlueZ peripheral has a real `InterfacesRemoved` signal** and does not need
+any of this. If you port `serve.py` to it, feed that edge straight into
+`ConnectionTracker.update()` and the names mean what they say.
+
+---
+
+## The real-radio smoke test
+
+Everything else in this repository — the conformance corpus, `selftest.py`,
+`transport_selftest.py` — runs with no Bluetooth adapter. That covers the
+protocol thoroughly and covers **the radio not at all**. `smoketest.py` is the
+missing half: a real client, over a real link, checking the things a fake link
+cannot reach.
+
+It needs **two machines**, because a host adapter cannot usefully scan for a
+peripheral it is itself presenting.
+
+Both commands are run from **this directory**, so the install and the script
+agree about where they are:
+
+```sh
+cd reference/peripheral
+
+# machine A — the device.
+#   Linux:
+python3 serve.py --no-display
+#   macOS: it must run from the app bundle, or the OS kills it before it can
+#   ask for Bluetooth. `open -n`, not plain `open` — see "Running it" above.
+./make_macos_app.sh          # once
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display
+
+# machine B — the client
+pip install -r requirements-client.txt      # bleak, the central-role library
+python3 smoketest.py
+```
+
+**Pair the two machines first on Linux and Windows.** `serve.py` defaults to
+requiring an encrypted link on everything except Info (SPEC.md §10). macOS
+pairs on demand when an encrypted characteristic is first touched; BlueZ and
+WinRT do not — they answer *Insufficient Authentication* and bleak raises. So:
+
+```sh
+bluetoothctl pair <address>     # Linux
+# Windows: Settings > Bluetooth & devices > Add device
+```
+
+`smoketest.py` recognises that error and says this rather than reporting a
+protocol fault. For a first bring-up, `serve.py --encrypt none` removes the
+question entirely.
+
+Note that `mtu_size` on BlueZ reports the ATT default of 23 rather than the
+negotiated value, so the smoke test says the MTU floor went unchecked on Linux
+instead of failing a healthy link. The notification-size checks still run, and
+they are the ones that matter.
+
+What it checks, and why each one needs hardware:
+
+| Check | Why a fake link cannot reach it |
+| --- | --- |
+| Discovery by service UUID | The advertisement has to fit in 31 bytes and actually be broadcast (§3.3) |
+| Info decodes and satisfies §4.1 | Nothing else reads Info off a real characteristic |
+| Negotiated ATT MTU ≥ 100 | §2's floor is a property of the two stacks, not of this code |
+| No notification exceeds `max_notify_bytes` | §4.2 — the ceiling bounds the device on a link it did not choose |
+| An indication arrives on Control | §9's response path is a CCCD write and an ATT indication |
+| `TIME_SYNC` returns `t_device_tx ≥ t_device_rx` | §9.7, measured across a real round trip |
+| Every stream decodes with the reference decoder | The bytes have crossed a radio |
+| Device timestamps advance, and the streams overlap | §8.1's one clock, observed in real time |
+| `seq` restarts at 0 on the second connection | §8.2 — needs a link that genuinely dropped |
+
+A sequence *gap* is reported but is not a failure: §8.2 makes a gap the
+transport losing what the device sent, which is a fact about the link and the
+distance between the two machines rather than a device fault. A *repeat* is a
+failure.
+
+`--no-reconnect` skips the second connection, and says so — §8.2's
+per-connection restart then goes unchecked.
+
+**This has not been run yet.** The script's decode and inspection half is
+exercised by `selftest.py` against the software device's own output, including
+a deliberately failing case, so it is known to work on known-good input. Its
+BLE half has never met an adapter. That is the single largest gap in this
+repository and the README says so on purpose.
 
 ---
 
@@ -201,9 +331,9 @@ as broken.
 Run each in turn:
 
 ```bash
-open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt all
-open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt control
-open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt none
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt all
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt control
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt none
 ```
 
 The log names the posture at startup, and `notify-subscribed:` names the

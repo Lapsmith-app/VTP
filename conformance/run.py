@@ -42,9 +42,31 @@ ROLES = {
     "monitor": {"monitor_list", "monitor_update"},
 }
 
-# A role whose records only exist if another one does. CAN_LIST is a Control
-# response about CAN, so it is reachable only by a device with both.
-IMPLIES = {"can": ("control",), "monitor": ("control",)}
+# A role whose records only exist if another one does. This is not the runner's
+# own rule any more: SPEC.md §4.1 makes `can` and `monitor` require `control`
+# normatively, and the table below is read from the schema that generates it.
+#
+# It used to be a hard-coded dict, which meant the runner enforced an
+# implication the specification did not state — canonical Info vectors blessed
+# a CAN device with no Control characteristic while `--roles can` demanded
+# control responses from it. Two answers to one question, in one repository.
+def _implications():
+    import yaml
+    schema = yaml.safe_load((ROOT / "schema" / "vtp1.yaml").read_text())
+    bits = schema["bitmasks"]["capabilities"]["bits"]
+    implies = {}
+    for b in bits:
+        # Only capabilities that are also conformance roles: `can_fd` implies
+        # `can`, but there is no `can_fd` role to run.
+        if b["name"] not in ROLES:
+            continue
+        needed = tuple(r for r in (b.get("implies") or []) if r in ROLES)
+        if needed:
+            implies[b["name"]] = needed
+    return implies
+
+
+IMPLIES = _implications()
 
 
 def load(roles=None):

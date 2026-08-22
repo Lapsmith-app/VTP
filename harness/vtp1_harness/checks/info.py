@@ -9,8 +9,8 @@ async def info_decodes(s):
     if s.info_raw is None:
         raise Fail("Info could not be read")
     if s.info is None:
-        raise Fail(f"Info did not decode: {len(s.info_raw)} bytes, "
-                   f"{refdec.size('info')} required",
+        raise Fail(f"Info did not decode: {s.info_reject}. It is "
+                   f"{len(s.info_raw)} byte(s); §4 defines {refdec.size('info')}",
                    payload=s.info_raw.hex())
 
 
@@ -44,31 +44,58 @@ async def info_reserved_capabilities(s):
             capabilities=f"0x{s.info['capabilities']:08x}")
 
 
-@check(id="info.capacities", section="4", phase="info", severity="MUST",
-       title="Capacity fields agree with the declared capabilities")
+@check(id="info.capability_implications", section="4.1", phase="info",
+       severity="MUST",
+       title="Every capability bit brings the bits it requires")
+async def info_capability_implications(s):
+    if s.info_raw is None or len(s.info_raw) < refdec.size("info"):
+        raise Skip("Info could not be read")
+    # Read from the bytes, not the decoded record. The reference decoder rejects
+    # an Info that breaks an implication -- correctly, because a client MUST
+    # treat one as non-conforming -- which would leave this check skipping on
+    # exactly the device it exists to describe.
+    declared = _declared_capabilities(s.info_raw)
+    broken = []
+    for capability, required in refdec.IMPLIES.items():
+        if capability not in declared:
+            continue
+        missing = [r for r in required if r not in declared]
+        if missing:
+            broken.append(f"{capability} requires {', '.join(missing)}")
+    if broken:
+        # A client MUST treat this exactly as it treats a protocol_major
+        # mismatch, and MUST NOT guess which half was meant: monitor without
+        # control has asked for values through an opcode it cannot answer, and
+        # can_fd without can has described a bus it does not have.
+        raise Fail("; ".join(broken) + ". §4.1 makes the implications normative "
+                   "and a client MUST NOT guess which half was meant",
+                   declared=sorted(declared))
+
+
+@check(id="info.capacities", section="4.1", phase="info", severity="MUST",
+       title="Capacity fields agree with the capabilities that govern them")
 async def info_capacities(s):
     if s.info is None:
         raise Skip("Info did not decode")
-    i = s.info
     problems = []
-    # "A capacity field of zero means none, not unspecified" -- so the two
-    # directions are both meaningful, and both are checkable.
-    if not s.has("gps") and (i["gps_rate_hz"] or i["gps_max_rate_hz"]):
-        problems.append("no GPS capability, but a GPS rate is non-zero")
-    if not s.has("imu") and (i["imu_rate_hz"] or i["imu_max_rate_hz"]):
-        problems.append("no IMU capability, but an IMU rate is non-zero")
-    if not s.has("can") and (i["can_subscription_slots"] or i["can_max_frames_per_s"]):
-        problems.append("no CAN capability, but a CAN capacity is non-zero")
-    if s.has("gps") and not i["gps_max_rate_hz"]:
-        problems.append("GPS is declared but gps_max_rate_hz is 0, which means "
-                        "none -- the device has said it can produce no fixes")
-    if s.has("imu") and not i["imu_max_rate_hz"]:
-        problems.append("IMU is declared but imu_max_rate_hz is 0")
-    if s.has("can") and not i["can_subscription_slots"]:
-        problems.append("CAN is declared but can_subscription_slots is 0, so no "
-                        "client can ever ask for a frame")
+    for capability, fields in refdec.CAPACITY_FIELDS.items():
+        # "A capacity field of zero means none, not unspecified", so both
+        # directions carry meaning and both are checkable. The pairing of field
+        # to bit is the schema's, not this file's.
+        if s.has(capability):
+            if not s.info[fields[-1]]:
+                problems.append(
+                    f"{capability} is declared and {fields[-1]} is 0, which "
+                    f"means none -- the device has said it can do nothing")
+            continue
+        nonzero = [f for f in fields if s.info[f]]
+        if nonzero:
+            problems.append(
+                f"{capability} is not declared but "
+                f"{', '.join(nonzero)} {'is' if len(nonzero) == 1 else 'are'} "
+                f"non-zero, publishing a role the device does not have")
     if problems:
-        raise Fail("; ".join(problems), info=_summary(i))
+        raise Fail("; ".join(problems), info=_summary(s.info))
 
 
 @check(id="info.rate_ceiling", section="4", phase="info", severity="SHOULD",
@@ -86,19 +113,38 @@ async def info_rate_ceiling(s):
                    f"maximum", info=_summary(i))
 
 
-@check(id="info.can_payload", section="4", phase="info", severity="MUST",
+@check(id="info.reserved_fields", section="4", phase="info", severity="MUST",
+       title="Reserved bytes of Info are zero")
+async def info_reserved_fields(s):
+    if s.info is None:
+        raise Skip("Info did not decode")
+    # Derived from the schema, so a byte that gains a meaning in a later minor
+    # stops being checked here the moment the schema says it has one. Byte 20
+    # held can_max_payload until §4.2 made the largest payload follow from the
+    # capability bits, and two statements of one fact became one.
+    reserved = [f["name"] for f in refdec.SCHEMA["records"]["info"]["fields"]
+                if f["name"].startswith("reserved")]
+    nonzero = [(name, s.info[name]) for name in reserved if s.info[name]]
+    if nonzero:
+        raise Fail(
+            "; ".join(f"{n} is {v}" for n, v in nonzero)
+            + ". A reserved field MUST be written as zero, so that a client "
+              "reading one in a later minor knows it came from a device that "
+              "meant it", info_hex=s.info_raw.hex())
+
+
+@check(id="info.can_payload", section="4.2", phase="info", severity="OBSERVE",
        requires=("can",),
-       title="can_max_payload matches the declared CAN flavour")
+       title="The largest CAN payload this device can carry")
 async def info_can_payload(s):
     if s.info is None:
         raise Skip("Info did not decode")
-    expected = 64 if s.has("can_fd") else 8
-    got = s.info["can_max_payload"]
-    if got != expected:
-        raise Fail(
-            f"can_max_payload is {got}; a device declaring "
-            f"{'CAN FD' if s.has('can_fd') else 'classic CAN'} carries {expected}",
-            can_fd=s.has("can_fd"))
+    payload = refdec.can_max_payload(s.capabilities)
+    raise Observe(
+        f"{payload} bytes -- {'CAN FD' if s.has('can_fd') else 'classic CAN'}. "
+        f"§4.2 derives this from the capability bits; it is no longer a field, "
+        f"so there is nothing here that can disagree with itself",
+        can_max_payload=payload)
 
 
 @check(id="info.notify_bytes", section="4", phase="info", severity="MUST",
@@ -177,6 +223,12 @@ async def adv_service_data_agrees(s):
         # Advisory, and a client MUST read Info regardless -- but a scan list
         # showing the wrong roles is a user-visible defect.
         raise Fail("; ".join(problems), service_data=data.hex())
+
+
+def _declared_capabilities(raw):
+    import struct
+    (word,) = struct.unpack_from("<I", raw, refdec.offset("info", "capabilities"))
+    return {name for name, bit in refdec.CAPABILITIES.items() if word & (1 << bit)}
 
 
 def _summary(info):

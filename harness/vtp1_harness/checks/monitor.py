@@ -19,6 +19,15 @@ def _control(s):
     return s.control
 
 
+def _detail(response, record):
+    try:
+        return response.detail_as(record)
+    except refdec.Reject as exc:
+        raise Fail(f"the detail of a successful {response.opcode_name} did not "
+                   f"decode as {record}: {exc}",
+                   detail=response.detail.hex()) from None
+
+
 def _write(seq, values):
     """`values` is a sequence of (slot, present, value)."""
     out = bytearray(struct.pack("<HBB", seq, len(values), 0))
@@ -40,47 +49,27 @@ async def _send(s, payload):
 
 @check(id="monitor.declaration", section="13.3", phase="monitor", severity="MUST",
        requires=("monitor",),
-       title="MONITOR_LIST returns a well-formed declaration")
+       title="MONITOR_LIST returns the whole declaration in one response")
 async def monitor_declaration(s):
     c = _control(s)
-    entries, pages, last = await c.pages(refdec.OPCODE["MONITOR_LIST"],
-                                         "monitor_list")
-    if not last.ok:
-        raise Fail(f"MONITOR_LIST was answered {last.status_name}. A device "
+    # Not paged, and takes no parameters: §13.4 caps a device at 15 channels,
+    # which is 62 bytes inside the 97 a response carries at the minimum ATT MTU,
+    # so a page index could never be anything but zero.
+    response = await c.request(refdec.OPCODE["MONITOR_LIST"])
+    if not response.ok:
+        raise Fail(f"MONITOR_LIST was answered {response.status_name}. A device "
                    f"declaring the Monitor capability has to be able to say "
-                   f"which channels it wants", response=last.raw.hex())
-    for response, page in pages:
-        if page["page"]["reserved"] != 0:
-            raise Fail("monitor_page.reserved is not zero",
-                       page=response.detail.hex())
-    total = pages[0][1]["page"]["total"]
-    if total != len(entries):
-        raise Fail(f"the declaration says {total} channel(s) and paging "
-                   f"produced {len(entries)}", entries=len(entries))
+                   f"which channels it wants", response=response.raw.hex())
+    s.state["monitor_raw"] = response.detail
+    declaration = _detail(response, "monitor_list")
+    if declaration["declaration"]["reserved"] != 0:
+        raise Fail("monitor_declaration.reserved is not zero; Appendix A holds "
+                   "it for declaration metadata", detail=response.detail.hex())
+    entries = declaration["entries"]
     if not entries:
         raise Fail("the Monitor capability is declared and the device asks for "
                    "no channels, so no client can supply anything")
     s.state["monitor_channels"] = entries
-
-
-@check(id="monitor.liveness_bound", section="13.5", phase="monitor",
-       severity="MUST", requires=("monitor",),
-       title="At least one channel declares a non-zero max_age")
-async def monitor_liveness_bound(s):
-    entries = s.state.get("monitor_channels")
-    if not entries:
-        raise Skip("no declaration to check")
-    if not any(e["max_age"] for e in entries):
-        # A max_age of zero is "no deadline of its own", not "immortal". With
-        # every channel at zero there is no liveness bound at all, and a client
-        # that crashes leaves the screen asserting a lap time from four minutes
-        # ago -- indefinitely, with the link still up.
-        raise Fail(
-            "every declared channel has max_age 0, so the device has no "
-            "liveness bound. §13.5 requires a non-zero max_age on at least one "
-            "channel: it is what makes a client that has stopped talking "
-            "visible on the screen",
-            channels=[(e["slot"], e["channel"], e["max_age"]) for e in entries])
 
 
 @check(id="monitor.channels", section="13.2", phase="monitor", severity="OBSERVE",
@@ -93,7 +82,7 @@ async def monitor_channels(s):
     described, unknown = [], []
     for e in entries:
         name = refdec.CHANNELS.get(e["channel"])
-        age = "no deadline" if not e["max_age"] else f"{e['max_age'] / 10:.1f}s"
+        age = f"{e['max_age'] / 10:.1f}s"
         if name is None:
             unknown.append(e["channel"])
             described.append(f"slot {e['slot']}: unknown channel "
@@ -237,6 +226,6 @@ async def monitor_freshness(s):
     if not ages:
         raise Skip("no channel declares a deadline")
     raise Observe(
-        f"liveness bound is {max(ages) / 10:.1f}s; the shortest deadline is "
-        f"{min(ages) / 10:.1f}s. Verify expiry on the device's own display",
-        liveness_bound_s=max(ages) / 10, shortest_s=min(ages) / 10)
+        f"the shortest deadline is {min(ages) / 10:.1f}s and the longest "
+        f"{max(ages) / 10:.1f}s. Verify expiry on the device's own display",
+        shortest_s=min(ages) / 10, longest_s=max(ages) / 10)

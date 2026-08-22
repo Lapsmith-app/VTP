@@ -13,25 +13,35 @@ clock, with no lossy packing.
 
 ## Status
 
-> **Draft — `v0.x`. The wire format may change without notice.**
+> **`v0.9` release candidate.** The wire format is stable enough to build
+> against and is not yet frozen.
 >
-> The compatibility guarantees in SPEC.md §11 take effect at `v1.0` and not
-> before. Do not ship hardware against this yet.
+> The compatibility guarantees in SPEC.md §11 take effect at `v1.0`. One thing
+> stands between here and there, and it is the row marked **not yet done**
+> below.
 
 | | |
 | --- | --- |
-| Specification | Complete |
+| Specification | Believed internally consistent; §4.1 fixes the profile |
 | UUID allocation | Frozen |
-| Conformance corpus | 115 vectors across 9 record types |
-| Reference decoders | C and Python, both passing |
+| Conformance corpus | 125 vectors across 9 record types, and 35 producer cases |
+| Reference decoders | C and Python, both passing every vector |
+| Reference encoders | C and Python, both passing every producer case |
 | Software peripheral | A synthetic device, verified against the reference decoder |
-| Device harness | Connects to real firmware on Windows, macOS and Linux |
-| Reference **firmware** | **Not written.** VTP/1 is unproven on real hardware. |
+| Device harness | `harness/` checks a device on Windows, macOS or Linux; verified in-process, not yet over a radio |
+| **Real-radio smoke test** | **Not yet run.** `reference/peripheral/smoketest.py` exists; no one has pointed it at hardware. |
+| Reference **firmware** | Not written. VTP/1 is unproven on a microcontroller. |
 | Independent implementations | None yet |
 
-That last row is the honest measure of a protocol's maturity, and it is why
-this is `v0.x`. A specification with no second implementer is a file format
-with extra steps.
+Everything in this repository is tested without a Bluetooth adapter, which
+covers the protocol thoroughly and covers the radio not at all. Until
+`smoketest.py` has been run between two machines, nothing here has been over
+the air, and that is the gap worth knowing about before you build to it.
+
+The last row is the honest measure of a protocol's maturity. A specification
+with no second implementer is a file format with extra steps — but for a
+hobbyist protocol that is a reason to publish and find out, not a reason to
+wait.
 
 ## What problem it solves
 
@@ -56,15 +66,26 @@ plausible wrong value*:
 ## Quickstart
 
 ```sh
-# Build the C reference decoder and run the conformance suite against it
+# The Python reference, the generator and every check read schema/vtp1.yaml,
+# so a YAML parser is needed before any of them will run.
+pip install -r requirements.txt
+
+# Build the C reference and run the conformance suite against it
 make -C reference/c
 python3 conformance/run.py --impl "reference/c/vtp1_cli"
 
 # Same corpus, independent Python implementation
 python3 conformance/run.py --impl "python3 reference/python/vtp1.py"
 
+# The other direction: what an encoder must refuse
+python3 conformance/produce.py --impl "reference/c/vtp1_producer"
+python3 conformance/produce.py --impl "python3 reference/python/vtp1_produce.py"
+
 # Regenerate every derived artefact from the schema
 python3 tools/generate.py
+
+# Or run everything CI runs, in one command
+tools/ci.sh            # --quick skips the mutation sweep
 
 # Run a synthetic VTP/1 device you can point a real client at
 python3 reference/peripheral/selftest.py      # verify it; needs no Bluetooth

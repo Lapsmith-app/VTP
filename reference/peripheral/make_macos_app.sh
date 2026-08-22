@@ -22,11 +22,13 @@
 #
 # Usage:
 #   ./make_macos_app.sh
-#   open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py"
+#   open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py"
 #   tail -f /tmp/vtp-peripheral.log
 #
-# Note `open <path>`, not `open -a <path>`: the -a form takes an application
-# NAME to look up, not a path, and fails with "Unable to find application".
+# Note `open -n <path>`: `-a` takes an application NAME rather than a path and
+# fails with "Unable to find application", and WITHOUT `-n` macOS activates an
+# already-running copy and silently discards the arguments -- so a second run
+# with different flags quietly reuses the first run's.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,8 +100,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-echo "==> installing dependencies into the bundle"
-"$APP/Contents/MacOS/VTPPeripheral" -m pip install -q --break-system-packages bless pyyaml
+# From the pinned files, not from floating names. `pip install bless pyyaml`
+# resolved whatever was newest on the day the bundle happened to be built, so
+# two people following these instructions a month apart ran different bless
+# versions against the same peripheral -- and the bundle is exactly the thing
+# nobody rebuilds, so the drift is invisible until the radio misbehaves.
+echo "==> installing pinned dependencies into the bundle"
+# requirements.txt here already pulls in the root file, which carries PyYAML.
+"$APP/Contents/MacOS/VTPPeripheral" -m pip install -q --break-system-packages \
+    -r "$HERE/requirements.txt"
 
 echo "==> signing"
 codesign --force --deep --sign - "$APP"
@@ -111,7 +120,7 @@ Built $APP
 Run it. Note 'open <path>' -- NOT 'open -a', which takes an application name
 rather than a path, and NOT the binary directly:
 
-    open "$APP" --args "$HERE/serve.py"
+    open -n "$APP" --args "$HERE/serve.py"
     tail -f /tmp/vtp-peripheral.log
 
 macOS will prompt for Bluetooth the first time. After you allow it, the app

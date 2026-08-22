@@ -239,6 +239,13 @@
       "must_reject": "period-zero"
     },
     {
+      "name": "empty-batch",
+      "desc": "A header with no samples. SPEC.md 7 -- t_base IS the acquisition time of sample 0, so a batch with no sample 0 carries a timestamp naming a sample that does not exist. A device with nothing to report sends nothing. This is where IMU differs from CAN, whose count MAY be zero because a CAN t_base describes an observed bus rather than a sample.",
+      "record": "imu_batch",
+      "hex": "17000000c0cf6a0000000000b004000000030000",
+      "must_reject": "empty-batch"
+    },
+    {
       "name": "count-exceeds-payload",
       "desc": "Header declares four samples, one is present. MUST be rejected: a decoder that trusts count without checking the buffer reads three samples of whatever follows the notification.",
       "record": "imu_batch",

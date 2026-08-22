@@ -25,21 +25,27 @@ It cannot ask a device a question. So nothing in this repository tested:
 | | |
 | --- | --- |
 | §9 | the entire control plane — what a device *answers*, not what a client decodes |
+| §4.1 | that the attribute table is the fixed one, and that an absent capability leaves an *inert* characteristic rather than no characteristic |
 | §8.2 | that `seq` starts at 0 on the first notification of a connection |
 | §8.1 | that the three streams are on one clock rather than three |
 | §9.2 | that the subscription table is empty after a reconnect |
 | §9.3 | that a frame matching two subscriptions is forwarded once |
+| §9.8 | that a rate answered `ok` is the rate Info then reports |
 | §13 | Monitor, which is a thing a device *receives* |
 | §5.1 | that a field whose validity bit is clear is actually zero |
 
 Every one of those is a real firmware bug that produces payloads decoding
 perfectly. This harness is where they are caught.
 
-It never restates a rule: every payload it sees goes through
+It never restates a rule. Every payload it sees goes through
 [`reference/python/vtp1.py`](../reference/python/vtp1.py), the same decoder the
-corpus tests, reading the same `schema/vtp1.yaml`. What the harness adds is
-everything a decoder cannot see — what a device did over time, and what it said
-when asked.
+corpus tests, reading the same `schema/vtp1.yaml` — and the tables it works
+from are the schema's too: §4.1's attribute matrix, the capability
+implications, the capacity fields each bit governs, and which capability owns
+each opcode. A hand-copy of any of those here would be one more statement of a
+fact the specification has just finished reducing to one. What the harness adds
+is everything a decoder cannot see: what a device did over time, and what it
+said when asked.
 
 ---
 
@@ -125,8 +131,10 @@ Three things are permanently in it:
   Bluetooth stack sit between the device and every arrival time measured here,
   and they are worth tens of milliseconds against a clock specified in
   microseconds. Ordering and internal consistency are checked; accuracy is not.
-- **§13.5's freshness expiry.** It happens on the device's own display and puts
-  nothing on the wire. Stop writing and watch the screen.
+- **§13.5's freshness expiry.** Every declared channel carries a `max_age` and
+  the harness checks it is non-zero, but what happens when one lapses happens on
+  the device's own display and puts nothing on the wire. Stop writing and watch
+  the screen.
 
 A clean run is evidence about a device. It is not a conformance certificate, and
 the report says so on its last line.
@@ -167,6 +175,14 @@ This does two things. It runs every check against the software peripheral in
 because a tool that fails a conforming device is worse than no tool: the first
 thing anybody does with a red result is start changing firmware.
 
+It then runs against devices that declare only some of the roles — GPS alone,
+GPS with Control — and requires **no failures** there either. §4.1 is precise
+about what a partial device still owes a client, and most of what the harness
+checks has to become a skip rather than a failure. It is also the only way to
+reach the inert half of the specification: a CCCD write on a stream whose
+capability bit is clear, and an opcode whose owning capability the device has
+not declared.
+
 Then it seeds one specific defect at a time and requires that a specific check
 catches it:
 
@@ -177,7 +193,8 @@ uv run vtp1-harness --loopback --fault seq_starts_at_one
 
 Each entry in `transport.FAULTS` is a real mistake — a sequence number that
 starts at 1, a `TIME_SYNC` that reads its clock once and reports it as both
-timestamps, a subscription table that survives a reconnect — and each exists
+timestamps, a subscription table that survives a reconnect, a `capabilities`
+word missing a bit another bit requires — and each exists
 because some check here claims to catch it. The selftest fails if a fault is
 defined with no check named against it. It is the argument
 `tools/check_corpus.py` makes about the byte vectors, applied to the rules that

@@ -109,8 +109,30 @@ def enum_value(enum, name):
                 if m["name"] == name)
 
 
+#: SPEC.md §4.1 -- the attribute table, the capability implications and the
+#: capacity fields each bit governs, all generated from the same schema the
+#: specification's own tables are. Consumed rather than restated: a hand-copy
+#: here would be a third statement of a fact the repository has just finished
+#: reducing to one.
+PROFILE = SCHEMA["profile"]
+PROFILE_CHARS = {c["name"]: c for c in PROFILE["characteristics"]}
+CAPACITY_FIELDS = PROFILE["capacity"]
+IMPLIES = {b["name"]: tuple(b.get("implies", ()))
+           for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
+
 OPCODE = {op["name"]: op["value"] for op in SCHEMA["control"]["opcodes"]}
 OPCODE_NAME = {v: k for k, v in OPCODE.items()}
+#: SPEC.md §9 -- every opcode is owned by a capability, and availability is
+#: decided before parameters. None means the opcode belongs to the link or the
+#: clock, which every device has.
+OPCODE_CAPABILITY = {op["name"]: op.get("capability")
+                     for op in SCHEMA["control"]["opcodes"]}
+OPCODE_PARAM_SIZE = {
+    "CAN_RESET": 0, "CAN_SUBSCRIBE": 7, "CAN_SUBSCRIBE_MASK": 11,
+    "CAN_UNSUBSCRIBE": 2, "CAN_LIST": 2, "GPS_SET_RATE": 2,
+    "IMU_SET_RATE": 2, "TIME_SYNC": 0, "GET_LINK_PARAMS": 0,
+    "MONITOR_LIST": 0,
+}
 STATUS = enum_values("status")
 STATUS_VALUE = {name: value for value, name in STATUS.items()}
 CAPABILITIES = bits("capabilities")
@@ -122,6 +144,19 @@ MASK_EXACT = 0x3FFFFFFF
 # SPEC.md §13.4 — as many values as fit beside a monitor_header in one write at
 # the minimum ATT MTU. Taken from the decoder rather than recomputed.
 MONITOR_MAX_CHANNELS = _ref.MONITOR_MAX_CHANNELS
+
+
+def can_max_payload(capabilities):
+    """SPEC.md §4.2 — the largest CAN payload, which follows from the bits.
+
+    Info carried this as a byte until every value it could hold turned out to be
+    decided by the capability bits already, so two statements of one fact
+    existed and an implementation could publish them disagreeing. A client
+    computes it; so does this.
+    """
+    if "can" not in capabilities:
+        return 0
+    return 64 if "can_fd" in capabilities else 8
 
 
 def absent_but_nonzero(record, payload, bitmask, base=0):

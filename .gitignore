@@ -1,4 +1,10 @@
+# Built binaries. `make -C reference/c` produces the first two; `make san`
+# produces the sanitised copies and the C-API contract test.
 reference/c/vtp1_cli
+reference/c/vtp1_producer
+reference/c/encode_selftest
+reference/c/vtp1_cli_san
+reference/c/vtp1_producer_san
 *.o
 __pycache__/
 .DS_Store

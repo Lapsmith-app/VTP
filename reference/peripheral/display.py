@@ -63,7 +63,14 @@ def format_value(channel, value, present):
     if channel == SPEED:
         return f"{value * 0.0036:.1f}"          # mm/s -> km/h
     if channel == SESSION_DISTANCE:
-        return f"{value / 1000:.2f}" if value >= 1000 else str(value)
+        # Always kilometres, to three places. The unit is part of the static
+        # cell label and cannot change per value, so a formatter that switched
+        # to bare metres below 1 km rendered 999 m as "999" under a heading
+        # that said "km" -- a thousand-fold error, displayed confidently, on
+        # the one screen a driver reads at speed. Three decimals of a
+        # kilometre is metre resolution, which is the channel's own unit, so
+        # nothing is lost by never switching.
+        return f"{value / 1000:.3f}"
     return str(value)
 
 

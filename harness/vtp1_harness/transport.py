@@ -278,6 +278,13 @@ FAULTS = {
     "drop_fourth_request": "SPEC.md §9 — a fourth outstanding request is silently discarded",
     "phy_half_reported": "SPEC.md §9.1 — the phy validity bit is set with only one PHY known",
     "list_reserved_nonzero": "SPEC.md §9.5 — a reserved page byte is not zero",
+    "missing_characteristic": "SPEC.md §4.1 — a characteristic is absent rather than inert",
+    "extra_characteristic": "SPEC.md §4.1 — the service carries a characteristic it must not",
+    "inert_cccd_rejected": "SPEC.md §4.1 — a CCCD write on an inert stream is refused",
+    "implication_broken": "SPEC.md §4.1 — a capability bit without the bit it requires",
+    "opcode_capability_late": "SPEC.md §9 — an unowned opcode answered bad_params, not unsupported_opcode",
+    "rate_not_applied": "SPEC.md §9.8 — a rate answered ok and never applied",
+    "info_reserved_nonzero": "SPEC.md §4 — a reserved byte of Info is not zero",
 }
 
 
@@ -324,7 +331,7 @@ class LoopbackTransport(Transport):
             service_data={refdec.SERVICE_UUID: bytes([minor, caps, 0x01])},
         )]
 
-    _declared = None
+    _default_capabilities = None
 
     def _capabilities(self):
         """What the peripheral itself declares, read from its own Info.
@@ -333,14 +340,20 @@ class LoopbackTransport(Transport):
         the GATT layout and Info cannot disagree for any reason except a fault
         this transport was asked to inject.
         """
-        if LoopbackTransport._declared is None:
-            probe = _load_peripheral().VtpDevice()
-            (caps,) = struct.unpack_from(
-                "<I", probe.info(), refdec.offset("info", "capabilities"))
-            LoopbackTransport._declared = caps
-        caps = LoopbackTransport._declared
+        caps = self._device_kwargs.get("capabilities")
+        if caps is None:
+            if LoopbackTransport._default_capabilities is None:
+                probe = _load_peripheral().VtpDevice()
+                (caps,) = struct.unpack_from(
+                    "<I", probe.info(), refdec.offset("info", "capabilities"))
+                LoopbackTransport._default_capabilities = caps
+            caps = LoopbackTransport._default_capabilities
         if "caps_reserved_bits" in self.faults:
             caps |= 1 << 12
+        if "implication_broken" in self.faults:
+            # SPEC.md §4.1 -- can and monitor both require control. Clearing it
+            # leaves an Info a client MUST treat as non-conforming.
+            caps &= ~(1 << refdec.CAPABILITIES["control"])
         return caps
 
     async def connect(self, target=None):
@@ -390,20 +403,22 @@ class LoopbackTransport(Transport):
         return {refdec.SERVICE_UUID, refdec.DIS_SERVICE}
 
     def characteristics(self):
-        caps = self._capabilities()
-        chars = {refdec.CHAR["info"]: ("read",)}
-        if caps & (1 << refdec.CAPABILITIES["gps"]):
-            chars[refdec.CHAR["gps"]] = ("notify",)
-        if caps & (1 << refdec.CAPABILITIES["can"]):
-            chars[refdec.CHAR["can"]] = ("notify",)
-        if caps & (1 << refdec.CAPABILITIES["imu"]):
-            chars[refdec.CHAR["imu"]] = ("notify",)
-        if caps & (1 << refdec.CAPABILITIES["control"]):
-            chars[refdec.CHAR["control"]] = ("write", "indicate")
-        if caps & (1 << refdec.CAPABILITIES["monitor"]):
-            chars[refdec.CHAR["monitor_values"]] = ("write",)
-        out = {u: Characteristic(u, p, refdec.SERVICE_UUID)
-               for u, p in chars.items()}
+        """SPEC.md §4.1 -- the attribute table is fixed.
+
+        Every characteristic, whatever the capabilities say. One whose bit is
+        clear is inert, not absent: a table that changed with the capability set
+        would hand a central that cached it a stale handle to the wrong
+        attribute.
+        """
+        out = {}
+        for name, spec in refdec.PROFILE_CHARS.items():
+            if "missing_characteristic" in self.faults and name == "imu":
+                continue
+            out[refdec.CHAR[name]] = Characteristic(
+                refdec.CHAR[name], spec["properties"], refdec.SERVICE_UUID)
+        if "extra_characteristic" in self.faults:
+            uuid = "56544309-" + refdec.SERVICE_UUID.split("-", 1)[1]
+            out[uuid] = Characteristic(uuid, ("read",), refdec.SERVICE_UUID)
         for uuid in refdec.DIS_CHARS.values():
             out[uuid] = Characteristic(uuid, ("read",), refdec.DIS_SERVICE)
         return out
@@ -420,9 +435,11 @@ class LoopbackTransport(Transport):
         uuid = uuid.lower()
         if uuid == refdec.CHAR["info"]:
             info = bytearray(self.device.info())
-            if "caps_reserved_bits" in self.faults:
+            if {"caps_reserved_bits", "implication_broken"} & self.faults:
                 struct.pack_into("<I", info, refdec.offset("info", "capabilities"),
                                  self._capabilities())
+            if "info_reserved_nonzero" in self.faults:
+                info[refdec.offset("info", "reserved_20")] = 1
             return bytes(info)
         for name, char_uuid in refdec.DIS_CHARS.items():
             if uuid == char_uuid:
@@ -450,12 +467,18 @@ class LoopbackTransport(Transport):
             raise DeviceRefused(reason)
 
     async def _control_write(self, request):
+        # SPEC.md §4.1 -- an inert Control rejects every write with an ATT error
+        # and parses no opcode: answering would need the response path a device
+        # without the capability does not have.
+        if not self._capabilities() & (1 << refdec.CAPABILITIES["control"]):
+            raise DeviceRefused("control capability not declared")
         # SPEC.md §9.6 -- deliverability is decided BEFORE dispatch. With
         # indications disabled the answer has nowhere to go, so the request MUST
         # NOT take effect and MUST NOT be counted as received.
         if refdec.CHAR["control"] not in self._subs:
             return
         t_rx = self.device.now_us()
+        self._rates_before = (self.device.gps_hz, self.device.imu_hz)
         if "drop_fourth_request" in self.faults:
             self._requests += 1
             if self._requests % 4 == 0:
@@ -492,14 +515,30 @@ class LoopbackTransport(Transport):
             struct.pack_into("<H", response, base, validity)
             response[base + refdec.offset("link_params", "phy_tx")] = 1
             response[base + refdec.offset("link_params", "phy_rx")] = 0
+        if "opcode_capability_late" in self.faults:
+            response = self._corrupt_capability_refusal(response, request)
+        if "rate_not_applied" in self.faults and status == 0 and opcode in (
+                refdec.OPCODE["GPS_SET_RATE"], refdec.OPCODE["IMU_SET_RATE"]):
+            # Answers ok and quietly keeps the rate it had: SPEC.md §9.8's
+            # plausible wrong value, where the client believes it asked for
+            # something the timestamps then contradict.
+            self.device.gps_hz, self.device.imu_hz = self._rates_before
         if "list_reserved_nonzero" in self.faults and status == 0 and opcode in (
                 refdec.OPCODE["CAN_LIST"], refdec.OPCODE["MONITOR_LIST"]):
-            record = "can_list_page" if opcode == refdec.OPCODE["CAN_LIST"] else "monitor_page"
+            record = ("can_list_page" if opcode == refdec.OPCODE["CAN_LIST"]
+                      else "monitor_declaration")
             response[3 + refdec.offset(record, "reserved")] = 1
         return response
 
     async def subscribe(self, uuid, callback):
-        self._subs[uuid.lower()] = callback
+        uuid = uuid.lower()
+        if "inert_cccd_rejected" in self.faults:
+            name = refdec.CHAR_NAME.get(uuid)
+            spec = refdec.PROFILE_CHARS.get(name)
+            if spec and spec["capability"] is not None and not (
+                    self._capabilities() & (1 << refdec.CAPABILITIES[spec["capability"]])):
+                raise DeviceRefused(f"capability {spec['capability']} not declared")
+        self._subs[uuid] = callback
 
     async def unsubscribe(self, uuid):
         self._subs.pop(uuid.lower(), None)
@@ -507,6 +546,17 @@ class LoopbackTransport(Transport):
     # -- the notification pump -------------------------------------------
 
     _STREAM_CHAR = {"gps": "gps", "can": "can", "imu": "imu"}
+
+    def _corrupt_capability_refusal(self, response, request):
+        """SPEC.md §9 -- availability before parameters. This gets it backwards."""
+        name = refdec.OPCODE_NAME.get(request[0])
+        capability = refdec.OPCODE_CAPABILITY.get(name)
+        if capability is None:
+            return response
+        if self._capabilities() & (1 << refdec.CAPABILITIES[capability]):
+            return response
+        response[2] = refdec.STATUS_VALUE["bad_params"]
+        return response
 
     async def _run(self):
         loop = asyncio.get_running_loop()

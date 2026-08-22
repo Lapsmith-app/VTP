@@ -6,11 +6,9 @@
       "name": "dash-asks-for-four",
       "desc": "A display device asking for the four values a lap timer shows. It names channels; it does not send an expression to evaluate.",
       "record": "monitor_list",
-      "hex": "04000000040000010000010200000204000003060000",
+      "hex": "040000010014010200ff02040014030600ff",
       "expect": {
-        "page": {
-          "total": 4,
-          "index": 0,
+        "declaration": {
           "count": 4,
           "reserved": 0
         },
@@ -18,25 +16,25 @@
           {
             "slot": 0,
             "channel": 1,
-            "max_age": 0,
+            "max_age": 20,
             "channel_known": true
           },
           {
             "slot": 1,
             "channel": 2,
-            "max_age": 0,
+            "max_age": 255,
             "channel_known": true
           },
           {
             "slot": 2,
             "channel": 4,
-            "max_age": 0,
+            "max_age": 20,
             "channel_known": true
           },
           {
             "slot": 3,
             "channel": 6,
-            "max_age": 0,
+            "max_age": 255,
             "channel_known": true
           }
         ]
@@ -46,11 +44,9 @@
       "name": "no-channels-requested",
       "desc": "A device that implements the role but currently wants nothing. Legal, and the state before it has configured itself.",
       "record": "monitor_list",
-      "hex": "000000000000",
+      "hex": "0000",
       "expect": {
-        "page": {
-          "total": 0,
-          "index": 0,
+        "declaration": {
           "count": 0,
           "reserved": 0
         },
@@ -61,11 +57,9 @@
       "name": "unknown-channel-requested",
       "desc": "A device asking for a channel from a later minor. A client MUST report it unknown, MUST NOT substitute another, and MUST answer the slot as absent rather than omitting it.",
       "record": "monitor_list",
-      "hex": "01000000010009921000",
+      "hex": "010009921014",
       "expect": {
-        "page": {
-          "total": 1,
-          "index": 0,
+        "declaration": {
           "count": 1,
           "reserved": 0
         },
@@ -73,7 +67,7 @@
           {
             "slot": 9,
             "channel": 4242,
-            "max_age": 0,
+            "max_age": 20,
             "channel_known": false
           }
         ]
@@ -176,7 +170,7 @@
     },
     {
       "name": "empty-update",
-      "desc": "count 0. Legal: nothing changed. A device MUST accept it.",
+      "desc": "count 0. MUST be rejected: SPEC.md 13.4 makes every write a COMPLETE statement of what the client can supply, and a write naming no slots is the one thing a complete statement cannot be. A client with nothing to supply writes every slot with the present bit clear; a client with nothing to say does not write at all. This vector said the opposite of the section governing it, and the reference device rejected it.",
       "record": "monitor_update",
       "hex": "04000000",
       "expect": {
@@ -186,7 +180,8 @@
           "reserved": 0
         },
         "values": []
-      }
+      },
+      "must_reject": "empty-update"
     },
     {
       "name": "short-payload",
@@ -210,35 +205,33 @@
       "must_reject": "truncated-record"
     },
     {
-      "name": "short-page",
-      "desc": "5 bytes: shorter than the page header. MUST be rejected.",
+      "name": "short-declaration",
+      "desc": "1 byte: shorter than the declaration header. MUST be rejected.",
       "record": "monitor_list",
-      "hex": "0000000000",
+      "hex": "00",
       "must_reject": "length"
     },
     {
-      "name": "count-exceeds-page",
-      "desc": "Page declares three entries, one is present. MUST be rejected: a decoder that trusts count without checking the buffer reads two channel assignments out of adjacent memory.",
+      "name": "count-exceeds-declaration",
+      "desc": "The declaration claims three entries, one is present. MUST be rejected: a decoder that trusts count without checking the buffer reads two channel assignments out of adjacent memory.",
       "record": "monitor_list",
-      "hex": "03000000030000010000",
+      "hex": "030000010014",
       "must_reject": "length"
     },
     {
-      "name": "long-page",
+      "name": "long-declaration",
       "desc": "One entry declared, one present, plus a trailing byte. MUST be rejected.",
       "record": "monitor_list",
-      "hex": "0100000001000001000000",
+      "hex": "01000001001400",
       "must_reject": "length"
     },
     {
       "name": "per-channel-expiry",
-      "desc": "Three channels with different max_age. SPEC.md 13.5 -- a lap time ticking up is wrong within a second of going stale, a best lap stays true until it is beaten, so the deadline is per channel and 0 means never.",
+      "desc": "Three channels with three different deadlines. SPEC.md 13.5 -- a lap time ticking up is wrong within a second of going stale while a best lap stays true until it is beaten, so the deadline is per channel. Every channel has one.",
       "record": "monitor_list",
-      "hex": "030000000300000100140103000002070005",
+      "hex": "030000010014010300ff02070005",
       "expect": {
-        "page": {
-          "total": 3,
-          "index": 0,
+        "declaration": {
           "count": 3,
           "reserved": 0
         },
@@ -252,7 +245,7 @@
           {
             "slot": 1,
             "channel": 3,
-            "max_age": 0,
+            "max_age": 255,
             "channel_known": true
           },
           {
@@ -266,13 +259,11 @@
     },
     {
       "name": "max-age-at-ceiling",
-      "desc": "max_age 255 is 25.5 seconds, the longest a device can ask for short of never.",
+      "desc": "max_age 255 is 25.5 seconds, the longest deadline this field can express. A channel that changes rarely takes this rather than none: SPEC.md 13.5 has no `never`.",
       "record": "monitor_list",
-      "hex": "010000000100000300ff",
+      "hex": "0100000300ff",
       "expect": {
-        "page": {
-          "total": 1,
-          "index": 0,
+        "declaration": {
           "count": 1,
           "reserved": 0
         },
@@ -287,14 +278,39 @@
       }
     },
     {
+      "name": "zero-max-age",
+      "desc": "A channel declaring max_age 0. MUST be rejected: SPEC.md 13.5 gives every declared channel a deadline, so a value the client stops sending always stops being shown. Zero used to mean `no deadline of its own`, reconciled by a derived device-wide liveness bound -- two rules, and a canonical vector that satisfied neither.",
+      "record": "monitor_list",
+      "hex": "02000001001401030000",
+      "expect": {
+        "declaration": {
+          "count": 2,
+          "reserved": 0
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 20,
+            "channel_known": true
+          },
+          {
+            "slot": 1,
+            "channel": 3,
+            "max_age": 0,
+            "channel_known": true
+          }
+        ]
+      },
+      "must_reject": "zero-max-age"
+    },
+    {
       "name": "duplicate-slot-in-declaration",
       "desc": "Two entries claiming slot 0. MUST be rejected: the slot is how a value is addressed, so every later update would be ambiguous. SPEC.md 13.3.",
       "record": "monitor_list",
-      "hex": "0200000002000001000a0007000a",
+      "hex": "02000001000a0007000a",
       "expect": {
-        "page": {
-          "total": 2,
-          "index": 0,
+        "declaration": {
           "count": 2,
           "reserved": 0
         },
@@ -317,19 +333,107 @@
     },
     {
       "name": "more-channels-than-fit",
-      "desc": "A declaration of 16 channels. SPEC.md 13.4 requires every write to carry every slot, and 16 values do not fit beside a header in one write at the minimum ATT MTU -- so the device has made its own rule unsatisfiable and this MUST be rejected.",
+      "desc": "A declaration of 16 channels. SPEC.md 13.4 requires every write to carry every slot, and 16 values do not fit beside a header in one write at the minimum ATT MTU -- so the device has made its own rule unsatisfiable and this MUST be rejected. All 16 are really here: `total` used to carry the count for a declaration that arrived a page at a time, and with paging gone the only number is the one in front of the entries.",
       "record": "monitor_list",
-      "hex": "1000000001000001000a",
+      "hex": "10000001000a0101000a0201000a0301000a0401000a0501000a0601000a0701000a0801000a0901000a0a01000a0b01000a0c01000a0d01000a0e01000a0f01000a",
       "expect": {
-        "page": {
-          "total": 16,
-          "index": 0,
-          "count": 1,
+        "declaration": {
+          "count": 16,
           "reserved": 0
         },
         "entries": [
           {
             "slot": 0,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 1,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 2,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 3,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 4,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 5,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 6,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 7,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 8,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 9,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 10,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 11,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 12,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 13,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 14,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 15,
             "channel": 1,
             "max_age": 10,
             "channel_known": true

@@ -19,6 +19,86 @@ protocol:
   endianness: little      # every field, every record, no exceptions
   min_att_mtu: 100
 
+# The GATT profile: which attributes exist, what they may do, and what a
+# capability bit changes about them. SPEC.md 4.1 is generated from this.
+#
+# The attribute table is FIXED. Every VTP/1 device exposes every characteristic
+# below, whatever its capabilities say, and a role the device does not
+# implement is inert rather than missing. Two reasons, and the second is the
+# one that bites:
+#
+#   - Central stacks CACHE the attribute table across connections and some
+#     across reboots. A device whose table changes -- because a capability was
+#     turned off in firmware, or because a build omitted a role -- hands the
+#     client a cached handle for an attribute that is no longer there, and the
+#     failure surfaces as a read of the wrong characteristic rather than as a
+#     missing one. A fixed table cannot do that.
+#   - Discovery then answers one question ("is this VTP/1?") and Info answers
+#     the other ("what does it do?"), instead of both half-answering each.
+#
+# `inert` says what an implemented-but-unused attribute does, because "present"
+# without that is an invitation to leave it silently broken.
+profile:
+  characteristics:
+    - name: info
+      capability: null            # unconditional; every device answers Info
+      properties: [read]
+      cccd: none
+      written_by: device
+      read_by: client
+      inert: "never; Info is always meaningful"
+      record: info
+    - name: gps
+      capability: gps
+      properties: [notify]
+      cccd: notify
+      written_by: device
+      read_by: client
+      inert: "the CCCD exists; no notification is ever sent on it"
+      record: gps_fix
+    - name: can
+      capability: can
+      properties: [notify]
+      cccd: notify
+      written_by: device
+      read_by: client
+      inert: "the CCCD exists; no notification is ever sent on it"
+      record: can_header
+    - name: imu
+      capability: imu
+      properties: [notify]
+      cccd: notify
+      written_by: device
+      read_by: client
+      inert: "the CCCD exists; no notification is ever sent on it"
+      record: imu_header
+    - name: control
+      capability: control
+      properties: [write, indicate]
+      cccd: indicate
+      write_type: with-response
+      written_by: client
+      read_by: client            # the answer indicates back on the same handle
+      inert: "the CCCD exists; writes are rejected with an ATT error and no opcode is parsed"
+      record: control_response
+    - name: monitor_values
+      capability: monitor
+      properties: [write]
+      cccd: none
+      write_type: with-response
+      written_by: client
+      read_by: device
+      inert: "writes are rejected with an ATT error and change nothing"
+      record: monitor_header
+
+  # Info fields that describe a capacity. Each MUST be zero when its capability
+  # bit is clear -- SPEC.md 4 already says a capacity of zero means "none", and
+  # this is what makes that mechanically checkable rather than a promise.
+  capacity:
+    gps: [gps_rate_hz, gps_max_rate_hz]
+    can: [can_subscription_slots, can_max_frames_per_s]
+    imu: [imu_rate_hz, imu_max_rate_hz]
+
 enums:
   fix_type:
     width: 1
@@ -34,10 +114,23 @@ enums:
     members:
       - {value: 0, name: ok,                 desc: "Request accepted"}
       - {value: 1, name: unsupported_opcode, desc: "Opcode not implemented"}
-      - {value: 2, name: bad_params,         desc: "Parameters malformed or out of range, or the tag is already outstanding"}
+      # No longer "or the tag is already outstanding": with one request
+      # outstanding (SPEC.md 9) a concurrent request is refused `busy`
+      # whatever tag it carries, so bad_params is about parameters again.
+      - {value: 2, name: bad_params,         desc: "Parameters malformed or out of range"}
       - {value: 3, name: table_full,         desc: "No free subscription slot"}
-      - {value: 4, name: rate_exceeded,      desc: "Would exceed can_max_frames_per_s"}
-      - {value: 5, name: busy,               desc: "No room for another outstanding request; retry (SPEC.md 9)"}
+      # NOT for CAN. SPEC.md 9.4 forbids refusing a CAN subscription on rate
+      # grounds -- the device admits and sheds instead -- so a description
+      # naming can_max_frames_per_s described the one use this status does not
+      # have. It is for the two rate setters, where the ceiling is a fact the
+      # device already knows.
+      - {value: 4, name: rate_exceeded,      desc: "Requested rate is above gps_max_rate_hz or imu_max_rate_hz (SPEC.md 9.8). Never used for CAN"}
+      # A client is allowed ONE outstanding request (SPEC.md 9), so this is
+      # what a device says to a client that pipelines anyway. Kept rather than
+      # removed with the queue it used to describe: without it a device meeting
+      # such a client must choose between silence and applying a request it
+      # cannot answer, and 9.6 forbids both.
+      - {value: 5, name: busy,               desc: "A response is already outstanding; wait for it, then retry (SPEC.md 9)"}
       - {value: 6, name: needs_encryption,   desc: "Allocated, never sent: encryption is enforced by GATT permission (SPEC.md 10)"}
       - {value: 7, name: unknown_handle,     desc: "No subscription with that handle"}
   sub_mode:
@@ -91,6 +184,7 @@ bitmasks:
       - {bit: 10, name: p_dop}
       - {bit: 11, name: num_sv}
     reserved_from: 12
+    reserved_purpose: "Validity for fields added in a later minor"
   fix_flags:
     width: 1
     bits:
@@ -100,23 +194,59 @@ bitmasks:
       - {bit: 3, name: clock_disciplined, desc: "t_device was GNSS-disciplined at this sample"}
       - {bit: 4, name: solution_epoch, desc: "t_device is the epoch of the solution; when clear it is when the fix reached the device (SPEC.md 5.6)"}
     reserved_from: 5
+    reserved_purpose: "Additional solution-quality flags"
   capabilities:
     width: 4
+    # `implies` is normative, not documentation: SPEC.md 4.1 renders it as a
+    # matrix and the encoders refuse an Info that breaks it. It used to be
+    # absent, so the specification defined every bit independently while
+    # conformance/run.py quietly made CAN and Monitor imply Control -- the
+    # runner enforcing a rule the specification did not state, and canonical
+    # Info vectors blessing a CAN device with no Control characteristic that
+    # no client could ever subscribe anything on.
     bits:
       - {bit: 0, name: gps}
-      - {bit: 1, name: can}
+      - {bit: 1, name: can, implies: [control]}
       - {bit: 2, name: imu}
-      - {bit: 3, name: monitor, desc: "Device asks the client for values to display (§13)"}
+      - {bit: 3, name: monitor, implies: [control],
+         desc: "Device asks the client for values to display (§13)"}
       - {bit: 4, name: control}
-      - {bit: 5, name: can_fd}
-      - {bit: 6, name: masked_subscriptions}
-      - {bit: 7, name: on_change_subscriptions}
+      - {bit: 5, name: can_fd, implies: [can]}
+      - {bit: 6, name: masked_subscriptions, implies: [can]}
+      - {bit: 7, name: on_change_subscriptions, implies: [can]}
     reserved_from: 8
+    reserved_purpose: "Roles and features added in a later minor"
+  # These three were plain u8 fields with a prose description, so nothing
+  # derived their reserved ranges: Appendix A listed them by hand and went
+  # stale, and neither encoder masked them, which is the one rule SPEC.md 2
+  # states about reserved bits.
+  can_flags:
+    width: 1
+    bits:
+      - {bit: 0, name: shedding, desc: "Device is discarding accepted frames (SPEC.md 6.3)"}
+    reserved_from: 1
+    reserved_purpose: "Additional batch-level CAN status"
+  imu_flags:
+    width: 1
+    bits:
+      - {bit: 0, name: accel, desc: "Accelerometer triple is present"}
+      - {bit: 1, name: gyro,  desc: "Gyroscope triple is present"}
+      - {bit: 2, name: saturated, desc: "A sample in this batch hit the sensor's limit (SPEC.md 7.2)"}
+    reserved_from: 3
+    reserved_purpose: "Additional sensor groups"
+  clock_flags:
+    width: 1
+    bits:
+      - {bit: 0, name: gnss_disciplined, desc: "The device clock is disciplined by GNSS"}
+      - {bit: 1, name: survives_reconnect, desc: "The device clock does not restart when the link drops"}
+    reserved_from: 2
+    reserved_purpose: "Additional clock properties"
   monitor_validity:
     width: 1
     bits:
       - {bit: 0, name: present, desc: "The client can currently supply this channel"}
     reserved_from: 1
+    reserved_purpose: "Validity for values added in a later minor"
   link_validity:
     width: 2
     bits:
@@ -125,6 +255,7 @@ bitmasks:
       - {bit: 2, name: conn_params,    desc: "conn_interval, peripheral_latency and supervision_timeout are all valid"}
       - {bit: 3, name: phy,            desc: "phy_tx and phy_rx are valid"}
     reserved_from: 4
+    reserved_purpose: "Validity for link parameters added in a later minor"
 
 records:
 
@@ -143,9 +274,21 @@ records:
       - {name: can_max_frames_per_s,   offset: 12, size: 4, type: u32, units: "frames/s"}
       - {name: imu_rate_hz,     offset: 16, size: 2, type: u16, units: Hz}
       - {name: imu_max_rate_hz, offset: 18, size: 2, type: u16, units: Hz}
-      - {name: can_max_payload, offset: 20, size: 1, type: u8, desc: "8 for classic CAN, 64 for CAN FD"}
-      - {name: clock_flags,     offset: 21, size: 1, type: u8, desc: "bit0 GNSS-disciplined, bit1 clock survives reconnect"}
-      - {name: max_notify_bytes, offset: 22, size: 2, type: u16, units: bytes}
+      # Was `can_max_payload`, and it could only ever hold a value the
+      # capability bits already fixed: 0 with no CAN, 64 with can_fd, 8
+      # otherwise. Two rules in SPEC.md 4.1 therefore both applied to a
+      # device with no CAN and disagreed (0 and 8), neither codec enforced
+      # any of it, and a generated case cheerfully expected an FD device
+      # reporting 0. A field whose every value is derivable is a field two
+      # implementations can disagree about for no gain. SPEC.md 4.2 derives
+      # it now, and this byte is free for a later minor.
+      - {name: reserved_20, offset: 20, size: 1, type: u8, reserved: true, desc: "Was can_max_payload; derived from the capability bits since (SPEC.md 4.2)"}
+      - {name: clock_flags,     offset: 21, size: 1, type: u8, bitmask: clock_flags}
+      # A DEVICE ceiling, not the current link's negotiated ATT payload. The
+      # two cannot be the same field: a client reads Info immediately after
+      # connecting, and a peripheral commonly does not learn the negotiated
+      # maximum until a central subscribes, which is later. SPEC.md 4.2.
+      - {name: max_notify_bytes, offset: 22, size: 2, type: u16, units: bytes, desc: "Largest notification this device will ever send; a fixed device ceiling, NOT the negotiated ATT payload (SPEC.md 4.2)"}
 
   gps_fix:
     characteristic: gps
@@ -185,10 +328,12 @@ records:
     fields:
       - {name: seq,     offset: 0,  size: 2, type: u16, desc: "Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection"}
       - {name: dropped, offset: 2,  size: 2, type: u16, desc: "Frames accepted then discarded since the previous notification; excludes frames no subscription matched or a subscription mode did not select; saturates"}
+      # Record 0 always exists: count is never zero (SPEC.md 6.2), so this
+      # timestamp always names a frame that was actually received.
       - {name: t_base,  offset: 4,  size: 8, type: u64, units: µs, desc: "Bus-arrival time of record 0, on the device clock (§8.1)"}
       - {name: count,   offset: 12, size: 1, type: u8}
-      - {name: flags,   offset: 13, size: 1, type: u8, desc: "bit0 device is shedding load — discarding accepted frames (§6.3)"}
-      - {name: reserved, offset: 14, size: 2, type: u16, reserved: true}
+      - {name: flags,   offset: 13, size: 1, type: u8, bitmask: can_flags}
+      - {name: reserved, offset: 14, size: 2, type: u16, reserved: true, desc: "Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned"}
 
   can_record:
     size: 7          # plus `len` payload bytes
@@ -215,8 +360,8 @@ records:
       # be a division at every comparison.
       - {name: period,  offset: 12, size: 4, type: u32, units: µs, desc: "Interval between consecutive samples"}
       - {name: count,   offset: 16, size: 1, type: u8}
-      - {name: flags,   offset: 17, size: 1, type: u8, desc: "bit0 accel present, bit1 gyro present, bit2 a sample in this batch saturated (SPEC.md 7.2)"}
-      - {name: reserved, offset: 18, size: 2, type: u16, reserved: true}
+      - {name: flags,   offset: 17, size: 1, type: u8, bitmask: imu_flags}
+      - {name: reserved, offset: 18, size: 2, type: u16, reserved: true, desc: "In-band IMU metadata"}
 
   imu_sample:
     size: 12
@@ -234,15 +379,21 @@ records:
       - {name: gy, offset: 8,  size: 2, type: i16, units: deg/s, scale: 0.05, presence_bit: gyro}
       - {name: gz, offset: 10, size: 2, type: i16, units: deg/s, scale: 0.05, presence_bit: gyro}
 
-  monitor_page:
+  # Not paged, and not a page. The whole declaration is at most 15 channels
+  # (SPEC.md 13.4, the most that fit in one complete client write at the
+  # minimum ATT MTU), which is 2 + 15*4 = 62 bytes -- inside the 97 a response
+  # has at that MTU with room to spare. So `total` could never differ from
+  # `count`, `index` could never be anything but 0, and MONITOR_LIST's `start`
+  # could never be anything but 0 either. Three fields and a parameter that
+  # existed to mirror can_list_page, where paging IS reachable because
+  # can_subscription_slots may be far larger than a response can carry.
+  monitor_declaration:
     access: control
-    size: 6
-    desc: "One page of the channels a device asks for. Followed by `count` monitor_channel entries."
+    size: 2
+    desc: "Every channel this device asks the client to supply. Followed by `count` monitor_channel entries."
     fields:
-      - {name: total,    offset: 0, size: 2, type: u16, desc: "Channels requested, across all pages"}
-      - {name: index,    offset: 2, size: 2, type: u16, desc: "Table index of the first entry in this page"}
-      - {name: count,    offset: 4, size: 1, type: u8,  desc: "Entries in this page"}
-      - {name: reserved, offset: 5, size: 1, type: u8,  reserved: true}
+      - {name: count,    offset: 0, size: 1, type: u8,  desc: "Channels requested; the whole declaration, never a page of it"}
+      - {name: reserved, offset: 1, size: 1, type: u8,  reserved: true, desc: "Declaration metadata"}
 
   monitor_channel:
     access: control
@@ -251,7 +402,13 @@ records:
     fields:
       - {name: slot,     offset: 0, size: 1, type: u8,  desc: "The device's own name for this value; used in monitor_value"}
       - {name: channel,  offset: 1, size: 2, type: u16, enum: channel}
-      - {name: max_age,  offset: 3, size: 1, type: u8,  units: "100ms", desc: "Longest this value may be shown without a refresh; 0 never expires (SPEC.md 13.5)"}
+      # Zero is forbidden. This field carried "0 never expires" while SPEC.md
+      # 13.5 said zero meant no deadline of its own and then derived a
+      # device-wide "liveness bound" to expire it anyway -- two rules, a
+      # derived concept to reconcile them, and a canonical vector that
+      # satisfied neither. One deadline per channel, always present, is the
+      # whole rule now.
+      - {name: max_age,  offset: 3, size: 1, type: u8,  units: "100ms", desc: "Longest this value may be shown without a refresh; MUST NOT be zero (SPEC.md 13.5)"}
 
   monitor_header:
     characteristic: monitor_values
@@ -261,7 +418,7 @@ records:
     fields:
       - {name: seq,      offset: 0, size: 2, type: u16, desc: "Updates written by the client; +1 each, wraps, restarts at 0 per connection"}
       - {name: count,    offset: 2, size: 1, type: u8}
-      - {name: reserved, offset: 3, size: 1, type: u8, reserved: true}
+      - {name: reserved, offset: 3, size: 1, type: u8, reserved: true, desc: "Update metadata"}
 
   monitor_value:
     size: 6
@@ -280,7 +437,7 @@ records:
       - {name: total,    offset: 0, size: 2, type: u16, desc: "Subscriptions installed, across all pages"}
       - {name: index,    offset: 2, size: 2, type: u16, desc: "Table index of the first entry in this page"}
       - {name: count,    offset: 4, size: 1, type: u8,  desc: "Entries in this page"}
-      - {name: reserved, offset: 5, size: 1, type: u8,  reserved: true}
+      - {name: reserved, offset: 5, size: 1, type: u8,  reserved: true, desc: "Paging metadata"}
 
   can_subscription:
     access: control
@@ -330,14 +487,37 @@ records:
 control:
   request:  "[opcode:u8][tag:u8][params...]"
   response: "[opcode:u8][tag:u8][status:u8][detail...]"
+  # `capability` is the bit that OWNS the opcode. A device without it answers
+  # unsupported_opcode, and answers it before looking at the parameters --
+  # SPEC.md 9 states that order, because "which of these two refusals do I
+  # get" is otherwise a coin toss between implementations.
+  #
+  # It was absent, so the matrix said which bits a device may set and nothing
+  # said what any of them CHANGED about the control plane. The reference
+  # peripheral duly answered `ok` to CAN_SUBSCRIBE, GPS_SET_RATE, IMU_SET_RATE
+  # and MONITOR_LIST while declaring only `control`.
+  #
+  # TIME_SYNC and GET_LINK_PARAMS have no owning capability: they are about
+  # the link and the clock, which every device has, and reaching them at all
+  # means the Control characteristic is live.
   opcodes:
-    - {value: 0x01, name: CAN_RESET,          params: "",                            response: "",                      desc: "Clear all subscriptions and stop the CAN stream"}
-    - {value: 0x02, name: CAN_SUBSCRIBE,      params: "id:u32, mode:u8, arg:u16",     response: "handle:u16",            desc: "Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF"}
-    - {value: 0x03, name: CAN_SUBSCRIBE_MASK, params: "id:u32, mask:u32, mode:u8, arg:u16", response: "handle:u16"}
-    - {value: 0x04, name: CAN_UNSUBSCRIBE,    params: "handle:u16",                   response: "",                      desc: "Removes one subscription by the handle its install returned"}
-    - {value: 0x05, name: CAN_LIST,           params: "start:u16",                    response: "can_list_page record",  desc: "One page of the table, starting at index `start`"}
-    - {value: 0x10, name: GPS_SET_RATE,       params: "hz:u16",                       response: ""}
-    - {value: 0x20, name: IMU_SET_RATE,       params: "hz:u16",                       response: ""}
-    - {value: 0x30, name: TIME_SYNC,          params: "—",                            response: "time_sync record",      desc: "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"}
-    - {value: 0x31, name: GET_LINK_PARAMS,    params: "",                             response: "link_params record"}
-    - {value: 0x40, name: MONITOR_LIST,       params: "start:u16",                    response: "monitor_page record",   desc: "One page of the channels this device asks the client to supply"}
+    - {value: 0x01, name: CAN_RESET,          capability: can,     params: "",                            response: "",                      desc: "Clear all subscriptions and stop the CAN stream"}
+    - {value: 0x02, name: CAN_SUBSCRIBE,      capability: can,     params: "id:u32, mode:u8, arg:u16",     response: "handle:u16",            desc: "Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF"}
+    - {value: 0x03, name: CAN_SUBSCRIBE_MASK, capability: masked_subscriptions, params: "id:u32, mask:u32, mode:u8, arg:u16", response: "handle:u16"}
+    - {value: 0x04, name: CAN_UNSUBSCRIBE,    capability: can,     params: "handle:u16",                   response: "",                      desc: "Removes one subscription by the handle its install returned"}
+    - {value: 0x05, name: CAN_LIST,           capability: can,     params: "start:u16",                    response: "can_list_page record",  desc: "One page of the table, starting at index `start`"}
+    # SPEC.md 9.8. `hz` of zero stops the stream; a rate the device does not
+    # support is bad_params, never a silently substituted neighbour. The
+    # applied rate is read back from Info, so there is no response detail to
+    # keep in step with it.
+    - {value: 0x10, name: GPS_SET_RATE,       capability: gps,     params: "hz:u16",                       response: "",                      desc: "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8)"}
+    - {value: 0x20, name: IMU_SET_RATE,       capability: imu,     params: "hz:u16",                       response: "",                      desc: "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8)"}
+    # params is the empty string, not a dash. It carried a literal em-dash,
+    # which is how the SPEC.md table renders "no parameters" -- the display
+    # form had been written into the source of truth, so the schema said this
+    # opcode took one parameter whose name and type were both the character
+    # "-", while SPEC.md 9 said it was parameterless. tools/generate.py now
+    # refuses the dash outright.
+    - {value: 0x30, name: TIME_SYNC,          capability: null,    params: "",                             response: "time_sync record",      desc: "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"}
+    - {value: 0x31, name: GET_LINK_PARAMS,    capability: null,    params: "",                             response: "link_params record"}
+    - {value: 0x40, name: MONITOR_LIST,       capability: monitor, params: "",                             response: "monitor_declaration record", desc: "Every channel this device asks the client to supply, in one response (SPEC.md 13.3)"}

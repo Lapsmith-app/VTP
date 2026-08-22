@@ -117,26 +117,64 @@ async def control_detail_only_on_ok(s):
        title="Requests with wrong-length parameters are refused")
 async def control_malformed_params(s):
     c = _control(s)
-    cases = [
-        ("CAN_RESET with a trailing byte", refdec.OPCODE["CAN_RESET"], b"\x00"),
-        ("CAN_SUBSCRIBE truncated to 3 params", refdec.OPCODE["CAN_SUBSCRIBE"],
-         b"\x00\x01\x00"),
-        ("GPS_SET_RATE with no parameters", refdec.OPCODE["GPS_SET_RATE"], b""),
-        ("TIME_SYNC with parameters", refdec.OPCODE["TIME_SYNC"], b"\x01\x02"),
-    ]
     problems = []
-    for label, opcode, params in cases:
+    # Every opcode this device actually owns, given a parameter block of the
+    # wrong length. Derived from the schema so an opcode added in a later minor
+    # is covered the moment it is declared there.
+    for name, capability in refdec.OPCODE_CAPABILITY.items():
+        if capability is not None and not s.has(capability):
+            continue
+        wanted = refdec.OPCODE_PARAM_SIZE[name]
+        params = b"\x00" * (wanted + 1)
+        label = (f"{name} with {wanted + 1} parameter byte(s) where {wanted} "
+                 f"{'is' if wanted == 1 else 'are'} defined")
         try:
-            response = await c.request(opcode, params)
+            response = await c.request(refdec.OPCODE[name], params)
         except ControlTimeout:
             problems.append(f"{label}: no response")
             continue
         if response.status == refdec.STATUS_VALUE["unsupported_opcode"]:
-            continue                      # the opcode itself is not implemented
+            # §9 -- availability is decided before parameters, so this answer
+            # means the device does not implement the opcode at all. That is
+            # the opcode-capability check's business, not this one's.
+            continue
         if response.ok:
             problems.append(f"{label}: answered ok")
         elif response.detail:
             problems.append(f"{label}: refused, but carried a detail")
+    if problems:
+        raise Fail("; ".join(problems))
+
+
+@check(id="control.opcode_capability", section="9", phase="control",
+       severity="MUST", requires=("control",), adversarial=True,
+       title="An opcode the device does not own is refused before its parameters")
+async def control_opcode_capability(s):
+    c = _control(s)
+    absent = [(name, capability)
+              for name, capability in refdec.OPCODE_CAPABILITY.items()
+              if capability is not None and not s.has(capability)]
+    if not absent:
+        raise Skip("this device owns every opcode in this version")
+    problems = []
+    for name, capability in absent:
+        # Deliberately the wrong length. §9 fixes the order: availability
+        # first, parameters second, so this MUST still be unsupported_opcode.
+        # The two refusals mean different things to a client -- "not on this
+        # device, ever" against "try again with better arguments" -- and one
+        # that gets them the wrong way round either retries forever or gives up
+        # on a device that would have worked.
+        params = b"\x00" * (refdec.OPCODE_PARAM_SIZE[name] + 1)
+        try:
+            response = await c.request(refdec.OPCODE[name], params)
+        except ControlTimeout:
+            problems.append(f"{name}: no response")
+            continue
+        if response.status != refdec.STATUS_VALUE["unsupported_opcode"]:
+            problems.append(
+                f"{name} needs {capability!r}, which this device has not "
+                f"declared, and a malformed one was answered "
+                f"{response.status_name}")
     if problems:
         raise Fail("; ".join(problems))
 
@@ -451,6 +489,51 @@ async def control_rate_ceiling(s):
         raise Fail("; ".join(problems))
     if skipped and len(skipped) == len(cases):
         raise Skip("; ".join(skipped))
+
+
+@check(id="control.rate_readback", section="9.8", phase="control", severity="MUST",
+       requires=("control",),
+       title="A rate that was accepted is the rate Info then reports")
+async def control_rate_readback(s):
+    c = _control(s)
+    cases = [(name, refdec.OPCODE[f"{role.upper()}_SET_RATE"],
+              f"{role}_rate_hz", f"{role}_max_rate_hz")
+             for role, name in (("gps", "GPS_SET_RATE"), ("imu", "IMU_SET_RATE"))
+             if s.has(role)]
+    if not cases:
+        raise Skip("this device declares neither GPS nor IMU")
+    problems, tried = [], []
+    for name, opcode, current_field, ceiling_field in cases:
+        before, ceiling = s.info[current_field], s.info[ceiling_field]
+        if ceiling == before or not ceiling:
+            continue
+        response = await c.request(opcode, struct.pack("<H", ceiling))
+        if response.status in (refdec.STATUS_VALUE["unsupported_opcode"],
+                               refdec.STATUS_VALUE["bad_params"]):
+            # §9.8 -- a device MAY support only a discrete set of rates, and
+            # refusing one it does not support is exactly right.
+            continue
+        if not response.ok:
+            problems.append(f"{name} at {ceiling} Hz, its own declared "
+                            f"maximum, was answered {response.status_name}")
+            continue
+        tried.append(name)
+        again = refdec.decode("info", await s.transport.read(refdec.CHAR["info"]))
+        if again[current_field] != ceiling:
+            # The response carries no detail, so Info is the only statement of
+            # what was applied. Answering ok for a rate the device did not adopt
+            # is §1.1's plausible wrong value: the client believes it is getting
+            # 25 Hz, the timestamps say otherwise, and nothing connects the two.
+            problems.append(
+                f"{name} answered ok for {ceiling} Hz and Info then reports "
+                f"{again[current_field]} Hz. A device MUST NOT silently apply "
+                f"the nearest rate it can manage")
+        await c.request(opcode, struct.pack("<H", before))
+    if problems:
+        raise Fail("; ".join(problems))
+    if not tried:
+        raise Skip("this device is already at its declared maximum rate, or "
+                   "supports no other rate to move to and back")
 
 
 # ---------------------------------------------------------------------------

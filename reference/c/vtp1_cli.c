@@ -234,12 +234,12 @@ int main(void) {
             printf("{\"ok\":true,\"protocol_major\":%u,\"protocol_minor\":%u,"
                    "\"capabilities\":%u,\"gps_rate_hz\":%u,\"gps_max_rate_hz\":%u,"
                    "\"can_subscription_slots\":%u,\"can_max_frames_per_s\":%u,"
-                   "\"imu_rate_hz\":%u,\"imu_max_rate_hz\":%u,\"can_max_payload\":%u,"
+                   "\"imu_rate_hz\":%u,\"imu_max_rate_hz\":%u,\"reserved_20\":%u,"
                    "\"clock_flags\":%u,\"max_notify_bytes\":%u",
                    v.protocol_major, v.protocol_minor, v.capabilities,
                    v.gps_rate_hz, v.gps_max_rate_hz, v.can_subscription_slots,
                    v.can_max_frames_per_s, v.imu_rate_hz, v.imu_max_rate_hz,
-                   v.can_max_payload, v.clock_flags, v.max_notify_bytes);
+                   v.reserved_20, v.clock_flags, v.max_notify_bytes);
             finish(enc, vtp_encode_info(&v, enc, sizeof enc));
 
         } else if (!strcmp(record, "can_list")) {
@@ -263,14 +263,14 @@ int main(void) {
             finish(enc, vtp_encode_can_list(&pg, subs, enc, sizeof enc));
 
         } else if (!strcmp(record, "monitor_list")) {
-            vtp_monitor_page_t pg;
+            vtp_monitor_declaration_t pg;
             if (vtp_decode_monitor_list(buf, len, &pg, &err)) { reject(err); continue; }
             vtp_monitor_channel_t chans[256];
             for (uint8_t i = 0; i < pg.count; i++)
                 vtp_monitor_channel_at(buf, i, &chans[i]);
-            printf("{\"ok\":true,\"page\":{\"total\":%u,\"index\":%u,"
+            printf("{\"ok\":true,\"declaration\":{"
                    "\"count\":%u,\"reserved\":%u},\"entries\":[",
-                   pg.total, pg.index, pg.count, pg.reserved);
+                   pg.count, pg.reserved);
             for (uint8_t i = 0; i < pg.count; i++) {
                 printf("%s{\"slot\":%u,\"channel\":%u,\"max_age\":%u,"
                        "\"channel_known\":%s}",

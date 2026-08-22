@@ -38,7 +38,9 @@ jobs:
       - name: Corpus can detect a violation of every rule
         run: python3 tools/check_corpus.py
 
-      - name: Build C reference decoder
+      # Builds both adapters: the decoder harness (vtp1_cli) and the producer
+      # harness (vtp1_producer).
+      - name: Build C reference
         run: make -C reference/c
 
       - name: Conformance — C reference
@@ -163,8 +165,42 @@ jobs:
       # valid and never whether it declines something invalid. That gap let an
       # encoder mask an out-of-range identifier into a valid frame for a
       # different one, which no decoder could flag.
-      - name: Encoders refuse what they must
-        run: python3 tools/check_encoders.py
+      #
+      # Run against BOTH references, over the same cases. The predecessor
+      # imported the Python encoder directly, so "14/14 producer cases" was a
+      # statement about one of the two -- and the C encoder had four
+      # malformed-input crashes and a violation of its own "nothing written on
+      # failure" contract while every producer run stayed green.
+      - name: Encoders refuse what they must — C reference
+        run: python3 conformance/produce.py --impl "reference/c/vtp1_producer"
+
+      - name: Encoders refuse what they must — Python reference
+        run: python3 conformance/produce.py --impl "python3 reference/python/vtp1_produce.py"
+
+      # A producer suite that cannot fail proves nothing, exactly as for the
+      # decode corpus. Stop the encoder refusing an out-of-range identifier and
+      # require the suite to notice.
+      - name: Producer suite detects a seeded fault
+        run: |
+          cp reference/c/vtp1_encode.c /tmp/vtp1_encode.c.orig
+          perl -pi -e 's/if \(v->id > 0x1FFFFFFFu\)/if (0 \&\& v->id > 0x1FFFFFFFu)/' reference/c/vtp1_encode.c
+          make -C reference/c
+          if python3 conformance/produce.py --impl "reference/c/vtp1_producer"; then
+            echo "::error::A seeded encoder masking fault was not detected"
+            cp /tmp/vtp1_encode.c.orig reference/c/vtp1_encode.c
+            exit 1
+          fi
+          cp /tmp/vtp1_encode.c.orig reference/c/vtp1_encode.c
+          make -C reference/c
+          echo "Seeded producer fault correctly detected."
+
+      # The C encoder's API contract, which no wire vector and no JSON case can
+      # reach: a count with no array behind it, and "nothing is written on
+      # failure". Both promises were broken and both were invisible to every
+      # check above. Sanitised, because a null dereference that happens not to
+      # fault is not a pass.
+      - name: C encoder honours its API contract (ASan/UBSan)
+        run: make -C reference/c san
 
       # A partial implementation runs the roles it declares (SPEC.md 12). If
       # this stops filtering, a GPS-only decoder is handed CAN vectors and
@@ -177,3 +213,6 @@ jobs:
             echo "::error::an unknown role name was accepted"
             exit 1
           fi
+          # The producer runner reads the same role table, from the schema.
+          python3 conformance/produce.py --impl "reference/c/vtp1_producer" --roles gps
+          python3 conformance/produce.py --impl "reference/c/vtp1_producer" --roles can,monitor
