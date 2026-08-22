@@ -310,7 +310,7 @@ int vtp_decode_info(const uint8_t *b, size_t len,
     o->can_max_frames_per_s   = rd32(b + VTP_INFO_OFF_CAN_MAX_FRAMES_PER_S);
     o->imu_rate_hz            = rd16(b + VTP_INFO_OFF_IMU_RATE_HZ);
     o->imu_max_rate_hz        = rd16(b + VTP_INFO_OFF_IMU_MAX_RATE_HZ);
-    o->can_max_payload        = b[VTP_INFO_OFF_CAN_MAX_PAYLOAD];
+    o->reserved_20            = b[VTP_INFO_OFF_RESERVED_20];
     o->clock_flags            = b[VTP_INFO_OFF_CLOCK_FLAGS];
     o->max_notify_bytes       = rd16(b + VTP_INFO_OFF_MAX_NOTIFY_BYTES);
     return 0;

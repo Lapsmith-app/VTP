@@ -401,7 +401,7 @@ static void do_info(const jctx *c, const jv *in) {
     v.can_max_frames_per_s   = (uint32_t)jint(c, in, "can_max_frames_per_s");
     v.imu_rate_hz            = (uint16_t)jint(c, in, "imu_rate_hz");
     v.imu_max_rate_hz        = (uint16_t)jint(c, in, "imu_max_rate_hz");
-    v.can_max_payload        = (uint8_t) jint(c, in, "can_max_payload");
+    v.reserved_20            = (uint8_t) jint(c, in, "reserved_20");
     v.clock_flags            = (uint8_t) jint(c, in, "clock_flags");
     v.max_notify_bytes       = (uint16_t)jint(c, in, "max_notify_bytes");
     encoded(vtp_encode_info(&v, out, sizeof out), out);

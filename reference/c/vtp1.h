@@ -115,7 +115,8 @@ typedef struct {
     uint16_t gps_rate_hz, gps_max_rate_hz, can_subscription_slots;
     uint32_t can_max_frames_per_s;
     uint16_t imu_rate_hz, imu_max_rate_hz;
-    uint8_t  can_max_payload, clock_flags;
+    uint8_t  reserved_20;   /* was can_max_payload; SPEC.md 4.2 derives it */
+    uint8_t  clock_flags;
     uint16_t max_notify_bytes;
 } vtp_info_t;
 

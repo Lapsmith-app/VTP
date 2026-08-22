@@ -234,12 +234,12 @@ int main(void) {
             printf("{\"ok\":true,\"protocol_major\":%u,\"protocol_minor\":%u,"
                    "\"capabilities\":%u,\"gps_rate_hz\":%u,\"gps_max_rate_hz\":%u,"
                    "\"can_subscription_slots\":%u,\"can_max_frames_per_s\":%u,"
-                   "\"imu_rate_hz\":%u,\"imu_max_rate_hz\":%u,\"can_max_payload\":%u,"
+                   "\"imu_rate_hz\":%u,\"imu_max_rate_hz\":%u,\"reserved_20\":%u,"
                    "\"clock_flags\":%u,\"max_notify_bytes\":%u",
                    v.protocol_major, v.protocol_minor, v.capabilities,
                    v.gps_rate_hz, v.gps_max_rate_hz, v.can_subscription_slots,
                    v.can_max_frames_per_s, v.imu_rate_hz, v.imu_max_rate_hz,
-                   v.can_max_payload, v.clock_flags, v.max_notify_bytes);
+                   v.reserved_20, v.clock_flags, v.max_notify_bytes);
             finish(enc, vtp_encode_info(&v, enc, sizeof enc));
 
         } else if (!strcmp(record, "can_list")) {

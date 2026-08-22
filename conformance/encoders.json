@@ -584,7 +584,6 @@
         "gps_max_rate_hz": 10,
         "can_subscription_slots": 32,
         "can_max_frames_per_s": 2000,
-        "can_max_payload": 8,
         "max_notify_bytes": 244
       }
     },

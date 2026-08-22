@@ -295,8 +295,7 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     if (!(caps & VTP_CAPABILITIES_GPS)
         && (v->gps_rate_hz || v->gps_max_rate_hz)) return -1;
     if (!(caps & VTP_CAPABILITIES_CAN)
-        && (v->can_subscription_slots || v->can_max_frames_per_s
-            || v->can_max_payload)) return -1;
+        && (v->can_subscription_slots || v->can_max_frames_per_s)) return -1;
     if (!(caps & VTP_CAPABILITIES_IMU)
         && (v->imu_rate_hz || v->imu_max_rate_hz)) return -1;
 
@@ -310,7 +309,7 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     wr32(out + VTP_INFO_OFF_CAN_MAX_FRAMES_PER_S, v->can_max_frames_per_s);
     wr16(out + VTP_INFO_OFF_IMU_RATE_HZ, v->imu_rate_hz);
     wr16(out + VTP_INFO_OFF_IMU_MAX_RATE_HZ, v->imu_max_rate_hz);
-    out[VTP_INFO_OFF_CAN_MAX_PAYLOAD] = v->can_max_payload;
+    out[VTP_INFO_OFF_RESERVED_20] = 0;   /* SPEC.md 2 */
     out[VTP_INFO_OFF_CLOCK_FLAGS] =
         (uint8_t)KNOWN_BITS(v->clock_flags, VTP_CLOCK_FLAGS_KNOWN);
     wr16(out + VTP_INFO_OFF_MAX_NOTIFY_BYTES, v->max_notify_bytes);

@@ -202,6 +202,15 @@ def _validate_control(schema):
         seen.add(op["name"])
         if "response" not in op:
             problems.append(f"{where}: declares no response detail")
+        if "capability" not in op:
+            problems.append(f"{where}: declares no owning capability; use null "
+                            f"for one every device answers")
+        elif op["capability"] is not None:
+            caps = {b["name"]
+                    for b in schema["bitmasks"]["capabilities"]["bits"]}
+            if op["capability"] not in caps:
+                problems.append(f"{where}: capability {op['capability']!r} is "
+                                f"not a bit of `capabilities`")
         spec = op.get("params", "")
         if not isinstance(spec, str):
             problems.append(f"{where}: params must be a string")
@@ -427,8 +436,8 @@ def spec_tables(schema):
         lines.append("| *other* | *unknown* | MUST decode as unknown, never as a default |")
         out[f"enum:{name}"] = "\n".join(lines)
 
-    lines = ["| Opcode | Command | Params | Response detail | Notes |",
-             "| --- | --- | --- | --- | --- |"]
+    lines = ["| Opcode | Command | Needs | Params | Response detail | Notes |",
+             "| --- | --- | --- | --- | --- | --- |"]
     for op in schema["control"]["opcodes"]:
         params = f"`{op['params']}`" if op["params"] else "—"
         # Every opcode declares its response detail. Leaving that to prose is
@@ -437,8 +446,13 @@ def spec_tables(schema):
         if resp is None:
             sys.exit(f"control: opcode {op['name']} declares no response detail")
         resp = f"`{resp}`" if resp else "—"
-        lines.append(f"| `0x{op['value']:02X}` | `{op['name']}` | {params} | "
-                     f"{resp} | {op.get('desc', '—')} |")
+        # ...and every opcode declares the capability that owns it, for the
+        # same reason: without it, "what does this bit change" had no answer.
+        if "capability" not in op:
+            sys.exit(f"control: opcode {op['name']} declares no capability")
+        cap = f"`{op['capability']}`" if op["capability"] else "—"
+        lines.append(f"| `0x{op['value']:02X}` | `{op['name']}` | {cap} | "
+                     f"{params} | {resp} | {op.get('desc', '—')} |")
     out["control"] = "\n".join(lines)
 
     # Which records carry an extension trailer, straight from the schema, so
@@ -1518,14 +1532,15 @@ def vectors(schema):
                   capabilities=C["gps"] | C["can"] | C["control"] | C["on_change_subscriptions"],
                   gps_rate_hz=25, gps_max_rate_hz=25, can_subscription_slots=64,
                   can_max_frames_per_s=4000, imu_rate_hz=0, imu_max_rate_hz=0,
-                  can_max_payload=8, clock_flags=0b01, max_notify_bytes=244),
+                  clock_flags=0b01, max_notify_bytes=244),
              "A typical dual-role module."),
         case(schema, "info", "gps-only-no-control",
              dict(protocol_major=1, protocol_minor=0, capabilities=C["gps"],
-                  gps_rate_hz=10, gps_max_rate_hz=10, can_max_payload=0,
+                  gps_rate_hz=10, gps_max_rate_hz=10,
                   max_notify_bytes=185),
              "A GPS-only board with no control channel. Every CAN capacity figure is zero "
-             "-- including can_max_payload, which is a capacity like any other -- and a "
+             "and the largest CAN payload follows from the capability bits "
+             "(SPEC.md 4.2) rather than from a field -- and a "
              "client MUST NOT infer a default."),
         case(schema, "info", "future-minor-unknown-capability",
              dict(protocol_major=1, protocol_minor=7,
@@ -1533,7 +1548,7 @@ def vectors(schema):
                                 | C["control"] | (1 << 19)),
                   gps_rate_hz=25, gps_max_rate_hz=25, can_subscription_slots=32,
                   can_max_frames_per_s=4000, imu_rate_hz=833, imu_max_rate_hz=833,
-                  can_max_payload=64, clock_flags=0b11, max_notify_bytes=498),
+                  clock_flags=0b11, max_notify_bytes=498),
              "Minor 7 with a capability bit this client has never heard of. A client MUST "
              "ignore the unknown bit and use everything it does understand, and a "
              "VTP/1.0 encoder MUST NOT reproduce it (SPEC.md 2).",
@@ -1560,7 +1575,7 @@ def vectors(schema):
              dict(protocol_major=1, protocol_minor=0,
                   capabilities=C["gps"] | C["can"],
                   gps_rate_hz=10, gps_max_rate_hz=10, can_subscription_slots=32,
-                  can_max_frames_per_s=2000, can_max_payload=8,
+                  can_max_frames_per_s=2000,
                   max_notify_bytes=244),
              "SPEC.md 4.1 -- `can` requires `control`. A CAN device with no Control "
              "characteristic forwards nothing, because CAN_SUBSCRIBE is the only way "
@@ -1576,7 +1591,7 @@ def vectors(schema):
         case(schema, "info", "can-fd-without-can",
              dict(protocol_major=1, protocol_minor=0,
                   capabilities=C["can_fd"] | C["control"],
-                  can_max_payload=64, max_notify_bytes=244),
+                  max_notify_bytes=244),
              "SPEC.md 4.1 -- `can_fd` qualifies how CAN frames are carried, and "
              "qualifies nothing on a device with no CAN.",
              reject="capabilities"),
@@ -1589,6 +1604,28 @@ def vectors(schema):
              "clear. A client sizing a buffer from can_max_frames_per_s here has been "
              "told something false about a role the device does not have.",
              reject="capabilities"),
+        {"name": "reserved-byte-nonzero",
+         "desc": "Byte 20 carries a value assigned by a future minor. It held "
+                 "can_max_payload until SPEC.md 4.2 derived the CAN payload "
+                 "ceiling from the capability bits instead, so it is reserved "
+                 "now -- and both halves of SPEC.md 2 apply: a decoder MUST "
+                 "ignore it, and an encoder MUST normalise it to zero.",
+         "record": "info",
+         "hex": encode(schema, "info",
+                       dict(protocol_major=1, protocol_minor=0,
+                            capabilities=C["gps"], gps_rate_hz=10,
+                            gps_max_rate_hz=10, reserved_20=0x40,
+                            max_notify_bytes=244)).hex(),
+         "expect": {f["name"]: dict(protocol_major=1, protocol_minor=0,
+                                    capabilities=C["gps"], gps_rate_hz=10,
+                                    gps_max_rate_hz=10, reserved_20=0x40,
+                                    max_notify_bytes=244).get(f["name"], 0)
+                    for f in schema["records"]["info"]["fields"]},
+         "canonical": False,
+         "expect_roundtrip_hex": encode(schema, "info",
+                       dict(protocol_major=1, protocol_minor=0,
+                            capabilities=C["gps"], gps_rate_hz=10,
+                            gps_max_rate_hz=10, max_notify_bytes=244)).hex()},
         {"name": "short-payload",
          "desc": "23 bytes. Info is fixed-size; a truncated read MUST be rejected.",
          "record": "info",
@@ -2293,7 +2330,7 @@ def vectors(schema):
                        capabilities=C["gps"] | C["can"],
                        gps_rate_hz=10, gps_max_rate_hz=10,
                        can_subscription_slots=32, can_max_frames_per_s=2000,
-                       can_max_payload=8, max_notify_bytes=244)},
+                       max_notify_bytes=244)},
         {"name": "info-capacity-without-capability",
          "record": "info", "must_refuse": True,
          "desc": "SPEC.md 4.1 -- every CAN capacity is zero while the `can` "

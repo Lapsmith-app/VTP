@@ -22,11 +22,13 @@
 #
 # Usage:
 #   ./make_macos_app.sh
-#   open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py"
+#   open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py"
 #   tail -f /tmp/vtp-peripheral.log
 #
-# Note `open <path>`, not `open -a <path>`: the -a form takes an application
-# NAME to look up, not a path, and fails with "Unable to find application".
+# Note `open -n <path>`: `-a` takes an application NAME rather than a path and
+# fails with "Unable to find application", and WITHOUT `-n` macOS activates an
+# already-running copy and silently discards the arguments -- so a second run
+# with different flags quietly reuses the first run's.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -118,7 +120,7 @@ Built $APP
 Run it. Note 'open <path>' -- NOT 'open -a', which takes an application name
 rather than a path, and NOT the binary directly:
 
-    open "$APP" --args "$HERE/serve.py"
+    open -n "$APP" --args "$HERE/serve.py"
     tail -f /tmp/vtp-peripheral.log
 
 macOS will prompt for Bluetooth the first time. After you allow it, the app

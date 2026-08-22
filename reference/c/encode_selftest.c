@@ -78,7 +78,6 @@ static void missing_arrays(void) {
         SETUP;
         vtp_monitor_declaration_t p;
         memset(&p, 0, sizeof p);
-        p.total = 2;
         p.count = 2;
         ok(vtp_encode_monitor_list(&p, NULL, out, sizeof out) == -1,
            "monitor_list(count=2, entries=NULL) refuses");
@@ -135,14 +134,15 @@ static void missing_arrays(void) {
         ok(untouched(out, sizeof out), "control_response(detail=NULL) wrote nothing");
     }
     /* A count of zero has nothing to read, so a null array is not malformed
-     * there -- refusing it would reject the empty page every pager ends on. */
+     * there: SPEC.md 13.5 lets a device ask for no channels at all, and that
+     * declaration is exactly a header with no entries behind it. */
     {
         SETUP;
         vtp_monitor_declaration_t p;
         memset(&p, 0, sizeof p);
         ok(vtp_encode_monitor_list(&p, NULL, out, sizeof out)
                == VTP_MONITOR_DECLARATION_SIZE,
-           "monitor_list(count=0, entries=NULL) is a legal empty page");
+           "monitor_list(count=0, entries=NULL) is a legal empty declaration");
     }
 }
 

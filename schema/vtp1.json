@@ -91,8 +91,7 @@
       ],
       "can": [
         "can_subscription_slots",
-        "can_max_frames_per_s",
-        "can_max_payload"
+        "can_max_frames_per_s"
       ],
       "imu": [
         "imu_rate_hz",
@@ -583,11 +582,12 @@
           "units": "Hz"
         },
         {
-          "name": "can_max_payload",
+          "name": "reserved_20",
           "offset": 20,
           "size": 1,
           "type": "u8",
-          "desc": "8 for classic CAN, 64 for CAN FD"
+          "reserved": true,
+          "desc": "Was can_max_payload; derived from the capability bits since (SPEC.md 4.2)"
         },
         {
           "name": "clock_flags",
@@ -1323,6 +1323,7 @@
       {
         "value": 1,
         "name": "CAN_RESET",
+        "capability": "can",
         "params": "",
         "response": "",
         "desc": "Clear all subscriptions and stop the CAN stream"
@@ -1330,6 +1331,7 @@
       {
         "value": 2,
         "name": "CAN_SUBSCRIBE",
+        "capability": "can",
         "params": "id:u32, mode:u8, arg:u16",
         "response": "handle:u16",
         "desc": "Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF"
@@ -1337,12 +1339,14 @@
       {
         "value": 3,
         "name": "CAN_SUBSCRIBE_MASK",
+        "capability": "masked_subscriptions",
         "params": "id:u32, mask:u32, mode:u8, arg:u16",
         "response": "handle:u16"
       },
       {
         "value": 4,
         "name": "CAN_UNSUBSCRIBE",
+        "capability": "can",
         "params": "handle:u16",
         "response": "",
         "desc": "Removes one subscription by the handle its install returned"
@@ -1350,6 +1354,7 @@
       {
         "value": 5,
         "name": "CAN_LIST",
+        "capability": "can",
         "params": "start:u16",
         "response": "can_list_page record",
         "desc": "One page of the table, starting at index `start`"
@@ -1357,6 +1362,7 @@
       {
         "value": 16,
         "name": "GPS_SET_RATE",
+        "capability": "gps",
         "params": "hz:u16",
         "response": "",
         "desc": "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8)"
@@ -1364,6 +1370,7 @@
       {
         "value": 32,
         "name": "IMU_SET_RATE",
+        "capability": "imu",
         "params": "hz:u16",
         "response": "",
         "desc": "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8)"
@@ -1371,6 +1378,7 @@
       {
         "value": 48,
         "name": "TIME_SYNC",
+        "capability": null,
         "params": "",
         "response": "time_sync record",
         "desc": "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"
@@ -1378,12 +1386,14 @@
       {
         "value": 49,
         "name": "GET_LINK_PARAMS",
+        "capability": null,
         "params": "",
         "response": "link_params record"
       },
       {
         "value": 64,
         "name": "MONITOR_LIST",
+        "capability": "monitor",
         "params": "",
         "response": "monitor_declaration record",
         "desc": "Every channel this device asks the client to supply, in one response (SPEC.md 13.3)"

@@ -25,7 +25,7 @@
 #define VTP_INFO_OFF_CAN_MAX_FRAMES_PER_S 12
 #define VTP_INFO_OFF_IMU_RATE_HZ 16
 #define VTP_INFO_OFF_IMU_MAX_RATE_HZ 18
-#define VTP_INFO_OFF_CAN_MAX_PAYLOAD 20
+#define VTP_INFO_OFF_RESERVED_20 20
 #define VTP_INFO_OFF_CLOCK_FLAGS 21
 #define VTP_INFO_OFF_MAX_NOTIFY_BYTES 22
 
@@ -275,10 +275,9 @@ typedef struct { uint32_t bit; uint8_t offset, size; const char *field; } vtp_ca
     { (1u << 0), 8, 2, "gps_max_rate_hz" }, \
     { (1u << 1), 10, 2, "can_subscription_slots" }, \
     { (1u << 1), 12, 4, "can_max_frames_per_s" }, \
-    { (1u << 1), 20, 1, "can_max_payload" }, \
     { (1u << 2), 16, 2, "imu_rate_hz" }, \
     { (1u << 2), 18, 2, "imu_max_rate_hz" }, \
 }
-#define VTP_CAPACITY_RULE_COUNT 7
+#define VTP_CAPACITY_RULE_COUNT 6
 
 #endif /* VTP1_GENERATED_H */

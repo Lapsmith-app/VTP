@@ -96,7 +96,7 @@ profile:
   # this is what makes that mechanically checkable rather than a promise.
   capacity:
     gps: [gps_rate_hz, gps_max_rate_hz]
-    can: [can_subscription_slots, can_max_frames_per_s, can_max_payload]
+    can: [can_subscription_slots, can_max_frames_per_s]
     imu: [imu_rate_hz, imu_max_rate_hz]
 
 enums:
@@ -274,7 +274,15 @@ records:
       - {name: can_max_frames_per_s,   offset: 12, size: 4, type: u32, units: "frames/s"}
       - {name: imu_rate_hz,     offset: 16, size: 2, type: u16, units: Hz}
       - {name: imu_max_rate_hz, offset: 18, size: 2, type: u16, units: Hz}
-      - {name: can_max_payload, offset: 20, size: 1, type: u8, desc: "8 for classic CAN, 64 for CAN FD"}
+      # Was `can_max_payload`, and it could only ever hold a value the
+      # capability bits already fixed: 0 with no CAN, 64 with can_fd, 8
+      # otherwise. Two rules in SPEC.md 4.1 therefore both applied to a
+      # device with no CAN and disagreed (0 and 8), neither codec enforced
+      # any of it, and a generated case cheerfully expected an FD device
+      # reporting 0. A field whose every value is derivable is a field two
+      # implementations can disagree about for no gain. SPEC.md 4.2 derives
+      # it now, and this byte is free for a later minor.
+      - {name: reserved_20, offset: 20, size: 1, type: u8, reserved: true, desc: "Was can_max_payload; derived from the capability bits since (SPEC.md 4.2)"}
       - {name: clock_flags,     offset: 21, size: 1, type: u8, bitmask: clock_flags}
       # A DEVICE ceiling, not the current link's negotiated ATT payload. The
       # two cannot be the same field: a client reads Info immediately after
@@ -479,24 +487,37 @@ records:
 control:
   request:  "[opcode:u8][tag:u8][params...]"
   response: "[opcode:u8][tag:u8][status:u8][detail...]"
+  # `capability` is the bit that OWNS the opcode. A device without it answers
+  # unsupported_opcode, and answers it before looking at the parameters --
+  # SPEC.md 9 states that order, because "which of these two refusals do I
+  # get" is otherwise a coin toss between implementations.
+  #
+  # It was absent, so the matrix said which bits a device may set and nothing
+  # said what any of them CHANGED about the control plane. The reference
+  # peripheral duly answered `ok` to CAN_SUBSCRIBE, GPS_SET_RATE, IMU_SET_RATE
+  # and MONITOR_LIST while declaring only `control`.
+  #
+  # TIME_SYNC and GET_LINK_PARAMS have no owning capability: they are about
+  # the link and the clock, which every device has, and reaching them at all
+  # means the Control characteristic is live.
   opcodes:
-    - {value: 0x01, name: CAN_RESET,          params: "",                            response: "",                      desc: "Clear all subscriptions and stop the CAN stream"}
-    - {value: 0x02, name: CAN_SUBSCRIBE,      params: "id:u32, mode:u8, arg:u16",     response: "handle:u16",            desc: "Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF"}
-    - {value: 0x03, name: CAN_SUBSCRIBE_MASK, params: "id:u32, mask:u32, mode:u8, arg:u16", response: "handle:u16"}
-    - {value: 0x04, name: CAN_UNSUBSCRIBE,    params: "handle:u16",                   response: "",                      desc: "Removes one subscription by the handle its install returned"}
-    - {value: 0x05, name: CAN_LIST,           params: "start:u16",                    response: "can_list_page record",  desc: "One page of the table, starting at index `start`"}
+    - {value: 0x01, name: CAN_RESET,          capability: can,     params: "",                            response: "",                      desc: "Clear all subscriptions and stop the CAN stream"}
+    - {value: 0x02, name: CAN_SUBSCRIBE,      capability: can,     params: "id:u32, mode:u8, arg:u16",     response: "handle:u16",            desc: "Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF"}
+    - {value: 0x03, name: CAN_SUBSCRIBE_MASK, capability: masked_subscriptions, params: "id:u32, mask:u32, mode:u8, arg:u16", response: "handle:u16"}
+    - {value: 0x04, name: CAN_UNSUBSCRIBE,    capability: can,     params: "handle:u16",                   response: "",                      desc: "Removes one subscription by the handle its install returned"}
+    - {value: 0x05, name: CAN_LIST,           capability: can,     params: "start:u16",                    response: "can_list_page record",  desc: "One page of the table, starting at index `start`"}
     # SPEC.md 9.8. `hz` of zero stops the stream; a rate the device does not
     # support is bad_params, never a silently substituted neighbour. The
     # applied rate is read back from Info, so there is no response detail to
     # keep in step with it.
-    - {value: 0x10, name: GPS_SET_RATE,       params: "hz:u16",                       response: "",                      desc: "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8)"}
-    - {value: 0x20, name: IMU_SET_RATE,       params: "hz:u16",                       response: "",                      desc: "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8)"}
+    - {value: 0x10, name: GPS_SET_RATE,       capability: gps,     params: "hz:u16",                       response: "",                      desc: "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8)"}
+    - {value: 0x20, name: IMU_SET_RATE,       capability: imu,     params: "hz:u16",                       response: "",                      desc: "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8)"}
     # params is the empty string, not a dash. It carried a literal em-dash,
     # which is how the SPEC.md table renders "no parameters" -- the display
     # form had been written into the source of truth, so the schema said this
     # opcode took one parameter whose name and type were both the character
     # "-", while SPEC.md 9 said it was parameterless. tools/generate.py now
     # refuses the dash outright.
-    - {value: 0x30, name: TIME_SYNC,          params: "",                             response: "time_sync record",      desc: "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"}
-    - {value: 0x31, name: GET_LINK_PARAMS,    params: "",                             response: "link_params record"}
-    - {value: 0x40, name: MONITOR_LIST,       params: "",                             response: "monitor_declaration record", desc: "Every channel this device asks the client to supply, in one response (SPEC.md 13.3)"}
+    - {value: 0x30, name: TIME_SYNC,          capability: null,    params: "",                             response: "time_sync record",      desc: "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"}
+    - {value: 0x31, name: GET_LINK_PARAMS,    capability: null,    params: "",                             response: "link_params record"}
+    - {value: 0x40, name: MONITOR_LIST,       capability: monitor, params: "",                             response: "monitor_declaration record", desc: "Every channel this device asks the client to supply, in one response (SPEC.md 13.3)"}

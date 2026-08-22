@@ -23,7 +23,7 @@ clock, with no lossy packing.
 | --- | --- |
 | Specification | Believed internally consistent; §4.1 fixes the profile |
 | UUID allocation | Frozen |
-| Conformance corpus | 124 vectors across 9 record types, and 35 producer cases |
+| Conformance corpus | 125 vectors across 9 record types, and 35 producer cases |
 | Reference decoders | C and Python, both passing every vector |
 | Reference encoders | C and Python, both passing every producer case |
 | Software peripheral | A synthetic device, verified against the reference decoder |
@@ -81,6 +81,9 @@ python3 conformance/produce.py --impl "python3 reference/python/vtp1_produce.py"
 
 # Regenerate every derived artefact from the schema
 python3 tools/generate.py
+
+# Or run everything CI runs, in one command
+tools/ci.sh            # --quick skips the mutation sweep
 
 # Run a synthetic VTP/1 device you can point a real client at
 python3 reference/peripheral/selftest.py      # verify it; needs no Bluetooth

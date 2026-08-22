@@ -126,9 +126,16 @@ def _zero_reserved(name, values):
 
 
 def _pack(name, values):
-    # Every record goes through the reserved-bit mask on its way to the wire,
-    # so no encoder function has to remember to apply it.
-    values = _normalise_bitmasks(name, values)
+    # Every record goes through BOTH normalisations on its way to the wire, so
+    # no encoder function has to remember either.
+    #
+    # `_zero_reserved` used to be called by hand, per record, by the functions
+    # that happened to have a reserved field when they were written --
+    # `encode_info` did not, because Info had none. It gained one the moment
+    # `can_max_payload` became derivable, and the encoder went on transmitting
+    # whatever the caller left there. A rule applied by remembering is a rule
+    # that lapses when the schema changes.
+    values = _zero_reserved(name, _normalise_bitmasks(name, values))
     rec = _record(name)
     buf = bytearray(rec["size"])
     for f in rec["fields"]:

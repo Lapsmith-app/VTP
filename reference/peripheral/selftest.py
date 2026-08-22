@@ -1080,16 +1080,117 @@ def main():
           f"refused with bad_params rather than silently forwarding every "
           f"frame; got status {onchange[2]}")
 
-    # SPEC.md 4.1 -- the capability decides the capacity.
-    check(vtp1.decode_info(plain.info())["can_max_payload"] == 8,
-          "a CAN device without can_fd MUST report can_max_payload 8")
+    # SPEC.md 4.2 -- the largest CAN payload is derived from the bits, not
+    # carried in a field. There is nothing left to disagree with, which is the
+    # point: `can_max_payload` could only ever hold 0, 8 or 64 and the bits
+    # already said which, so two rules covered a no-CAN device and gave
+    # different answers.
+    def payload_ceiling(info):
+        caps = info["capabilities"]
+        if not caps & dev.CAP_CAN:
+            return 0
+        return 64 if caps & dev.CAP_CAN_FD else 8
+
+    check(payload_ceiling(vtp1.decode_info(plain.info())) == 8,
+          "a CAN device without can_fd carries at most 8 payload bytes")
     fd = dev.VtpDevice(now_us=lambda: 0,
                        capabilities=dev.CAP_CAN | dev.CAP_CONTROL | dev.CAP_CAN_FD)
-    check(vtp1.decode_info(fd.info())["can_max_payload"] == 64,
-          "a CAN FD device MUST report can_max_payload 64")
+    check(payload_ceiling(vtp1.decode_info(fd.info())) == 64,
+          "a CAN FD device carries up to 64")
     nocan = dev.VtpDevice(now_us=lambda: 0, capabilities=dev.CAP_GPS)
-    check(vtp1.decode_info(nocan.info())["can_max_payload"] == 0,
-          "a device with no CAN MUST report can_max_payload 0 (SPEC.md 4.1)")
+    check(payload_ceiling(vtp1.decode_info(nocan.info())) == 0,
+          "a device with no CAN carries none")
+    check(vtp1.decode_info(nocan.info())["reserved_20"] == 0,
+          "byte 20 is reserved now and MUST be zero on transmit (SPEC.md 2)")
+
+    # SPEC.md 13.4 -- a device asking for more channels than fit in one
+    # complete write is refused where the mistake is, not at the first
+    # MONITOR_LIST.
+    try:
+        dev.VtpDevice(now_us=lambda: 0,
+                      monitor_channels=[dev.CH_SPEED] * 16)
+        check(False, "16 monitor channels MUST be refused at construction "
+                     "(SPEC.md 13.4 allows 15)")
+    except ValueError:
+        pass
+    check(len(dev.VtpDevice(now_us=lambda: 0,
+                            monitor_channels=[dev.CH_SPEED] * 15)
+              ._monitor_channels) == 15,
+          "15 channels is the cap, and MUST be accepted")
+
+    bare_clock = [0]
+
+    # ---- A device does only what it says it does ------------------------
+    # SPEC.md 4.1 and 9. Every opcode is owned by a capability, and a device
+    # without the bit answers unsupported_opcode BEFORE looking at parameters.
+    # A device declaring only `control` used to emit GPS and IMU notifications
+    # and answer `ok` to CAN_SUBSCRIBE, GPS_SET_RATE, IMU_SET_RATE and
+    # MONITOR_LIST -- the capability set said what a device MAY do and nothing
+    # made it so.
+    bare = dev.VtpDevice(now_us=lambda: bare_clock[0],
+                         capabilities=dev.CAP_CONTROL)
+    bare.on_connect()
+    produced = []
+    for _ in range(400):
+        bare_clock[0] += 5_000
+        produced += [name for name, _ in bare.poll()]
+    check(not produced,
+          f"a device declaring only `control` MUST notify on nothing; it "
+          f"produced {sorted(set(produced))}")
+
+    owned = {
+        "CAN_RESET": bytes([dev.CAN_RESET, 1]),
+        "CAN_SUBSCRIBE": bytes([dev.CAN_SUBSCRIBE, 2])
+                         + struct.pack("<IBH", 0x1A0, 0, 0),
+        "CAN_SUBSCRIBE_MASK": bytes([dev.CAN_SUBSCRIBE_MASK, 3])
+                              + struct.pack("<IIBH", 0x1A0, 0x3FFFFFFF, 0, 0),
+        "CAN_UNSUBSCRIBE": bytes([dev.CAN_UNSUBSCRIBE, 4])
+                           + struct.pack("<H", 1),
+        "CAN_LIST": bytes([dev.CAN_LIST, 5]) + struct.pack("<H", 0),
+        "GPS_SET_RATE": bytes([dev.GPS_SET_RATE, 6]) + struct.pack("<H", 5),
+        "IMU_SET_RATE": bytes([dev.IMU_SET_RATE, 7]) + struct.pack("<H", 50),
+        "MONITOR_LIST": bytes([dev.MONITOR_LIST, 8]),
+    }
+    for name, request in owned.items():
+        got = bare.handle_control(request)
+        check(got[2] == dev.ST_UNSUPPORTED,
+              f"{name} MUST answer unsupported_opcode on a device that has "
+              f"not declared the capability owning it; got status {got[2]}")
+
+    # ...and the two that belong to no role still work, because they are about
+    # the link and the clock, which every device has.
+    for name, request in (("TIME_SYNC", bytes([dev.TIME_SYNC, 9])),
+                          ("GET_LINK_PARAMS", bytes([dev.GET_LINK_PARAMS, 10]))):
+        check(bare.handle_control(request)[2] == dev.ST_OK,
+              f"{name} has no owning capability and MUST still be answered")
+
+    # SPEC.md 9 -- availability is decided BEFORE parameters. A malformed
+    # request for an opcode this device does not have is unsupported_opcode,
+    # not bad_params: the two mean different things to a client, and getting
+    # them the wrong way round either loops it forever or makes it give up on
+    # a device that would have worked.
+    malformed = bare.handle_control(bytes([dev.GPS_SET_RATE, 11]) + b"\x01")
+    check(malformed[2] == dev.ST_UNSUPPORTED,
+          f"a MALFORMED request for an unavailable opcode MUST still answer "
+          f"unsupported_opcode, not bad_params; got status {malformed[2]}")
+
+    # The same order one level down: an unsupported subscription MODE is
+    # bad_params, but only once the opcode itself was available.
+    check(bare.handle_control(
+              bytes([dev.CAN_SUBSCRIBE, 12])
+              + struct.pack("<IBH", 0x1A0, dev.SUB_ON_CHANGE, 100))[2]
+          == dev.ST_UNSUPPORTED,
+          "on a device with no CAN at all, an on_change subscription is "
+          "unsupported_opcode -- the opcode was never available to carry the "
+          "mode (SPEC.md 9)")
+
+    # SPEC.md 4.1 -- monitor_values is inert without the bit.
+    check(bare.handle_monitor_write(
+              struct.pack("<HBB", 0, 1, 0) + struct.pack("<BBi", 0, 1, 5))
+          is not None,
+          "a device without the monitor bit MUST reject a value write; "
+          "accepting it would put values on a display for a role it does not "
+          "have")
 
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)

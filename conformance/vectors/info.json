@@ -6,7 +6,7 @@
       "name": "gps-and-can-device",
       "desc": "A typical dual-role module.",
       "record": "info",
-      "hex": "010093000000190019004000a00f0000000000000801f400",
+      "hex": "010093000000190019004000a00f0000000000000001f400",
       "expect": {
         "protocol_major": 1,
         "protocol_minor": 0,
@@ -17,14 +17,14 @@
         "can_max_frames_per_s": 4000,
         "imu_rate_hz": 0,
         "imu_max_rate_hz": 0,
-        "can_max_payload": 8,
+        "reserved_20": 0,
         "clock_flags": 1,
         "max_notify_bytes": 244
       }
     },
     {
       "name": "gps-only-no-control",
-      "desc": "A GPS-only board with no control channel. Every CAN capacity figure is zero -- including can_max_payload, which is a capacity like any other -- and a client MUST NOT infer a default.",
+      "desc": "A GPS-only board with no control channel. Every CAN capacity figure is zero and the largest CAN payload follows from the capability bits (SPEC.md 4.2) rather than from a field -- and a client MUST NOT infer a default.",
       "record": "info",
       "hex": "0100010000000a000a00000000000000000000000000b900",
       "expect": {
@@ -37,7 +37,7 @@
         "can_max_frames_per_s": 0,
         "imu_rate_hz": 0,
         "imu_max_rate_hz": 0,
-        "can_max_payload": 0,
+        "reserved_20": 0,
         "clock_flags": 0,
         "max_notify_bytes": 185
       }
@@ -46,7 +46,7 @@
       "name": "future-minor-unknown-capability",
       "desc": "Minor 7 with a capability bit this client has never heard of. A client MUST ignore the unknown bit and use everything it does understand, and a VTP/1.0 encoder MUST NOT reproduce it (SPEC.md 2).",
       "record": "info",
-      "hex": "010737000800190019002000a00f0000410341034003f201",
+      "hex": "010737000800190019002000a00f0000410341030003f201",
       "expect": {
         "protocol_major": 1,
         "protocol_minor": 7,
@@ -57,13 +57,13 @@
         "can_max_frames_per_s": 4000,
         "imu_rate_hz": 833,
         "imu_max_rate_hz": 833,
-        "can_max_payload": 64,
+        "reserved_20": 0,
         "clock_flags": 3,
         "max_notify_bytes": 498
       },
       "note": "This vector used to declare CAN with no Control bit, which SPEC.md 4.1 now forbids and which conformance/run.py had been quietly assuming the opposite of. `can_fd` requires `can` and `can` requires `control`, so the whole chain is present here.",
       "canonical": false,
-      "expect_roundtrip_hex": "010737000000190019002000a00f0000410341034003f201"
+      "expect_roundtrip_hex": "010737000000190019002000a00f0000410341030003f201"
     },
     {
       "name": "rate-below-maximum",
@@ -80,7 +80,7 @@
         "can_max_frames_per_s": 0,
         "imu_rate_hz": 100,
         "imu_max_rate_hz": 833,
-        "can_max_payload": 0,
+        "reserved_20": 0,
         "clock_flags": 0,
         "max_notify_bytes": 244
       },
@@ -90,7 +90,7 @@
       "name": "can-without-control",
       "desc": "SPEC.md 4.1 -- `can` requires `control`. A CAN device with no Control characteristic forwards nothing, because CAN_SUBSCRIBE is the only way to ask it to, so this advertises a role no client can use.",
       "record": "info",
-      "hex": "0100030000000a000a002000d0070000000000000800f400",
+      "hex": "0100030000000a000a002000d0070000000000000000f400",
       "must_reject": "capabilities"
     },
     {
@@ -104,7 +104,7 @@
       "name": "can-fd-without-can",
       "desc": "SPEC.md 4.1 -- `can_fd` qualifies how CAN frames are carried, and qualifies nothing on a device with no CAN.",
       "record": "info",
-      "hex": "01003000000000000000000000000000000000004000f400",
+      "hex": "01003000000000000000000000000000000000000000f400",
       "must_reject": "capabilities"
     },
     {
@@ -113,6 +113,28 @@
       "record": "info",
       "hex": "0100010000000a000a002000a00f0000000000000000b900",
       "must_reject": "capabilities"
+    },
+    {
+      "name": "reserved-byte-nonzero",
+      "desc": "Byte 20 carries a value assigned by a future minor. It held can_max_payload until SPEC.md 4.2 derived the CAN payload ceiling from the capability bits instead, so it is reserved now -- and both halves of SPEC.md 2 apply: a decoder MUST ignore it, and an encoder MUST normalise it to zero.",
+      "record": "info",
+      "hex": "0100010000000a000a00000000000000000000004000f400",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 1,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_subscription_slots": 0,
+        "can_max_frames_per_s": 0,
+        "imu_rate_hz": 0,
+        "imu_max_rate_hz": 0,
+        "reserved_20": 64,
+        "clock_flags": 0,
+        "max_notify_bytes": 244
+      },
+      "canonical": false,
+      "expect_roundtrip_hex": "0100010000000a000a00000000000000000000000000f400"
     },
     {
       "name": "short-payload",

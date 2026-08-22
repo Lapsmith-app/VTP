@@ -124,8 +124,13 @@ agree about where they are:
 ```sh
 cd reference/peripheral
 
-# machine A — the device
+# machine A — the device.
+#   Linux:
 python3 serve.py --no-display
+#   macOS: it must run from the app bundle, or the OS kills it before it can
+#   ask for Bluetooth. `open -n`, not plain `open` — see "Running it" above.
+./make_macos_app.sh          # once
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display
 
 # machine B — the client
 pip install -r requirements-client.txt      # bleak, the central-role library
@@ -326,9 +331,9 @@ as broken.
 Run each in turn:
 
 ```bash
-open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt all
-open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt control
-open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt none
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt all
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt control
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt none
 ```
 
 The log names the posture at startup, and `notify-subscribed:` names the

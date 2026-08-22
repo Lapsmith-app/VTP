@@ -244,7 +244,7 @@ Total: **24 bytes**. All fields little-endian.
 | 12 | 4 | `u32` | `can_max_frames_per_s` | `frames/s` |
 | 16 | 2 | `u16` | `imu_rate_hz` | `Hz` |
 | 18 | 2 | `u16` | `imu_max_rate_hz` | `Hz` |
-| 20 | 1 | `u8` | `can_max_payload` | 8 for classic CAN, 64 for CAN FD |
+| 20 | 1 | `u8` | `reserved_20` | Was can_max_payload; derived from the capability bits since (SPEC.md 4.2); **reserved — MUST be zero** |
 | 21 | 1 | `u8` | `clock_flags` | bitmask `clock_flags` |
 | 22 | 2 | `u16` | `max_notify_bytes` | `bytes`; Largest notification this device will ever send; a fixed device ceiling, NOT the negotiated ATT payload (SPEC.md 4.2) |
 <!-- END GENERATED: info -->
@@ -350,7 +350,7 @@ VTP/1?", Info answers "what does it do?", and neither half-answers the other.
 | Bit | Capability | Requires | Capacity fields that MUST be zero when clear |
 | --- | --- | --- | --- |
 | 0 | `gps` | — | `gps_rate_hz`, `gps_max_rate_hz` |
-| 1 | `can` | bit 4 (`control`) | `can_subscription_slots`, `can_max_frames_per_s`, `can_max_payload` |
+| 1 | `can` | bit 4 (`control`) | `can_subscription_slots`, `can_max_frames_per_s` |
 | 2 | `imu` | — | `imu_rate_hz`, `imu_max_rate_hz` |
 | 3 | `monitor` | bit 4 (`control`) | — |
 | 4 | `control` | — | — |
@@ -358,6 +358,21 @@ VTP/1?", Info answers "what does it do?", and neither half-answers the other.
 | 6 | `masked_subscriptions` | bit 1 (`can`) | — |
 | 7 | `on_change_subscriptions` | bit 1 (`can`) | — |
 <!-- END GENERATED: profile:capabilities -->
+
+**The largest CAN payload follows from the bits and is not a field.** A client
+computes it:
+
+| `can` | `can_fd` | Largest payload |
+| --- | --- | --- |
+| clear | clear | 0 — the device has no CAN |
+| set | clear | 8 — Classic CAN |
+| set | set | 64 — CAN FD |
+
+`set`/`set` is the only combination `can_fd` permits, because §4.1 makes
+`can_fd` require `can`. Info carried a `can_max_payload` byte for this until it
+turned out that every value it could hold was already decided here — so two
+statements of one fact existed, an implementation could publish them
+disagreeing, and neither reference checked. Byte 20 of Info is now reserved.
 
 A device MUST NOT set a capability bit without also setting every bit the
 second column names. A client MUST treat an Info whose capabilities break an
@@ -380,7 +395,7 @@ and a client cannot plan around it:
 
 | Bit | Set | Clear |
 | --- | --- | --- |
-| `can_fd` | `can_max_payload` MUST be 64; the device MAY emit records with the FD bit set | The device MUST NOT emit a record with the FD bit set, and `can_max_payload` MUST be 8 |
+| `can_fd` | The device MAY emit records with the FD bit set, carrying up to 64 payload bytes | The device MUST NOT emit a record with the FD bit set, and no record carries more than 8 payload bytes |
 | `masked_subscriptions` | `CAN_SUBSCRIBE_MASK` is accepted | `CAN_SUBSCRIBE_MASK` MUST answer `unsupported_opcode` |
 | `on_change_subscriptions` | `on_change` is accepted as a subscription mode | A subscription naming `on_change` MUST be refused with `bad_params` |
 
@@ -1266,19 +1281,38 @@ The detail's shape is decided by the opcode, and §11.3 allows a minor version
 to add opcodes carrying anything at all, so a client MUST treat the detail of
 an opcode it does not implement as opaque rather than malformed.
 
+**Every opcode is owned by a capability, and availability is decided before
+parameters.** The `Needs` column names it. A device MUST answer
+`unsupported_opcode` to an opcode whose owning capability bit it has not set,
+and MUST do so **without parsing the parameters** — so a malformed
+`GPS_SET_RATE` on a device with no GPS is `unsupported_opcode`, never
+`bad_params`. The order matters because the two refusals mean different things
+to a client: one says "not on this device, ever", the other says "try again
+with better arguments", and a client that gets them the wrong way round either
+retries forever or gives up on a device that would have worked.
+
+The same order applies one level down. A subscription mode the device does not
+support (§4.1) is `bad_params`, and it is checked *after* the opcode's own
+capability: `CAN_SUBSCRIBE` with `on_change` on a device with no CAN at all is
+`unsupported_opcode`, because the opcode was never available to carry the mode.
+
+`TIME_SYNC` and `GET_LINK_PARAMS` have no owning capability. They are about the
+link and the clock, which every device has, and reaching them at all means the
+Control characteristic is live.
+
 <!-- BEGIN GENERATED: control -->
-| Opcode | Command | Params | Response detail | Notes |
-| --- | --- | --- | --- | --- |
-| `0x01` | `CAN_RESET` | — | — | Clear all subscriptions and stop the CAN stream |
-| `0x02` | `CAN_SUBSCRIBE` | `id:u32, mode:u8, arg:u16` | `handle:u16` | Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF |
-| `0x03` | `CAN_SUBSCRIBE_MASK` | `id:u32, mask:u32, mode:u8, arg:u16` | `handle:u16` | — |
-| `0x04` | `CAN_UNSUBSCRIBE` | `handle:u16` | — | Removes one subscription by the handle its install returned |
-| `0x05` | `CAN_LIST` | `start:u16` | `can_list_page record` | One page of the table, starting at index `start` |
-| `0x10` | `GPS_SET_RATE` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
-| `0x20` | `IMU_SET_RATE` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
-| `0x30` | `TIME_SYNC` | — | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
-| `0x31` | `GET_LINK_PARAMS` | — | `link_params record` | — |
-| `0x40` | `MONITOR_LIST` | — | `monitor_declaration record` | Every channel this device asks the client to supply, in one response (SPEC.md 13.3) |
+| Opcode | Command | Needs | Params | Response detail | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `0x01` | `CAN_RESET` | `can` | — | — | Clear all subscriptions and stop the CAN stream |
+| `0x02` | `CAN_SUBSCRIBE` | `can` | `id:u32, mode:u8, arg:u16` | `handle:u16` | Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF |
+| `0x03` | `CAN_SUBSCRIBE_MASK` | `masked_subscriptions` | `id:u32, mask:u32, mode:u8, arg:u16` | `handle:u16` | — |
+| `0x04` | `CAN_UNSUBSCRIBE` | `can` | `handle:u16` | — | Removes one subscription by the handle its install returned |
+| `0x05` | `CAN_LIST` | `can` | `start:u16` | `can_list_page record` | One page of the table, starting at index `start` |
+| `0x10` | `GPS_SET_RATE` | `gps` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
+| `0x20` | `IMU_SET_RATE` | `imu` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
+| `0x30` | `TIME_SYNC` | — | — | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
+| `0x31` | `GET_LINK_PARAMS` | — | — | `link_params record` | — |
+| `0x40` | `MONITOR_LIST` | `monitor` | — | `monitor_declaration record` | Every channel this device asks the client to supply, in one response (SPEC.md 13.3) |
 <!-- END GENERATED: control -->
 
 `status` values:
@@ -2142,6 +2176,7 @@ record tables above.
 | `info.clock_flags` | bits 2–7 | Additional clock properties |
 | `monitor_value.validity` | bits 1–7 | Validity for values added in a later minor |
 | `link_params.validity` | bits 4–15 | Validity for link parameters added in a later minor |
+| `info.reserved_20` | 1 byte | Was can_max_payload; derived from the capability bits since (SPEC.md 4.2) |
 | `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
 | `monitor_declaration.reserved` | 1 byte | Declaration metadata |

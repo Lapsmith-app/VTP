@@ -92,6 +92,16 @@ PROTOCOL_MAJOR, PROTOCOL_MINOR = 1, 0
 # is defined stays the only place it is defined.
 MIN_ATT_MTU = enc.SCHEMA["protocol"]["min_att_mtu"]
 
+# SPEC.md 9 -- which capability bit owns each opcode, read from the schema
+# rather than restated. A device without the bit answers unsupported_opcode,
+# and answers it BEFORE parsing parameters.
+_CAP_BIT = {b["name"]: 1 << b["bit"]
+            for b in enc.SCHEMA["bitmasks"]["capabilities"]["bits"]}
+OPCODE_CAPABILITY = {
+    op["value"]: (_CAP_BIT[op["capability"]] if op["capability"] else 0)
+    for op in enc.SCHEMA["control"]["opcodes"]
+}
+
 ST_OK, ST_UNSUPPORTED, ST_BAD_PARAMS = 0, 1, 2
 ST_TABLE_FULL, ST_RATE_EXCEEDED = 3, 4
 ST_UNKNOWN_HANDLE = 7
@@ -258,6 +268,17 @@ class VtpDevice:
             monitor_channels if monitor_channels is not None else
             (CH_LAP_TIME, CH_LAST_LAP_TIME, CH_BEST_LAP_TIME,
              CH_DELTA_BEST, CH_LAP_NUMBER, CH_SPEED)))
+        # SPEC.md 13.4 -- more channels than fit in one complete client write
+        # is a device that has made its own rule unsatisfiable. Refused HERE,
+        # where the mistake is, rather than at the first MONITOR_LIST: the
+        # encoder would have caught it too, but by then the device is running
+        # and the traceback names the wrong thing.
+        if len(self._monitor_channels) > enc.MONITOR_MAX_CHANNELS:
+            raise ValueError(
+                f"{len(self._monitor_channels)} monitor channels, but SPEC.md "
+                f"13.4 allows {enc.MONITOR_MAX_CHANNELS}: every write must "
+                f"carry every slot, and more than that does not fit in one "
+                f"write at the minimum ATT MTU")
         # slot -> (value, present, written_at). Absent is a state the display
         # renders, not a value it substitutes -- and SPEC.md §13.5 makes an
         # expired value another way of being absent.
@@ -477,11 +498,6 @@ class VtpDevice:
             "can_max_frames_per_s": CAN_MAX_FRAMES_PER_S if can else 0,
             "imu_rate_hz": self.imu_hz if imu else 0,
             "imu_max_rate_hz": 833 if imu else 0,
-            # 64 when can_fd is set, 8 when it is not, and 0 when there is no
-            # CAN at all: the capability decides the capacity.
-            "can_max_payload": (0 if not can
-                                else 64 if caps & CAP_CAN_FD
-                                else 8),
             "clock_flags": 0b10,      # survives reconnect; not GNSS-disciplined
             "max_notify_bytes": self.max_notify_bytes,
         })
@@ -631,15 +647,23 @@ class VtpDevice:
     # -- polling ----------------------------------------------------------
 
     def poll(self):
-        """Notifications due now, as (characteristic, payload) pairs."""
+        """Notifications due now, as (characteristic, payload) pairs.
+
+        A stream is produced only if its capability bit is set. SPEC.md 4.1
+        says an inert characteristic never notifies, and this is where that
+        becomes true rather than merely stated: a device configured with only
+        `control` used to emit GPS and IMU regardless, because poll() had
+        never been told what the device claimed to be.
+        """
         now = self.now_us()
         out, self._deferred = self._deferred, []
+        caps = self.capabilities
 
-        if self.gps_hz and now >= self._next_gps_us:
+        if caps & CAP_GPS and self.gps_hz and now >= self._next_gps_us:
             out.append(("gps", self._gps_fix(now)))
             self._next_gps_us = now + round(1_000_000 / self.gps_hz)
 
-        if self.imu_hz:
+        if caps & CAP_IMU and self.imu_hz:
             # A device that has not been polled for a while must not replay the
             # gap. Delivering a backlog means stale samples arriving as fast as
             # the radio will take them, which is worse than losing them: the
@@ -662,7 +686,11 @@ class VtpDevice:
                 if len(self._imu_pending) >= self._imu_capacity():
                     out.append(("imu", self._flush_imu()))
 
-        for frame in self._due_can_frames(now):
+        # The CAN branch is already gated by `_subscriptions`, which stays
+        # empty on a device whose CAN opcodes all answer unsupported_opcode --
+        # but relying on a side effect of the control plane to enforce a
+        # capability is how the rule stops holding the moment either changes.
+        for frame in (self._due_can_frames(now) if caps & CAP_CAN else ()):
             if self._can_batch_t0 is None:
                 self._can_batch_t0 = frame["_t"]
             # SPEC.md §6.1 — dt is 10 us ticks from t_base and spans 655.35 ms,
@@ -682,7 +710,7 @@ class VtpDevice:
 
         # Flush partial batches on a timer so a quiet bus or a slow ODR still
         # delivers, rather than waiting for a batch that may never fill.
-        if self._subscriptions and now >= self._next_can_flush_us:
+        if caps & CAP_CAN and self._subscriptions and now >= self._next_can_flush_us:
             batch = self._flush_can(now)
             if batch is not None:
                 out.append(("can", batch))
@@ -783,6 +811,23 @@ class VtpDevice:
         def reply(status, detail=b""):
             return bytes([opcode, tag, status]) + detail
 
+        # SPEC.md 9 -- availability before parameters. An opcode whose owning
+        # capability this device has not declared is unsupported_opcode, and a
+        # malformed one is STILL unsupported_opcode rather than bad_params:
+        # the two refusals mean different things to a client ("never on this
+        # device" against "try better arguments"), and getting them the wrong
+        # way round either loops a client forever or makes it give up on a
+        # device that would have worked.
+        #
+        # This gate is why `capabilities` is constructor state. Without it a
+        # device declaring only `control` answered ok to CAN_SUBSCRIBE,
+        # GPS_SET_RATE, IMU_SET_RATE and MONITOR_LIST alike.
+        needed = OPCODE_CAPABILITY.get(opcode)
+        if needed is None:
+            return reply(ST_UNSUPPORTED)          # not an opcode we know
+        if needed and not self.capabilities & needed:
+            return reply(ST_UNSUPPORTED)
+
         if opcode == CAN_RESET:
             # Parameterless. It used to clear the table regardless of what
             # followed the tag, so a malformed request still took effect --
@@ -795,12 +840,10 @@ class VtpDevice:
             return reply(ST_OK)
 
         if opcode in (CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK):
-            # SPEC.md 4.1 -- a device that has not declared masked_subscriptions
-            # does not implement this opcode. CAN_SUBSCRIBE is unaffected: it is
-            # a separate opcode with a full mask, and every CAN device has it.
-            if (opcode == CAN_SUBSCRIBE_MASK
-                    and not self.capabilities & CAP_MASKED_SUBS):
-                return reply(ST_UNSUPPORTED)
+            # SPEC.md 4.1's masked_subscriptions rule is the capability gate
+            # above: the schema names masked_subscriptions as the bit owning
+            # CAN_SUBSCRIBE_MASK. CAN_SUBSCRIBE is owned by `can`, because it
+            # is a separate opcode every CAN device implements.
             want = 7 if opcode == CAN_SUBSCRIBE else 11
             if len(params) != want:
                 return reply(ST_BAD_PARAMS)
@@ -949,6 +992,11 @@ class VtpDevice:
         notification: a partly-applied update is a display showing a mixture of
         two moments.
         """
+        # SPEC.md 4.1 -- monitor_values is inert without the bit: the write is
+        # rejected and changes nothing. A device that quietly accepted values
+        # for a role it does not have would then display them.
+        if not self.capabilities & CAP_MONITOR:
+            return "monitor-not-supported"
         hsize, vsize = 4, 6
         if len(payload) < hsize:
             return "length"

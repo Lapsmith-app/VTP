@@ -8,6 +8,67 @@ conformance vector.
 
 ## [Unreleased]
 
+### Review of PR #24, third pass
+
+- **CI was red and my own verification hid it.** `encode_selftest.c` still
+  assigned `p.total`, removed with Monitor paging. The sanitised build had not
+  compiled since that commit, and I had "checked" it as
+  `make -C reference/c san 2>&1 | tail -1` — which reports the exit status of
+  `tail`, so `set -e` saw success and the last harmless line of output looked
+  like a pass.
+
+  Fixed, and `tools/ci.sh` now runs every check under `set -euo pipefail` so
+  nobody has to remember that. It is the same defect this repository keeps
+  finding in its own tooling — a check that cannot fail — committed in the act
+  of checking.
+
+- **The CAN payload rule contradicted itself and nothing enforced it.** §4.1
+  said a device with no CAN reports `can_max_payload` 0 *and* that a device
+  without `can_fd` reports 8; a no-CAN device satisfies both premises. Neither
+  codec checked any of it, both accepted Classic CAN with 64 and CAN FD with 8,
+  and one generated producer case expected an FD device reporting 0.
+
+  The field is gone. Every value it could hold was already fixed by the
+  capability bits — 0 with no CAN, 64 with `can_fd`, 8 otherwise — so it was
+  a second statement of one fact that two implementations could publish
+  disagreeing. §4.2 derives it in three rows, and byte 20 of Info is reserved.
+
+  That change also found a third defect: `encode_info` never zeroed reserved
+  fields, because Info had none when it was written. `_zero_reserved` now runs
+  inside `_pack` alongside the bitmask normalisation, so a record gaining a
+  reserved field is covered without anyone remembering.
+
+- **Devices performed roles they declared absent.** A `VtpDevice` configured
+  with only `CAP_CONTROL` emitted GPS and IMU notifications and answered `ok`
+  to `CAN_SUBSCRIBE`, `CAN_RESET`, `GPS_SET_RATE`, `IMU_SET_RATE` and
+  `MONITOR_LIST`. The capability matrix said what a device MAY do; nothing made
+  any of it so.
+
+  **Every opcode now declares the capability that owns it**, in the schema and
+  in §9's generated table. A device without the bit answers `unsupported_opcode`
+  — and answers it **before parsing parameters**, which §9 now states, because
+  `unsupported_opcode` and `bad_params` mean different things to a client
+  ("never on this device" against "try better arguments") and a client that
+  gets them the wrong way round either retries forever or abandons a device
+  that would have worked. The same order applies one level down: an
+  `on_change` subscription on a device with no CAN is `unsupported_opcode`, not
+  `bad_params`, because the opcode was never available to carry the mode.
+
+  `poll()` produces a stream only when its bit is set, and `monitor_values`
+  rejects writes without the Monitor bit. `TIME_SYNC` and `GET_LINK_PARAMS`
+  have no owning capability: they are about the link and the clock, which every
+  device has.
+
+### Fixed — smaller
+
+- A device asking for more than 15 Monitor channels is refused at construction
+  rather than at its first `MONITOR_LIST`, where the traceback would name the
+  wrong thing.
+- Every macOS launch command uses `open -n`. The README explained in one place
+  that plain `open` activates a running copy and silently discards the
+  arguments, then used plain `open` in four others — including the new
+  smoke-test instructions, which also lacked the app-bundle step macOS needs.
+
 ### Simplifications — spending complexity where it earns its keep
 
 Four things this protocol carried because they seemed prudent, each of which
