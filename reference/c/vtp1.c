@@ -71,6 +71,16 @@ int vtp_decode_gps_fix(const uint8_t *b, size_t len,
     return 0;
 }
 
+/* SPEC.md §6.10 — the lengths a CAN FD DLC can express. Above eight they are a
+ * fixed ladder, so 9, 10 and 11 are not short payloads but impossible ones. */
+static int vtp_fd_len_ok(size_t n) {
+    if (n <= 8) return 1;
+    switch (n) {
+    case 12: case 16: case 20: case 24: case 32: case 48: case 64: return 1;
+    default: return 0;
+    }
+}
+
 int vtp_can_batch_begin(const uint8_t *b, size_t len,
                         vtp_can_header_t *h, vtp_can_iter_t *it,
                         const char **err) {
@@ -92,7 +102,6 @@ int vtp_can_batch_begin(const uint8_t *b, size_t len,
     for (uint8_t i = 0; i < h->count; i++) {
         if (off + VTP_CAN_RECORD_SIZE > len) { *err = "truncated-record"; return -1; }
         size_t plen = b[off + VTP_CAN_RECORD_OFF_LEN];
-        if (plen > 64) { *err = "bad-length"; return -1; }
         {
             /* SPEC.md §6.4 — frames that cannot exist are rejected, not
              * repaired. Truncating an over-long standard identifier would
@@ -106,6 +115,15 @@ int vtp_can_batch_begin(const uint8_t *b, size_t len,
             }
             if (fd && rtr)   { *err = "fd-rtr"; return -1; }
             if (rtr && plen) { *err = "rtr-with-payload"; return -1; }
+            /* SPEC.md §6.10 — a length no bus can carry means the reader and
+             * the writer disagree about where this record ends, so every byte
+             * after it is suspect. */
+            /* No separate plen > 64 bound: every branch below already
+             * excludes it -- Classic stops at 8, the FD ladder stops at 64,
+             * and RTR at 0. A redundant check is worse than none, because it
+             * can be deleted without any vector noticing. */
+            if (!fd && plen > 8)            { *err = "classic-length"; return -1; }
+            if (fd && !vtp_fd_len_ok(plen)) { *err = "fd-length"; return -1; }
         }
         if (off + VTP_CAN_RECORD_SIZE + plen > len) { *err = "truncated-record"; return -1; }
         off += VTP_CAN_RECORD_SIZE + plen;

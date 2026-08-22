@@ -191,8 +191,55 @@ def main():
           f"table should hold one subscription, holds {table['page']['total']}")
     check(table["entries"][0]["handle"] == handle,
           "CAN_LIST reports a different handle than the install returned")
-    check(table["entries"][0]["mask"] == 0x1FFFFFFF,
-          "CAN_SUBSCRIBE MUST be recorded as a mask of 0x1FFFFFFF")
+    check(table["entries"][0]["mask"] == 0x3FFFFFFF,
+          "CAN_SUBSCRIBE MUST be recorded as a mask of 0x3FFFFFFF")
+
+    # ---- Subscription identity includes the frame format ----------------
+    # SPEC.md §9.2 — standard 0x0C0 and extended 0x0C0 are different frames, so
+    # an exact subscription to one MUST NOT match the other. A mask that
+    # stopped at 0x1FFFFFFF could not tell them apart, and a client would have
+    # decoded the wrong payload behind a correct-looking identifier.
+    check(device._governing(0x0C0)[0] == handle,
+          "an exact subscription to standard 0x0C0 no longer matches it")
+    check(device._governing(0x0C0 | (1 << 29))[0] is None,
+          "an exact subscription to standard 0x0C0 also matches extended "
+          "0x0C0; the format bit is part of a frame's identity")
+
+    # A client that genuinely wants both formats clears bit 29 in its mask, and
+    # the device can honour that because it can see it was asked.
+    both = device.handle_control(
+        bytes([dev.CAN_SUBSCRIBE_MASK, 30])
+        + struct.pack("<IIBH", 0x1A0, 0x1FFFFFFF, dev.SUB_EVERY_FRAME, 0))
+    check(both[2] == dev.ST_OK, "a both-formats subscription was refused")
+    h_both = struct.unpack("<H", both[3:])[0]
+    check(device._governing(0x1A0)[0] == h_both
+          and device._governing(0x1A0 | (1 << 29))[0] == h_both,
+          "a mask clearing bit 29 MUST match both formats of the identifier")
+    device.handle_control(bytes([dev.CAN_UNSUBSCRIBE, 31])
+                          + struct.pack("<H", h_both))
+
+    # ---- A masked subscription forwards every identifier it matches ------
+    # SPEC.md §6.8 — mode state is per matching identifier. Shared state let
+    # whichever frame arrived first consume the interval, so a mask covering
+    # three identifiers delivered exactly one of them and the other two looked
+    # like a quiet bus.
+    # Its own clock, so advancing it cannot disturb the device under test above.
+    mclock = [0]
+    masked = dev.VtpDevice(now_us=lambda: mclock[0], gps_hz=0, imu_hz=0)
+    masked.on_connect()
+    masked.handle_control(
+        bytes([dev.CAN_SUBSCRIBE_MASK, 32])
+        + struct.pack("<IIBH", 0x000, 0x1FFFF000, dev.SUB_EVERY_FRAME, 0))
+    matched = set()
+    for _ in range(400):
+        mclock[0] += 5_000
+        for characteristic, payload in masked.poll():
+            if characteristic == "can":
+                for r in vtp1.decode_can_batch(payload)["records"]:
+                    matched.add(r["id"])
+    check(matched == {0x0C0, 0x1A0, 0x2E0},
+          f"a mask matching three identifiers forwarded {sorted(matched)}; "
+          f"every matching identifier keeps its own mode state")
 
     # A start past the end is ok with count 0, never an error.
     beyond = vtp1.decode_can_list(

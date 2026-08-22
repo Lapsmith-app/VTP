@@ -19,9 +19,9 @@
     },
     {
       "name": "one-exact-id",
-      "desc": "A single exact-id subscription. CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK with mask 0x1FFFFFFF, so that is what the table reports.",
+      "desc": "A single exact-id subscription. CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF, so that is what the table reports.",
       "record": "can_list",
-      "hex": "0100000001000100c0000000ffffff1f000000",
+      "hex": "0100000001000100c0000000ffffff3f000000",
       "expect": {
         "page": {
           "total": 1,
@@ -33,7 +33,7 @@
           {
             "handle": 1,
             "id": 192,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 0,
             "arg": 0,
             "mode_known": true
@@ -45,7 +45,7 @@
       "name": "mask-and-exact-overlapping",
       "desc": "A mask covering 0x100-0x10F alongside an exact subscription for 0x105. Both match frame 0x105; SPEC.md 9.3 says the more specific one governs, and both terms are visible here so a client can work out which.",
       "record": "can_list",
-      "hex": "020000000200070000010000f0ffff1f016400090005010000ffffff1f000000",
+      "hex": "020000000200070000010000f0ffff1f016400090005010000ffffff3f000000",
       "expect": {
         "page": {
           "total": 2,
@@ -65,7 +65,7 @@
           {
             "handle": 9,
             "id": 261,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 0,
             "arg": 0,
             "mode_known": true
@@ -77,7 +77,7 @@
       "name": "first-page-of-many",
       "desc": "Six entries of fourteen: the most that fit beside a page header in a 97-byte response at the minimum ATT MTU. The client repeats from index + count.",
       "record": "can_list",
-      "hex": "0e0000000600010001020000ffffff1f030400020002020000ffffff1f030400030003020000ffffff1f030400040004020000ffffff1f030400050005020000ffffff1f030400060006020000ffffff1f030400",
+      "hex": "0e0000000600010001020000ffffff3f030400020002020000ffffff3f030400030003020000ffffff3f030400040004020000ffffff3f030400050005020000ffffff3f030400060006020000ffffff3f030400",
       "expect": {
         "page": {
           "total": 14,
@@ -89,7 +89,7 @@
           {
             "handle": 1,
             "id": 513,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -97,7 +97,7 @@
           {
             "handle": 2,
             "id": 514,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -105,7 +105,7 @@
           {
             "handle": 3,
             "id": 515,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -113,7 +113,7 @@
           {
             "handle": 4,
             "id": 516,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -121,7 +121,7 @@
           {
             "handle": 5,
             "id": 517,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -129,7 +129,7 @@
           {
             "handle": 6,
             "id": 518,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -141,7 +141,7 @@
       "name": "later-page",
       "desc": "The continuation: index 6 of the same fourteen. `total` is the whole table, not the page.",
       "record": "can_list",
-      "hex": "0e0006000600070007020000ffffff1f030400080008020000ffffff1f030400090009020000ffffff1f0304000a000a020000ffffff1f0304000b000b020000ffffff1f0304000c000c020000ffffff1f030400",
+      "hex": "0e0006000600070007020000ffffff3f030400080008020000ffffff3f030400090009020000ffffff3f0304000a000a020000ffffff3f0304000b000b020000ffffff3f0304000c000c020000ffffff3f030400",
       "expect": {
         "page": {
           "total": 14,
@@ -153,7 +153,7 @@
           {
             "handle": 7,
             "id": 519,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -161,7 +161,7 @@
           {
             "handle": 8,
             "id": 520,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -169,7 +169,7 @@
           {
             "handle": 9,
             "id": 521,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -177,7 +177,7 @@
           {
             "handle": 10,
             "id": 522,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -185,7 +185,7 @@
           {
             "handle": 11,
             "id": 523,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -193,7 +193,7 @@
           {
             "handle": 12,
             "id": 524,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 3,
             "arg": 4,
             "mode_known": true
@@ -220,7 +220,7 @@
       "name": "unknown-mode-in-table",
       "desc": "The device reports a subscription mode from a later minor. A client MUST report it unknown and MUST NOT read it as every_frame.",
       "record": "can_list",
-      "hex": "0100000001000300a0010000ffffff1fc80000",
+      "hex": "0100000001000300a0010000ffffff3fc80000",
       "expect": {
         "page": {
           "total": 1,
@@ -232,7 +232,7 @@
           {
             "handle": 3,
             "id": 416,
-            "mask": 536870911,
+            "mask": 1073741823,
             "mode": 200,
             "arg": 0,
             "mode_known": false
@@ -251,14 +251,14 @@
       "name": "long-payload",
       "desc": "One entry declared, one present, plus a trailing byte. The length MUST equal the header plus count entries exactly.",
       "record": "can_list",
-      "hex": "0100000001000100c0000000ffffff1f00000000",
+      "hex": "0100000001000100c0000000ffffff3f00000000",
       "must_reject": "length"
     },
     {
       "name": "count-exceeds-payload",
       "desc": "Header claims three entries, one is present. MUST be rejected.",
       "record": "can_list",
-      "hex": "0300000003000100c0000000ffffff1f000000",
+      "hex": "0300000003000100c0000000ffffff3f000000",
       "must_reject": "truncated-record"
     }
   ]

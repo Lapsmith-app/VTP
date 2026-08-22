@@ -84,6 +84,12 @@ def decode_gps_fix(buf):
     return fix
 
 
+# SPEC.md §6.10 -- the payload lengths a CAN FD DLC can express. Above eight
+# they are a fixed ladder, so 9, 10 and 11 are impossible lengths rather than
+# short ones.
+FD_LENGTHS = frozenset((0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64))
+
+
 def decode_can_batch(buf):
     hsz = _size("can_header")
     if len(buf) < hsz:
@@ -96,8 +102,6 @@ def decode_can_batch(buf):
         if off + rsz > len(buf):
             raise Reject("truncated-record")
         r = _unpack("can_record", buf, off)
-        if r["len"] > 64:
-            raise Reject("bad-length")
         if off + rsz + r["len"] > len(buf):
             raise Reject("truncated-record")
         raw = r["id"]
@@ -112,6 +116,16 @@ def decode_can_batch(buf):
             raise Reject("fd-rtr")
         if rtr and r["len"]:
             raise Reject("rtr-with-payload")
+        # SPEC.md §6.10 -- a length no bus can carry means the reader and the
+        # writer disagree about where this record ends, so every byte after it
+        # is suspect, including the next frame's identifier. These subsume a
+        # plain 0..64 bound: Classic stops at 8, the FD ladder at 64, RTR at 0.
+        # A redundant check is worse than none, because it can be deleted
+        # without any vector noticing.
+        if not fd and r["len"] > 8:
+            raise Reject("classic-length")
+        if fd and r["len"] not in FD_LENGTHS:
+            raise Reject("fd-length")
         records.append({
             "dt": r["dt"],
             "id": raw & 0x1FFFFFFF,

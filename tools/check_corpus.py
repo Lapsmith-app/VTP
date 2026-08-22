@@ -107,7 +107,19 @@ def exact_length(case, buf):
         base = SCHEMA["records"][name]["size"]
         if name != "gps_fix":
             return base
-        return None            # extensions make the exact length open-ended
+        # SPEC.md §5.5 -- extensions are [type][len][value], so the declared
+        # length is base plus a walk of exactly ext_count of them. Open-ended
+        # is not the same as unknowable, and treating it as unknowable cost the
+        # corpus its trailing-byte coverage for this record.
+        count = read_field(buf, "gps_fix", "ext_count")
+        if count is None:
+            return None
+        off = base
+        for _ in range(count):
+            if off + 2 > len(buf):
+                return None            # the walk ran off the end: truncated
+            off += 2 + buf[off + 1]
+        return off
     header, entry = COMPOSITE[name]
     hsize = SCHEMA["records"][header]["size"]
     count = read_field(buf, header, "count")
@@ -181,8 +193,16 @@ def check_presence_gates(problems, decoded):
 
 
 def check_rejects(problems):
-    """Classified by actual payload length, never by the case's name."""
-    short, over = {}, {}
+    """Classified by actual payload length, never by the case's name.
+
+    Three buckets, not two. A payload shorter than its own header's arithmetic
+    and a payload longer than it are opposite faults caught by opposite
+    comparisons, and a checker that lumps them together reports coverage it
+    does not have: `count-exceeds-payload` satisfied a combined "at or beyond
+    the base length" bucket for CAN, while relaxing the trailing-byte check
+    from `off != len` to `off > len` still passed every vector in the corpus.
+    """
+    short, truncated, surplus = {}, {}, {}
     for c in cases():
         if not c.get("must_reject"):
             continue
@@ -190,17 +210,39 @@ def check_rejects(problems):
         name = c["record"]
         base = SCHEMA["records"][
             name if name in STANDALONE else COMPOSITE[name][0]]["size"]
-        (short if len(buf) < base else over).setdefault(name, []).append(c["name"])
+        declared = exact_length(c, buf)
+        if len(buf) < base:
+            bucket = short
+        elif declared is None or len(buf) < declared:
+            # exact_length gives up when the header's own arithmetic runs off
+            # the end, which is itself the truncation this bucket wants.
+            bucket = truncated
+        elif len(buf) > declared:
+            bucket = surplus
+        else:
+            continue           # well-formed length; rejected for some other rule
+        bucket.setdefault(name, []).append(c["name"])
+
+    # A record whose length is fixed has no third case: "shorter than its own
+    # header declares" and "shorter than the base record" are the same payload.
+    # Only a record carrying a count of its own can be truncated behind a
+    # well-formed header.
+    counted = tuple(COMPOSITE) + ("gps_fix",)
     for record in sorted(STANDALONE + tuple(COMPOSITE)):
         if record not in short:
             problems.append(
                 f"record {record}: no must-reject vector shorter than the base "
                 f"record, so a decoder that reads past the end passes")
-        if record not in over:
+        if record in counted and record not in truncated:
             problems.append(
-                f"record {record}: no must-reject vector at or beyond the base "
-                f"record length, so a decoder that ignores trailing bytes or a "
-                f"miscounted batch passes")
+                f"record {record}: no must-reject vector whose payload stops "
+                f"short of what its own header declares, so a decoder that "
+                f"trusts `count` without checking the buffer passes")
+        if record not in surplus:
+            problems.append(
+                f"record {record}: no must-reject vector carrying bytes beyond "
+                f"what its own header declares, so a decoder that ignores "
+                f"trailing bytes passes")
 
 
 def check_distinct_fields(problems, decoded):

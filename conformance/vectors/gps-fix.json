@@ -559,6 +559,13 @@
       "record": "gps_fix",
       "hex": "01000000ff0f000015cd5b0700000000007ccd2d9b010000d067b31ef8aeeaffb8880000743a0100a861000080f3ffff9600000040291c0252030000780500005a0000008c000311090000",
       "must_reject": "length"
+    },
+    {
+      "name": "ext-count-exceeds-payload",
+      "desc": "A well-formed 74-byte fix declaring one extension that is not there. The record MUST be rejected: a decoder that trusts ext_count without checking the buffer reads past the end. The mirror of long-payload-no-ext -- the same disagreement about where the record ends, in the opposite direction.",
+      "record": "gps_fix",
+      "hex": "01000000ff0f000015cd5b0700000000007ccd2d9b010000d067b31ef8aeeaffb8880000743a0100a861000080f3ffff9600000040291c0252030000780500005a0000008c0003110901",
+      "must_reject": "ext-truncated"
     }
   ]
 }

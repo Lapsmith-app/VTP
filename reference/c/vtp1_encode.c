@@ -89,15 +89,35 @@ int vtp_encode_gps_fix(const vtp_gps_fix_t *f,
     return (int)(VTP_GPS_FIX_SIZE + ext_len);
 }
 
+/* SPEC.md §6.10 — mirrors the decoder's ladder. Duplicated rather than shared
+ * because vtp1.c and vtp1_encode.c are separate translation units on purpose:
+ * a client links only the decoder, a device only the encoder. */
+static int vtp_fd_len_ok(uint8_t n) {
+    if (n <= 8) return 1;
+    switch (n) {
+    case 12: case 16: case 20: case 24: case 32: case 48: case 64: return 1;
+    default: return 0;
+    }
+}
+
 int vtp_encode_can_batch(const vtp_can_header_t *h,
                          const vtp_can_frame_t *frames,
                          uint8_t *out, size_t cap) {
     size_t needed = VTP_CAN_HEADER_SIZE;
     for (uint8_t i = 0; i < h->count; i++) {
-        if (frames[i].len > 64) return -1;
+        /* An encoder must not emit a frame its own decoder rejects: a device
+         * that ships one has produced a notification no conforming client can
+         * read, and it finds out from the field rather than from a test.
+         * SPEC.md §6.4 and §6.10. */
+        const vtp_can_frame_t *v = &frames[i];
+        if (!v->extended && v->id > 0x7FFu)  return -1;
+        if (v->fd && v->rtr)                 return -1;
+        if (v->rtr && v->len)                return -1;
+        if (!v->fd && v->len > 8)            return -1;
+        if (v->fd && !vtp_fd_len_ok(v->len)) return -1;
         /* As above: a length with no payload behind it would be reported as
          * written and sent as uninitialised memory. */
-        if (frames[i].len && !frames[i].payload) return -1;
+        if (v->len && !v->payload) return -1;
         needed += VTP_CAN_RECORD_SIZE + frames[i].len;
     }
     if (cap < needed) return -1;

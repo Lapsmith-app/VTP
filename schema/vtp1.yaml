@@ -196,7 +196,7 @@ records:
     fields:
       - {name: dt,  offset: 0, size: 2, type: u16, units: "10µs", desc: "Ticks since this batch's own t_base; window is 0..655.35 ms"}
       - {name: id,  offset: 2, size: 4, type: u32, desc: "bits 0-28 arbitration id; b29 extended; b30 CAN FD; b31 RTR"}
-      - {name: len, offset: 6, size: 1, type: u8,  desc: "Payload length, 0..64"}
+      - {name: len, offset: 6, size: 1, type: u8,  desc: "Payload length; Classic 0..8, CAN FD a DLC rung (SPEC.md 6.10)"}
 
   imu_header:
     characteristic: imu
@@ -287,8 +287,8 @@ records:
     desc: "One installed CAN subscription, as the device holds it."
     fields:
       - {name: handle, offset: 0,  size: 2, type: u16, desc: "Identifies this subscription; assigned by the device"}
-      - {name: id,     offset: 2,  size: 4, type: u32, desc: "bits 0-28 arbitration id; b29 extended"}
-      - {name: mask,   offset: 6,  size: 4, type: u32, desc: "A set bit is a bit of `id` that must match"}
+      - {name: id,     offset: 2,  size: 4, type: u32, desc: "bits 0-28 arbitration id; b29 extended; b30/b31 ignored"}
+      - {name: mask,   offset: 6,  size: 4, type: u32, desc: "A set bit is a bit of `id` that must match; bits 0-29 only"}
       - {name: mode,   offset: 10, size: 1, type: u8, enum: sub_mode}
       - {name: arg,    offset: 11, size: 2, type: u16, desc: "Interpretation depends on `mode`"}
 
@@ -313,7 +313,7 @@ control:
   response: "[opcode:u8][tag:u8][status:u8][detail...]"
   opcodes:
     - {value: 0x01, name: CAN_RESET,          params: "",                            response: "",                      desc: "Clear all subscriptions and stop the CAN stream"}
-    - {value: 0x02, name: CAN_SUBSCRIBE,      params: "id:u32, mode:u8, arg:u16",     response: "handle:u16",            desc: "Equivalent to CAN_SUBSCRIBE_MASK with mask 0x1FFFFFFF"}
+    - {value: 0x02, name: CAN_SUBSCRIBE,      params: "id:u32, mode:u8, arg:u16",     response: "handle:u16",            desc: "Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF"}
     - {value: 0x03, name: CAN_SUBSCRIBE_MASK, params: "id:u32, mask:u32, mode:u8, arg:u16", response: "handle:u16"}
     - {value: 0x04, name: CAN_UNSUBSCRIBE,    params: "handle:u16",                   response: "",                      desc: "Removes one subscription by the handle its install returned"}
     - {value: 0x05, name: CAN_LIST,           params: "start:u16",                    response: "can_list_page record",  desc: "One page of the table, starting at index `start`"}

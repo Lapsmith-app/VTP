@@ -40,6 +40,8 @@ IMU_HAS_ACCEL = 0x01
 IMU_HAS_GYRO = 0x02
 
 CAN_ID_MASK = 0x1FFFFFFF
+# SPEC.md §6.10 -- the payload lengths a CAN FD DLC can express.
+FD_LENGTHS = frozenset((0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64))
 CAN_EXTENDED = 1 << 29
 CAN_FD = 1 << 30
 CAN_RTR = 1 << 31
@@ -111,8 +113,23 @@ def encode_can_batch(header, records):
     # must not silently erase a field it does not know about.
     out = bytearray(_pack("can_header", header))
     for r in records:
-        if r["len"] > 64:
-            raise EncodeError(f"can_record.len is {r['len']}, maximum is 64")
+        # An encoder must not emit a frame its own decoder rejects. SPEC.md
+        # §6.4 and §6.10.
+        if not r.get("extended") and r["id"] > 0x7FF:
+            raise EncodeError(
+                f"can_record.id is {r['id']:#x}, but a standard frame's "
+                f"identifier is eleven bits")
+        if r.get("fd") and r.get("rtr"):
+            raise EncodeError("can_record: CAN FD has no remote frames")
+        if r.get("rtr") and r["len"]:
+            raise EncodeError("can_record: a remote frame carries no payload")
+        if not r.get("fd") and r["len"] > 8:
+            raise EncodeError(
+                f"can_record.len is {r['len']}; a Classic frame carries 0..8")
+        if r.get("fd") and r["len"] not in FD_LENGTHS:
+            raise EncodeError(
+                f"can_record.len is {r['len']}, which no CAN FD DLC can "
+                f"express; the ladder is {sorted(FD_LENGTHS)}")
         payload = _payload_bytes(r)
         raw = r["id"] & CAN_ID_MASK
         if r.get("extended"):

@@ -454,7 +454,7 @@ Total: **7 bytes + `payload`**. All fields little-endian.
 | --- | --- | --- | --- | --- |
 | 0 | 2 | `u16` | `dt` | `10µs`; Ticks since this batch's own t_base; window is 0..655.35 ms |
 | 2 | 4 | `u32` | `id` | bits 0-28 arbitration id; b29 extended; b30 CAN FD; b31 RTR |
-| 6 | 1 | `u8` | `len` | Payload length, 0..64 |
+| 6 | 1 | `u8` | `len` | Payload length; Classic 0..8, CAN FD a DLC rung (SPEC.md 6.10) |
 <!-- END GENERATED: can_record -->
 
 Records are variable length — seven bytes plus `len` payload bytes — so a
@@ -604,6 +604,22 @@ for a second frame to arrive.
 not forwarded even though its arrival time differs, which is the point of the
 mode; a client that needs arrival times needs `every_frame`.
 
+A masked subscription may match several identifiers, and each of them is a
+different signal from a different sender. A device MUST therefore keep the
+state these modes need — the `periodic` interval, the `every_nth` counter, the
+`on_change` comparison payload, and "the first matching frame" — **per matching
+identifier**, not per subscription.
+
+Sharing that state across a mask makes each mode wrong in a different way, and
+all three failures look like a quiet bus rather than a bug. A shared `periodic`
+interval lets whichever identifier arrives first consume it, so the others are
+suppressed and a client sees one signal out of a group it subscribed to as a
+group. A shared `every_nth` counter forwards every Nth *frame of the group*
+rather than every Nth frame of each identifier, so which signal a client
+receives depends on the interleaving of the bus. A shared `on_change`
+comparison compares the payload of one identifier against the payload of
+another, where "changed" carries no meaning at all.
+
 ### 6.9 One bus
 
 Major version 1 addresses a single CAN bus. A device with more than one
@@ -617,6 +633,30 @@ version may add (§11.2), so this is a gap that can be closed without a major
 version.
 
 ---
+
+### 6.10 Payload length
+
+`len` is the number of payload bytes that follow the record, and the lengths a
+CAN bus can actually carry are not contiguous.
+
+A **Classic** frame — bit 30 clear — carries zero to eight bytes. A receiver
+MUST reject the whole batch if `len` exceeds 8.
+
+A **CAN FD** frame — bit 30 set — carries a length its four-bit DLC can express,
+which above eight is a fixed ladder:
+
+    0  1  2  3  4  5  6  7  8  12  16  20  24  32  48  64
+
+A receiver MUST reject the whole batch if a CAN FD `len` is not one of these.
+Nine, ten and eleven are not short payloads; they are lengths no CAN FD
+controller can produce.
+
+Rejection rather than repair follows §1.1. A `len` off the ladder means the
+reader and the writer disagree about where this record ends, so every byte
+after it is suspect — including the identifier of the next frame, which will
+still look like a valid identifier. Rounding the length up to the next rung
+would produce a frame with plausible padding and a correct-looking identifier,
+which is precisely the outcome the batch-level reject exists to avoid.
 
 ## 7. IMU characteristic — NOTIFY
 
@@ -782,7 +822,7 @@ request.
 | Opcode | Command | Params | Response detail | Notes |
 | --- | --- | --- | --- | --- |
 | `0x01` | `CAN_RESET` | — | — | Clear all subscriptions and stop the CAN stream |
-| `0x02` | `CAN_SUBSCRIBE` | `id:u32, mode:u8, arg:u16` | `handle:u16` | Equivalent to CAN_SUBSCRIBE_MASK with mask 0x1FFFFFFF |
+| `0x02` | `CAN_SUBSCRIBE` | `id:u32, mode:u8, arg:u16` | `handle:u16` | Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF |
 | `0x03` | `CAN_SUBSCRIBE_MASK` | `id:u32, mask:u32, mode:u8, arg:u16` | `handle:u16` | — |
 | `0x04` | `CAN_UNSUBSCRIBE` | `handle:u16` | — | Removes one subscription by the handle its install returned |
 | `0x05` | `CAN_LIST` | `start:u16` | `can_list_page record` | One page of the table, starting at index `start` |
@@ -900,11 +940,26 @@ subscription for as long as it is installed; it is assigned by the device,
 opaque to the client, and MUST NOT be reused while the subscription it names
 exists. It MAY be reused once that subscription has been removed.
 
-`CAN_SUBSCRIBE` is exactly `CAN_SUBSCRIBE_MASK` with a mask of `0x1FFFFFFF`. A
-set bit in `mask` is a bit of `id` that a frame must match; a clear bit is a
-bit that may hold anything. One entry therefore covers a family of identifiers,
-and a mask of zero covers every frame on the bus. Why the table is addressed
-this way rather than by identifier is RATIONALE §6.
+A subscription matches a frame when `frame.id & mask == sub.id & mask`, taken
+over **bits 0–29**: the twenty-nine arbitration bits and bit 29, the standard/
+extended format bit. A set bit in `mask` is a bit that a frame must match; a
+clear bit is a bit that may hold anything. One entry therefore covers a family
+of identifiers, and a mask of zero covers every frame on the bus. Bits 30 and
+31 — CAN FD and RTR — describe how a frame was transmitted rather than which
+frame it is, and take no part in matching; a device MUST ignore them in both
+`id` and `mask`. Why the table is addressed this way rather than by identifier
+is RATIONALE §6.
+
+`CAN_SUBSCRIBE` is exactly `CAN_SUBSCRIBE_MASK` with a mask of `0x3FFFFFFF`.
+
+The format bit is part of a frame's identity because standard `0x1A0` and
+extended `0x1A0` are two different frames, carrying two different things, from
+possibly two different ECUs. A mask that stopped at `0x1FFFFFFF` could not tell
+them apart, so a client that subscribed to one would silently receive both and
+decode the wrong payload with the right-looking identifier — the failure §1.1
+exists to prevent. A client that genuinely wants both formats says so by
+clearing bit 29 in its `mask`, which is a request the device can honour because
+it can see that it was asked.
 
 Installing a subscription whose `id` and `mask` equal one already installed
 MUST update that subscription's `mode` and `arg` in place and return its
@@ -974,8 +1029,8 @@ Total: **13 bytes**. All fields little-endian.
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
 | 0 | 2 | `u16` | `handle` | Identifies this subscription; assigned by the device |
-| 2 | 4 | `u32` | `id` | bits 0-28 arbitration id; b29 extended |
-| 6 | 4 | `u32` | `mask` | A set bit is a bit of `id` that must match |
+| 2 | 4 | `u32` | `id` | bits 0-28 arbitration id; b29 extended; b30/b31 ignored |
+| 6 | 4 | `u32` | `mask` | A set bit is a bit of `id` that must match; bits 0-29 only |
 | 10 | 1 | `u8` | `mode` | enum `sub_mode` |
 | 11 | 2 | `u16` | `arg` | Interpretation depends on `mode` |
 <!-- END GENERATED: can_subscription -->
