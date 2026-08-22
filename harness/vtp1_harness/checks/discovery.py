@@ -3,6 +3,16 @@ from .. import refdec
 from ..transport import DeviceRefused, TransportError
 from . import Fail, Observe, Skip, check
 
+#: A check that fires on the ABSENCE of a capability cannot run when Info did
+#: not decode. `session.capabilities` is empty in that case -- not because the
+#: device declares nothing, but because nobody could read what it declares --
+#: and a check reading that as "no Control" reports a device answering writes
+#: to an inert characteristic when the truth is that its Info is malformed.
+#: One real defect then arrives as two, the second of them false, and the
+#: developer starts on the wrong one.
+_NO_INFO = ("Info did not decode, so what this device declares is unknown and "
+            "an absent capability cannot be told from an unreadable one")
+
 
 @check(id="adv.service_uuid", section="3.3", phase="discovery", severity="MUST",
        title="The advertisement carries the VTP/1 service UUID")
@@ -140,6 +150,8 @@ async def gatt_no_extra_characteristics(s):
 @check(id="gatt.inert_cccd", section="4.1", phase="gatt", severity="MUST",
        title="A CCCD write is accepted on a stream whose capability is clear")
 async def gatt_inert_cccd(s):
+    if s.info is None:
+        raise Skip(_NO_INFO)
     inert = [name for name, spec in refdec.PROFILE_CHARS.items()
              if spec["cccd"] != "none" and spec["capability"] is not None
              and not s.has(spec["capability"])
@@ -173,6 +185,8 @@ async def gatt_inert_cccd(s):
        severity="MUST", adversarial=True,
        title="A device without Control rejects every write to it")
 async def gatt_inert_control_rejects_writes(s):
+    if s.info is None:
+        raise Skip(_NO_INFO)
     if s.has("control"):
         raise Skip("this device declares the control capability")
     if refdec.CHAR["control"] not in s.chars:

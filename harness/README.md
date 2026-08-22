@@ -203,11 +203,37 @@ starts at 1, a `TIME_SYNC` that reads its clock once and reports it as both
 timestamps, a subscription table that survives a reconnect, a `capabilities`
 word missing a bit another bit requires, a request answered `busy` and applied
 anyway — and each exists
-because some check here claims to catch it. The selftest fails if a fault is
-defined with no check named against it. It is the argument
+because some check here claims to catch it. It is the argument
 `tools/check_corpus.py` makes about the byte vectors, applied to the rules that
 live outside them: a check nothing can break is a check that does not work, and
 it will pass silently forever.
+
+The selftest holds that argument in **both** directions, and the second one is
+the one that matters:
+
+- No fault may be defined with no check named against it — otherwise the fault
+  is a claim nobody is holding to account.
+- **No MUST or SHOULD may exist with no fault against it**, unless
+  `selftest.NOT_SEEDED` says why none is possible. Without this half,
+  `transport.FAULTS` decides what "detects every defect it claims" means, and
+  the FAULTS table is written by whoever wrote the checks. Forty-one checks sat
+  in the registry having never once been observed to fail, including the one
+  covering §13.3's declaration format — which is exactly the shape of defect a
+  device that predates a spec change ships.
+- **No excuse may outlive its reason.** An entry in `NOT_SEEDED` claims no
+  fault can make that check fail, which is a statement about the whole suite,
+  so every fault run is checked against it: if an excused check fails, the
+  excuse is already false and the run says so. A fault that breaks the
+  conversation rather than one rule — `no_tag_echo` leaves nothing
+  correlatable, so every check awaiting a response fails — belongs in
+  `selftest.CASCADING` and is exempt, because "it failed while the envelope was
+  broken" is not evidence that the check works.
+
+The clean run is also held to an **expected-skip baseline**
+(`selftest.EXPECTED_SKIPS`). A skip is the harness saying nothing, and a check
+that quietly starts skipping for every device — a renamed state key, a
+capability probe that stopped matching, a refusal newly read as "not applicable"
+— otherwise looks exactly like a passing run.
 
 `--loopback` is also the fastest way to see what a passing report looks like
 before you point the harness at hardware.
@@ -249,4 +275,25 @@ report cannot accumulate green ticks for things nothing was asserted about.
 
 Then add a fault to `transport.FAULTS` and an entry to `selftest.CAUGHT_BY`, or
 the selftest will tell you that you have made a claim nobody is holding to
-account.
+account. If the check genuinely cannot be made to fail against the software
+peripheral, say so in `selftest.NOT_SEEDED` with the reason; an entry there is a
+debt with an explanation attached, not a dispensation, and shortening that list
+is how this harness gets better.
+
+### Installing it, and what an install carries
+
+`pip install .` builds a wheel that carries its own copy of the schema, the
+reference decoder and the software peripheral (see the force-include block in
+`pyproject.toml`), because the harness has to work from a machine that is not
+this repository. That copy is a snapshot: a wheel built from a stale tree tests
+last week's peripheral against last week's rulebook, agrees with itself
+completely, and reports green.
+
+```sh
+python3 tools/check_package.py    # run with the interpreter that has the wheel
+```
+
+compares every bundled file against this repository and fails if they differ.
+CI builds the wheel, runs that, and then runs the *packaged* harness against the
+*packaged* peripheral. If you are debugging firmware against an install and the
+answers look a version behind, run it.

@@ -574,7 +574,19 @@ async def control_time_sync(s):
     c = _control(s)
     first = await c.request(refdec.OPCODE["TIME_SYNC"])
     if first.status == refdec.STATUS_VALUE["unsupported_opcode"]:
-        raise Skip("TIME_SYNC is not implemented")
+        # §9 -- TIME_SYNC has no owning capability. It is about the clock,
+        # which every device has, and reaching it at all means Control is
+        # live, so there is no device for which this answer is correct. This
+        # used to skip, which is the one outcome that reports a MUST nobody
+        # implemented as a MUST nobody needed: a device with no TIME_SYNC
+        # passed a clean run, and the client left holding it has no way to
+        # bound its own clock error against §8.1's device clock.
+        raise Fail(
+            "TIME_SYNC was answered unsupported_opcode. It has no owning "
+            "capability (§9): a device whose Control characteristic answers at "
+            "all MUST implement it, and without it a client cannot bound the "
+            "error in its own view of the device clock",
+            response=first.raw.hex())
     samples = []
     for _ in range(TIME_SYNC_SAMPLES):
         response = await c.request(refdec.OPCODE["TIME_SYNC"])

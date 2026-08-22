@@ -8,6 +8,111 @@ conformance vector.
 
 ## [Unreleased]
 
+### A busy radio was being reported as a device losing data
+
+Reported from the field: the peripheral shedding at `every_frame` and a client
+stepping down to sampling, on a 72 f/s bus it had sustained with no gaps.
+
+The cause was not capacity. CAN flushes a partial batch every 100 ms, so at
+72 f/s a batch carries about eight frames — well inside what one notification
+holds at any ATT MTU, and the batch size never binds. What bound was the
+transmit queue saying "not now":
+
+- **A refused notification was discarded and its frames counted as loss.** The
+  pump handed the payload to `record_refused` and deleted it, so one full
+  transmit queue cost a whole batch and reported it under §8.3 — which counts
+  items the device **accepted and then discarded**, and a queue that is busy
+  for a moment is neither. `_deliver` had already been written for the other
+  answer: it stamps `seq` and commits only on acceptance, precisely so the same
+  number can go out on the next attempt (§8.2). There was no next attempt. The
+  payload now stays pending and is retried; at most one per stream is held and
+  a newer one still supersedes it, so nothing accumulates and a stall costs
+  latency rather than data.
+
+- **Recovery waited 250 ms for a callback it did not need.** CoreBluetooth
+  reports a drained queue on a callback this process does not own, so there has
+  always been a fallback timeout — set at 250 ms, which is two and a half CAN
+  flush periods. A single missed callback therefore guaranteed that two or
+  three batches were built, superseded and counted before anything could be
+  sent again. `update_value` answers the same question on demand, so the
+  fallback is now 10 ms and the callback remains the fast path.
+
+- **The discretionary flush now defers while a batch is undelivered.**
+  §6.2's partial-batch timer exists so a quiet bus still delivers; running it
+  while the transport still holds the previous batch only builds one to
+  supersede the other. The bounded flushes are unaffected — §6.1 caps a batch
+  at what `dt` can span and capacity at what fits in one notification, and
+  neither is optional.
+
+Both are covered in `transport_selftest.py`, which drives the real pump against
+a fake refusing link, and both tests were confirmed to fail without the fix.
+The fake's own comment had said "the pump is expected to hold the payload and
+retry" since it was written.
+
+### The harness proved less than it claimed
+
+Reported from the field: a device answering `MONITOR_LIST` in the superseded
+paged format with no working `TIME_SYNC`, on a repository whose CI runs the
+harness against a peripheral on every push. The device turned out to be a
+process started before both changes — but the question it raised was the right
+one, and one of the two defects really would have passed.
+
+- **A missing `TIME_SYNC` was reported as a skip.** `control.time_sync`
+  answered `unsupported_opcode` with `Skip("TIME_SYNC is not implemented")`,
+  on a check declared `severity="MUST"`. §9 gives `TIME_SYNC` no owning
+  capability: it is about the clock, which every device has, and reaching it at
+  all means Control is live, so there is no device for which that answer is
+  correct. `GET_LINK_PARAMS` — the other unowned opcode, and only a SHOULD —
+  already treated the identical status as a failure. Now both do.
+
+- **`transport.FAULTS` decided what "detects every defect it claims" meant.**
+  The selftest asserted that every fault had a check named against it, which
+  holds the fault table to account and nothing else — and the fault table is
+  written by whoever wrote the checks. Nothing asserted the converse, so
+  **41 of the 66 MUST and SHOULD checks had never once been observed to fail**,
+  among them the one covering §13.3's declaration format.
+
+  The selftest now asserts both directions. A MUST or SHOULD must have a seeded
+  fault or an entry in `NOT_SEEDED` stating why none is possible; the two lists
+  must be exhaustive and disjoint. Twenty new faults were written to satisfy
+  it, taking coverage from 25 to 45 — including `monitor_paged_declaration`,
+  the reported defect, and `timesync_unsupported`. The 21 remaining entries are
+  debts with reasons attached, not dispensations.
+
+  An excuse is a claim about the whole fault suite rather than any one run, so
+  it is checked where the suite runs: a fault that makes an excused check fail
+  proves the excuse false, whatever check that fault was aimed at. This found
+  four more the moment it existed — `info.rate_ceiling`, `control.rate_ceiling`,
+  `can.list_beyond_end` and `gatt.inert_control_rejects_writes` were each
+  broken by a fault written for something else — and all four now have faults
+  of their own instead of a reason. A fault that breaks the conversation rather
+  than a rule (`no_tag_echo` leaves nothing correlatable, so every check
+  awaiting a response fails) is listed in `CASCADING` and exempt, because
+  "failed while the envelope was broken" is not evidence a check works.
+
+- **A skip said nothing, and nothing was watching which ones.** A check that
+  quietly stops reaching what it tests — a renamed state key, a capability
+  probe that stopped matching, a refusal newly read as "not applicable" — looks
+  exactly like a passing run. The clean run is now held to an `EXPECTED_SKIPS`
+  baseline, and the reports name how many MUSTs went unverified beside the
+  counts rather than only in Not verified. `run.unverified_musts` joins
+  `conforms` in the JSON, because a machine has the same way of misreading a
+  run that verified nothing.
+
+- **An installed harness carries a snapshot, and nothing compared it.**
+  `pyproject.toml` force-includes the schema, the reference decoder and the
+  software peripheral into the wheel, so `--loopback` works from an install. A
+  wheel built from a stale tree therefore tests last week's peripheral against
+  last week's rulebook, agrees with itself completely, and reports green — the
+  one way every check here can be right and a developer running the published
+  tool still be told a superseded device conforms. `tools/check_package.py`
+  compares every bundled file against the source, reading the file list from
+  the force-include block rather than restating it; CI builds the wheel, runs
+  that, and then runs the packaged harness against the packaged peripheral.
+
+Both new gates have a CI step that breaks them on purpose and requires the
+failure, for the same reason the mutation sweep does.
+
 ### Added — peripheral diagnostics
 - **An accepted Monitor update left no trace, so a silent client and a working
   one looked identical.** The software peripheral logged a *rejected* write to

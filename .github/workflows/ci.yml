@@ -160,6 +160,66 @@ jobs:
           cp /tmp/streams.py.orig harness/vtp1_harness/checks/streams.py
           echo "Harness selftest correctly refuses to pass on a disabled check."
 
+      # ...and the coverage gate itself must be capable of failing. It asserts
+      # that every MUST either has a seeded fault or a stated reason for having
+      # none; a check added with neither has to fail this, because the whole
+      # point is that a check nobody can break passes silently forever.
+      - name: Harness selftest fails when a MUST has no fault and no reason
+        run: |
+          perl -pi -e 's/^    "info_major_wrong": "info.major",\n//' harness/selftest.py
+          perl -pi -e 's/^    "info_major_wrong": .*\n//' harness/vtp1_harness/transport.py
+          # The substitutions above are anchored to the exact shape of two data
+          # lines, so a reformat would silently leave both files untouched --
+          # and this step would then report "the selftest passed with info.major
+          # uncovered" when nothing had been uncovered at all. Prove the seeding
+          # took before drawing any conclusion from the run.
+          if grep -q info_major_wrong harness/selftest.py harness/vtp1_harness/transport.py; then
+            echo "::error::the seeding substitution did not apply, so this guard tested nothing"
+            git checkout -- harness/selftest.py harness/vtp1_harness/transport.py
+            exit 1
+          fi
+          if PYTHONPATH=harness python3 harness/selftest.py; then
+            echo "::error::the selftest passed with info.major uncovered and unexcused"
+            git checkout -- harness/selftest.py harness/vtp1_harness/transport.py
+            exit 1
+          fi
+          git checkout -- harness/selftest.py harness/vtp1_harness/transport.py
+          echo "Coverage gate correctly refuses an untested MUST."
+
+      # The harness is the only thing here that gets INSTALLED, and an install
+      # carries its own copy of the schema, the reference decoder and the
+      # software peripheral (pyproject.toml's force-include block). Until now
+      # nothing compared that copy against this repository -- so a wheel built
+      # from a stale tree tests last week's peripheral against last week's
+      # rulebook, agrees with itself completely, and reports green. That is the
+      # one way every check above can be right and a developer running the
+      # published tool still be told a superseded device conforms.
+      #
+      # Build it, prove the bundled files are byte-identical to the source, and
+      # run the PACKAGED harness against the PACKAGED peripheral.
+      - name: Packaged harness carries this repository
+        run: |
+          python3 -m pip install --quiet build
+          python3 -m build --wheel --outdir /tmp/wheel .
+          python3 -m venv /tmp/pkgenv
+          /tmp/pkgenv/bin/pip install --quiet /tmp/wheel/*.whl
+          /tmp/pkgenv/bin/python tools/check_package.py
+          /tmp/pkgenv/bin/vtp1-harness --loopback --seconds 3
+
+      # ...and that check must be capable of failing, for the same reason as
+      # every other guard here. Change a bundled file without rebuilding and
+      # the install is stale by definition.
+      - name: Packaged-copy check detects a stale wheel
+        run: |
+          printf '\n# deliberate drift\n' >> reference/peripheral/vtp_device.py
+          if /tmp/pkgenv/bin/python tools/check_package.py; then
+            echo "::error::check_package.py passed against a wheel built from a different tree"
+            git checkout -- reference/peripheral/vtp_device.py
+            exit 1
+          fi
+          git checkout -- reference/peripheral/vtp_device.py
+          echo "Packaged-copy check correctly detects a stale install."
+
       # The other direction. run.py only ever round-trips payloads that
       # already decoded, so it asks whether an encoder reproduces something
       # valid and never whether it declines something invalid. That gap let an

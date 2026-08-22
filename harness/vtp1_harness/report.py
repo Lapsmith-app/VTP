@@ -116,6 +116,16 @@ class ConsoleReporter:
             line += f"   {counts['error']} harness errors"
         self._write(line)
 
+        # A skipped MUST is the one number a reader can misread as a pass, so
+        # it gets its own line beside the counts rather than only appearing in
+        # Not verified below. "47 passed, 0 failed" says nothing about the four
+        # requirements nobody could reach.
+        unverified = _unverified_musts(report)
+        if unverified:
+            self._write(f"  {len(unverified)} MUST requirement"
+                        f"{'' if len(unverified) == 1 else 's'} could not be "
+                        f"verified on this device -- see Not verified")
+
         if report.aborted:
             self._write()
             self._write(self._paint(Status.ERROR,
@@ -183,6 +193,19 @@ def _device_line(session):
     return "  ".join(parts) or "unknown"
 
 
+def _unverified_musts(report):
+    """MUST checks that ran but could not reach what they test.
+
+    A skip because the device never claimed the role is not one of these: §12
+    lets a device implement the roles it wants, and a check for a role it does
+    not have has nothing to say. A skip for any other reason is a requirement
+    this run did not test, and the report has to be able to name how many.
+    """
+    return [r for r in report.results
+            if r.status is Status.SKIP and r.check.severity == "MUST"
+            and r.message and "does not declare" not in r.message]
+
+
 def _not_verified(report):
     """The standing statement, plus whatever this particular run could not reach.
 
@@ -191,10 +214,7 @@ def _not_verified(report):
     instead of vanishing into a skip count nobody reads.
     """
     notes = list(report.session.notes)
-    skipped = [r for r in report.results
-               if r.status is Status.SKIP and r.check.severity == "MUST"
-               and r.message and "does not declare" not in r.message]
-    for result in skipped:
+    for result in _unverified_musts(report):
         notes.append(f"SPEC.md {result.check.section} — {result.check.title}: "
                      f"not tested, because {result.message}.")
     if not notes:
@@ -251,6 +271,10 @@ def to_dict(report):
             "aborted": report.aborted,
             "conforms": report.conforms,
             "counts": report.counts,
+            # Beside `conforms`, because a machine reading this file has the
+            # same way of misreading it as a person: a run that verified
+            # nothing conforms too.
+            "unverified_musts": [r.check.id for r in _unverified_musts(report)],
         },
         "results": [
             {
@@ -298,6 +322,11 @@ def write_markdown(report, path):
         f"{counts['warn']} warnings, {counts['skip']} skipped.**",
         "",
     ]
+    unverified = _unverified_musts(report)
+    if unverified:
+        lines += [f"**{len(unverified)} MUST requirement"
+                  f"{'' if len(unverified) == 1 else 's'} could not be verified "
+                  f"on this device** — see Not verified.", ""]
     if report.aborted:
         lines += [f"> **Run aborted**: {report.aborted}", ""]
 

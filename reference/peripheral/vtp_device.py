@@ -646,7 +646,7 @@ class VtpDevice:
 
     # -- polling ----------------------------------------------------------
 
-    def poll(self):
+    def poll(self, undelivered=()):
         """Notifications due now, as (characteristic, payload) pairs.
 
         A stream is produced only if its capability bit is set. SPEC.md 4.1
@@ -654,6 +654,18 @@ class VtpDevice:
         becomes true rather than merely stated: a device configured with only
         `control` used to emit GPS and IMU regardless, because poll() had
         never been told what the device claimed to be.
+
+        `undelivered` names streams whose previous notification the transport
+        has not taken yet. Only the DISCRETIONARY flush is held back for those
+        -- the partial-batch timer below, which exists so a quiet bus still
+        delivers. The bounded flushes are not discretionary and still happen:
+        SPEC.md 6.1 caps a CAN batch at a 655.35 ms span because `dt` cannot
+        express more, and capacity is what fits in one notification.
+
+        Building a batch the transport cannot yet take only means superseding
+        it a moment later, and a superseded batch is loss (SPEC.md 8.3). This
+        is the difference between reporting a busy radio as dropped frames and
+        sending one fuller batch when the radio frees up.
         """
         now = self.now_us()
         out, self._deferred = self._deferred, []
@@ -710,7 +722,9 @@ class VtpDevice:
 
         # Flush partial batches on a timer so a quiet bus or a slow ODR still
         # delivers, rather than waiting for a batch that may never fill.
-        if caps & CAP_CAN and self._subscriptions and now >= self._next_can_flush_us:
+        if (caps & CAP_CAN and self._subscriptions
+                and "can" not in undelivered
+                and now >= self._next_can_flush_us):
             batch = self._flush_can(now)
             if batch is not None:
                 out.append(("can", batch))
