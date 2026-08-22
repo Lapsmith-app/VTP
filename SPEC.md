@@ -53,6 +53,57 @@ implementation MUST honour all three:
 - Anything malformed — a short payload, a truncated record — is rejected whole.
   A receiver MUST NOT decode the prefix of a malformed payload.
 
+### 1.2 Roles and terms
+
+| Term | Meaning |
+| --- | --- |
+| **Device** | The logger, and the GATT peripheral. It holds the GNSS receiver, the CAN transceiver and the IMU, and it produces the streams. |
+| **Client** | The host application — a phone or laptop app — and the GATT central. It connects, subscribes, decodes and records. |
+| **Receiver** | Whichever end is decoding the payload under discussion: the client on the GPS, CAN and IMU streams, the device on the Monitor characteristic (§13), where the direction reverses. A requirement addressed to a receiver binds whoever is decoding. |
+| **Notification** | An unacknowledged GATT push from device to client on one characteristic. The three streams are notifications, and one notification is one complete payload — never a fragment continued in the next. |
+| **Indication** | An acknowledged GATT push. Control responses are indications (§9). |
+| **Record** | One fixed-size little-endian struct, as tabulated in this document. |
+| **Batch** | A header record followed by `count` further records, all inside one notification. |
+| **Fix, frame, sample** | One GNSS position solution, one CAN bus frame, one IMU sample: the item its stream carries and the unit `dropped` counts. |
+
+The characteristic named `gps` carries a solution from whatever constellations
+the receiver uses. The name is not a claim about GPS in particular.
+
+Two words describing counters are used precisely throughout. A counter that
+**wraps** resumes at zero after its maximum, so a step backwards is ordinary
+and means nothing was lost. A counter that **saturates** stops at its maximum
+and stays there. `seq` wraps, `dropped` saturates, and §8 says why each does
+what it does.
+
+### 1.3 The shape of the streams
+
+Each characteristic carries one shape of payload, and that shape does not vary
+between notifications:
+
+| Characteristic | Direction | One payload is | Detail |
+| --- | --- | --- | --- |
+| `info` | device → client, on read | One 24-byte record | §4 |
+| `gps` | device → client, notify | One 74-byte fix, plus any extension records | §5 |
+| `can` | device → client, notify | A 16-byte batch header, then `count` variable-length frame records | §6 |
+| `imu` | device → client, notify | A 20-byte batch header, then `count` fixed-size samples | §7 |
+| `control` | client → device, write; answered by indication | One request, or its response | §9 |
+| `monitor_values` | client → device, write | A 4-byte header, then `count` values | §13 |
+
+A fix is never batched, and a CAN frame never travels without a batch header
+even when it is the only frame in the notification. The asymmetry follows the
+rates rather than a preference: a GNSS receiver produces at most a few tens of
+complete solutions a second, while a busy chassis bus produces some four
+thousand frames a second, which no one-frame-per-notification framing can carry
+(RATIONALE §2.4). The IMU is batched for the same reason as CAN but timestamped
+differently — its samples are evenly spaced, so one interval in the header
+describes all of them (§7).
+
+Three properties are common to all three streams and are specified once, in §8.
+Every payload begins with `seq` and `dropped`. Every timestamp in every stream
+is a reading of one monotonic device clock, so aligning a CAN frame against a
+GPS fix is subtraction. Nothing in this protocol is timestamped by the client,
+and no stream carries a clock of its own.
+
 ---
 
 ## 2. Transport
@@ -227,25 +278,57 @@ Total: **74 bytes**. All fields little-endian.
 | 0 | 2 | `u16` | `seq` | Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection |
 | 2 | 2 | `u16` | `dropped` | Fixes accepted then discarded since the previous notification; saturates, never wraps |
 | 4 | 4 | `u32` | `validity` | bitmask `gps_validity` |
-| 8 | 8 | `u64` | `t_device` | `us`; Monotonic device clock |
-| 16 | 8 | `i64` | `t_utc` | `ms`; valid when `validity` bit 0 (`t_utc`) is set; Unix epoch |
-| 24 | 4 | `i32` | `lat` | `deg`; scale 1e-07; valid when `validity` bit 2 (`position`) is set |
-| 28 | 4 | `i32` | `lon` | `deg`; scale 1e-07; valid when `validity` bit 2 (`position`) is set |
-| 32 | 4 | `i32` | `alt_msl` | `mm`; valid when `validity` bit 3 (`alt_msl`) is set |
-| 36 | 4 | `i32` | `alt_ellipsoid` | `mm`; valid when `validity` bit 4 (`alt_ellipsoid`) is set |
-| 40 | 4 | `i32` | `vel_n` | `mm/s`; valid when `validity` bit 5 (`velocity`) is set |
-| 44 | 4 | `i32` | `vel_e` | `mm/s`; valid when `validity` bit 5 (`velocity`) is set |
-| 48 | 4 | `i32` | `vel_d` | `mm/s`; valid when `validity` bit 5 (`velocity`) is set |
-| 52 | 4 | `i32` | `head_mot` | `deg`; scale 1e-05; valid when `validity` bit 6 (`head_mot`) is set |
-| 56 | 4 | `u32` | `h_acc` | `mm`; valid when `validity` bit 7 (`h_acc`) is set; 1 sigma |
-| 60 | 4 | `u32` | `v_acc` | `mm`; valid when `validity` bit 8 (`v_acc`) is set; 1 sigma |
-| 64 | 4 | `u32` | `s_acc` | `mm/s`; valid when `validity` bit 9 (`s_acc`) is set; 1 sigma |
-| 68 | 2 | `u16` | `p_dop` | scale 0.01; valid when `validity` bit 10 (`p_dop`) is set |
+| 8 | 8 | `u64` | `t_device` | `µs`; Monotonic device clock (§8.1) |
+| 16 | 8 | `i64` | `t_utc` | `ms`; Unix epoch; valid when `validity` bit 0 (`t_utc`) is set |
+| 24 | 4 | `i32` | `lat` | `deg`; scale 1e-07; Latitude — positive north, negative south; valid when `validity` bit 2 (`position`) is set |
+| 28 | 4 | `i32` | `lon` | `deg`; scale 1e-07; Longitude — positive east, negative west; valid when `validity` bit 2 (`position`) is set |
+| 32 | 4 | `i32` | `alt_msl` | `mm`; Altitude above mean sea level; valid when `validity` bit 3 (`alt_msl`) is set |
+| 36 | 4 | `i32` | `alt_ellipsoid` | `mm`; Altitude above the WGS-84 ellipsoid; valid when `validity` bit 4 (`alt_ellipsoid`) is set |
+| 40 | 4 | `i32` | `vel_n` | `mm/s`; Velocity, north component; valid when `validity` bit 5 (`velocity`) is set |
+| 44 | 4 | `i32` | `vel_e` | `mm/s`; Velocity, east component; valid when `validity` bit 5 (`velocity`) is set |
+| 48 | 4 | `i32` | `vel_d` | `mm/s`; Velocity, down component — positive descending; valid when `validity` bit 5 (`velocity`) is set |
+| 52 | 4 | `i32` | `head_mot` | `deg`; scale 1e-05; Heading of motion, clockwise from true north; valid when `validity` bit 6 (`head_mot`) is set |
+| 56 | 4 | `u32` | `h_acc` | `mm`; Horizontal position accuracy estimate, 1 sigma; valid when `validity` bit 7 (`h_acc`) is set |
+| 60 | 4 | `u32` | `v_acc` | `mm`; Vertical position accuracy estimate, 1 sigma; valid when `validity` bit 8 (`v_acc`) is set |
+| 64 | 4 | `u32` | `s_acc` | `mm/s`; Speed accuracy estimate, 1 sigma; valid when `validity` bit 9 (`s_acc`) is set |
+| 68 | 2 | `u16` | `p_dop` | scale 0.01; Position dilution of precision; valid when `validity` bit 10 (`p_dop`) is set |
 | 70 | 1 | `u8` | `fix_type` | enum `fix_type` |
-| 71 | 1 | `u8` | `num_sv` | valid when `validity` bit 11 (`num_sv`) is set |
+| 71 | 1 | `u8` | `num_sv` | Satellites used in the solution; valid when `validity` bit 11 (`num_sv`) is set |
 | 72 | 1 | `u8` | `fix_flags` | bitmask `fix_flags` |
 | 73 | 1 | `u8` | `ext_count` | Extension records following the base record |
 <!-- END GENERATED: gps_fix -->
+
+**Reading a scaled field.** A scaled field holds a plain integer; the quantity
+is `raw × scale` in the units given. Signed fields are two's complement (§2),
+and the sign carries the whole of the direction — no field in this
+specification is paired with a hemisphere byte, a sign flag or a direction
+letter.
+
+| Field | On the wire | Bytes | Decodes to |
+| --- | --- | --- | --- |
+| `lat` | `515074000` | `d0 67 b3 1e` | 51.5074° N |
+| `lat` | `-337868000` | `20 8b dc eb` | 33.7868° S |
+| `lon` | `-1223948000` | `20 09 0c b7` | 122.3948° W |
+| `alt_msl` | `12500` | `d4 30 00 00` | 12.5 m above mean sea level |
+| `vel_n` | `-4200` | `98 ef ff ff` | 4.2 m/s southward |
+| `head_mot` | `12345678` | `4e 61 bc 00` | 123.45678° from true north |
+| `p_dop` | `145` | `91 00` | PDOP 1.45 |
+
+A receiver that reads those two negative rows as unsigned gets 395.7099296° and
+307.1019296° — numbers no coordinate can hold, and the reason the southern and
+western hemispheres are a sign rather than a flag somebody has to remember to
+apply.
+
+**Datum.** `lat`, `lon` and `alt_ellipsoid` MUST be referenced to WGS-84. A
+position is plotted against a map the device knows nothing about, and a
+coordinate in an unstated datum is metres of silent error: a plausible wrong
+value of exactly the kind §1.1 exists to prevent.
+
+`alt_msl` is height above mean sea level as the receiver computes it, from
+whatever geoid model it carries; this specification does not name one. The
+difference between the two altitude fields is the geoid separation at that
+position, and a client needing to know which model produced it needs the
+receiver's documentation rather than a protocol field.
 
 ### 5.1 Validity
 
@@ -302,11 +385,20 @@ measurement of zero. No field value anywhere in VTP/1 signals absence.
 | 4+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:fix_flags -->
 
-### 5.4 Derived quantities
+### 5.4 Reference frames and derived quantities
+
+The velocity triple is a local north-east-down frame at the reported position:
+`vel_n` toward true north, `vel_e` toward true east, and `vel_d` positive
+downward, so a climbing vehicle reports a negative `vel_d`.
 
 Ground speed is `hypot(vel_n, vel_e)` and is exact. A device MUST NOT report a
 separately computed scalar ground speed; the velocity vector is the only
 representation.
+
+`head_mot` is measured clockwise from **true** north — never magnetic north,
+and never a grid bearing. VTP/1 carries no magnetic declination and no magnetic
+heading, so a client that wants either derives it from the position with a
+model of its own.
 
 `head_mot` is the receiver's filtered heading of motion and MAY differ from
 `atan2(vel_e, vel_n)`. A client SHOULD prefer `head_mot` when its validity bit
@@ -346,10 +438,10 @@ Total: **16 bytes**. All fields little-endian.
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
 | 0 | 2 | `u16` | `seq` | Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection |
-| 2 | 2 | `u16` | `dropped` | Frames accepted then discarded since the previous notification; excludes frames no subscription matched; saturates |
-| 4 | 8 | `u64` | `t_base` | `us`; Bus-arrival time of record 0 |
+| 2 | 2 | `u16` | `dropped` | Frames accepted then discarded since the previous notification; excludes frames no subscription matched or a subscription mode did not select; saturates |
+| 4 | 8 | `u64` | `t_base` | `µs`; Bus-arrival time of record 0, on the device clock (§8.1) |
 | 12 | 1 | `u8` | `count` | — |
-| 13 | 1 | `u8` | `flags` | bit0 device is shedding load |
+| 13 | 1 | `u8` | `flags` | bit0 device is shedding load — discarding accepted frames (§6.3) |
 | 14 | 2 | `u16` | `reserved` | **reserved — MUST be zero** |
 <!-- END GENERATED: can_header -->
 
@@ -360,22 +452,57 @@ Total: **7 bytes + `payload`**. All fields little-endian.
 
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `dt` | `10us`; Ticks since t_base; window is 0..655.35 ms |
+| 0 | 2 | `u16` | `dt` | `10µs`; Ticks since this batch's own t_base; window is 0..655.35 ms |
 | 2 | 4 | `u32` | `id` | bits 0-28 arbitration id; b29 extended; b30 CAN FD; b31 RTR |
 | 6 | 1 | `u8` | `len` | Payload length; Classic 0..8, CAN FD a DLC rung (SPEC.md 6.10) |
 <!-- END GENERATED: can_record -->
+
+Records are variable length — seven bytes plus `len` payload bytes — so a
+receiver walks them in order, and the *n*th record does not sit at a fixed
+offset. One notification carrying three classic frames of eight bytes each is
+16 + 3 × 15 = 61 bytes:
+
+| Bytes | Contents |
+| --- | --- |
+| 0–15 | `can_header`: `seq`, `dropped`, `t_base`, `count` = 3, `flags`, `reserved` |
+| 16–22 | Record 0: `dt`, `id`, `len` = 8 |
+| 23–30 | Record 0's payload |
+| 31–37 | Record 1: `dt`, `id`, `len` = 8 |
+| 38–45 | Record 1's payload |
+| 46–52 | Record 2: `dt`, `id`, `len` = 8 |
+| 53–60 | Record 2's payload |
+
+The frames in one batch need not share an identifier, a payload length or a
+subscription: a batch is a unit of transmission and carries no other meaning.
+How many frames go in one is bounded by the negotiated ATT MTU (§2) and by the
+`dt` window (§6.1), and by nothing else.
 
 ### 6.1 Timestamps
 
 `dt` counts 10 µs ticks from `t_base`, so a frame's bus-arrival time is
 `t_base + dt × 10` microseconds on the device clock (§8).
 
+`t_base` MUST be the bus-arrival time of record 0, measured by the device, not
+the time the notification was queued or sent.
+
+`t_base` is an absolute reading of that clock. It is not an offset from
+anything: it does not start at zero when the connection opens, and it does not
+accumulate from batch to batch. Every notification carries its own `t_base`,
+and every `dt` is measured from the `t_base` in the same notification — not
+from the record before it, and not from the previous batch. Record 0's `dt` is
+consequently zero, `t_base` being its arrival time.
+
+A batch whose `t_base` is 12 345 678 000 and whose `count` is 3:
+
+| Record | `dt` | Bus-arrival time on the device clock |
+| --- | --- | --- |
+| 0 | 0 | 12 345 678 000 µs — `t_base` itself |
+| 1 | 250 | 12 345 680 500 µs — 2.5 ms after record 0 |
+| 2 | 1000 | 12 345 688 000 µs — 10 ms after record 0, not 10 ms after record 1 |
+
 `dt` spans 0 … 655 350 µs. A device MUST emit a batch before `dt` would exceed
 that range, which bounds worst-case batch latency at 655.35 ms. A device SHOULD
 flush far more frequently — once per connection interval is RECOMMENDED.
-
-`t_base` MUST be the bus-arrival time of record 0, measured by the device, not
-the time the notification was queued or sent.
 
 ### 6.2 Batches
 
@@ -388,11 +515,19 @@ header plus `count` complete records.
 ### 6.3 Loss
 
 `dropped` is defined in §8.3. A device MUST report discards there rather than
-silently omitting frames, and MUST NOT count frames that matched no
-subscription — those were never accepted. A client SHOULD surface a non-zero
+silently omitting frames, and MUST NOT count a frame that matched no
+subscription, or that the governing subscription's mode did not select (§6.8) —
+neither of those was ever accepted. A client SHOULD surface a non-zero
 `dropped` to the user.
 
-`flags` bit 0 indicates the device is actively shedding load.
+`flags` bit 0 indicates the device is actively **shedding load**: discarding
+frames it accepted and cannot forward, because the bus is producing them faster
+than the device can pack them or the link can carry them. The bit reports that
+the condition is current; `dropped` counts what it has cost since the previous
+notification. A device sheds rather than stalls because a bus does not wait,
+and §9.4 is why the condition is reachable at all — an `every_frame` or
+`on_change` subscription cannot be refused on rate grounds, because the load it
+will produce is not knowable when it is installed.
 
 ### 6.4 Identifier validity
 
@@ -534,8 +669,8 @@ Total: **20 bytes**. All fields little-endian.
 | --- | --- | --- | --- | --- |
 | 0 | 2 | `u16` | `seq` | Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection |
 | 2 | 2 | `u16` | `dropped` | Samples accepted then discarded since the previous notification; saturates, never wraps |
-| 4 | 8 | `u64` | `t_base` | `us`; Timestamp of sample 0 |
-| 12 | 4 | `u32` | `period` | `us`; Interval between samples |
+| 4 | 8 | `u64` | `t_base` | `µs`; Device-clock timestamp of sample 0 (§8.1) |
+| 12 | 4 | `u32` | `period` | `µs`; Interval between consecutive samples |
 | 16 | 1 | `u8` | `count` | — |
 | 17 | 1 | `u8` | `flags` | bit0 accel present, bit1 gyro present |
 | 18 | 2 | `u16` | `reserved` | **reserved — MUST be zero** |
@@ -548,7 +683,7 @@ Total: **12 bytes**. All fields little-endian.
 
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | 2 | `i16` | `ax` | `mg`; present when `imu_header.flags` bit 0 (`accel`) is set; milli-g |
+| 0 | 2 | `i16` | `ax` | `mg`; milli-g; present when `imu_header.flags` bit 0 (`accel`) is set |
 | 2 | 2 | `i16` | `ay` | `mg`; present when `imu_header.flags` bit 0 (`accel`) is set |
 | 4 | 2 | `i16` | `az` | `mg`; present when `imu_header.flags` bit 0 (`accel`) is set |
 | 6 | 2 | `i16` | `gx` | `deg/s`; scale 0.05; present when `imu_header.flags` bit 1 (`gyro`) is set |
@@ -557,6 +692,12 @@ Total: **12 bytes**. All fields little-endian.
 <!-- END GENERATED: imu_sample -->
 
 Samples are evenly spaced: sample *i* is at `t_base + i × period` microseconds.
+
+A CAN record carries its own `dt` (§6.1) because bus frames arrive when the bus
+decides. IMU samples do not: the device reads its sensor on a schedule it sets,
+so one interval describes the whole batch and a per-sample offset would carry
+nothing the header does not already say. The two forms differ because what is
+being timestamped differs, not because they are two conventions for one thing.
 
 `period` is expressed as an interval rather than a rate because real sensor
 output data rates are not integer hertz. A device MUST report its actual sample
@@ -645,6 +786,14 @@ never accepted, and a device MUST NOT count it. `dropped` is a report of
 capacity that was exceeded, not of filtering that worked as instructed, and
 conflating the two would make the field useless for the only thing it is for.
 
+A subscription mode that forwards less than every frame is filtering as well. A
+frame the governing subscription's mode did not select — outside a `periodic`
+interval, inside an `on_change` debounce, or not the Nth under `every_nth`
+(§6.8) — MUST NOT be counted in `dropped` either. A client that asked for one
+frame in ten has not lost the other nine; the device did exactly what it
+installed, and a counter that says otherwise sends a client hunting a fault
+that does not exist.
+
 `dropped` **saturates** at 65535. It MUST NOT wrap.
 
 This is the one counter in VTP/1 that saturates, and the reason is §1.1. A
@@ -719,6 +868,71 @@ A client MAY have several requests outstanding. A device MUST process them in
 the order received and MUST respond to each. `tag` is opaque to the device and
 MUST be echoed unchanged.
 
+### 9.1 Link parameters
+
+The detail of a successful `GET_LINK_PARAMS` response is one `link_params`
+record:
+
+<!-- BEGIN GENERATED: link_params -->
+*The device's view of the negotiated link. Reported, never negotiated here.*
+
+Total: **16 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 2 | `u16` | `validity` | bitmask `link_validity` |
+| 2 | 2 | `u16` | `att_mtu` | `bytes`; valid when `validity` bit 0 (`att_mtu`) is set |
+| 4 | 2 | `u16` | `ll_max_tx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
+| 6 | 2 | `u16` | `ll_max_rx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
+| 8 | 2 | `u16` | `conn_interval` | `1.25ms`; valid when `validity` bit 2 (`conn_params`) is set |
+| 10 | 2 | `u16` | `peripheral_latency` | Connection events the device may skip; valid when `validity` bit 2 (`conn_params`) is set |
+| 12 | 2 | `u16` | `supervision_timeout` | `10ms`; valid when `validity` bit 2 (`conn_params`) is set |
+| 14 | 1 | `u8` | `phy_tx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
+| 15 | 1 | `u8` | `phy_rx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
+<!-- END GENERATED: link_params -->
+
+<!-- BEGIN GENERATED: bitmask:link_validity -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `att_mtu` | att_mtu carries the negotiated value |
+| 1 | `ll_data_length` | ll_max_tx_octets and ll_max_rx_octets are valid |
+| 2 | `conn_params` | conn_interval, peripheral_latency and supervision_timeout are all valid |
+| 3 | `phy` | phy_tx and phy_rx are valid |
+| 4+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:link_validity -->
+
+`phy_tx` and `phy_rx`:
+
+<!-- BEGIN GENERATED: enum:phy -->
+| Value | Name | Meaning |
+| --- | --- | --- |
+| 1 | `le_1m` | LE 1M |
+| 2 | `le_2m` | LE 2M |
+| 3 | `le_coded` | LE Coded |
+| *other* | *unknown* | MUST decode as unknown, never as a default |
+<!-- END GENERATED: enum:phy -->
+
+This record is **reporting only**. Nothing in it is negotiated through VTP/1,
+and a device MUST NOT change its link configuration in response to this request.
+
+Each validity bit governs the fields listed against it, under the same rule as
+§5.1: if the bit is clear the device MUST write those fields as zero and the
+receiver MUST report them absent. A device whose controller does not expose a
+given parameter MUST clear the corresponding bit rather than report a guess.
+There is no PHY value zero, so a zeroed `phy_tx` cannot be mistaken for LE 1M.
+
+A device SHOULD implement this opcode. Its purpose is to let a client verify the
+transport requirements of §2.1-§2.3, none of which a client can observe from its
+own Bluetooth stack: negotiated link-layer payload, PHY and connection interval
+are unavailable to applications on at least one major mobile platform. A client
+that finds a device reporting a link-layer payload well below its ATT MTU SHOULD
+surface that to the user as a device defect, since it costs roughly three times
+the radio airtime per byte delivered and that cost is borne by every other
+device sharing the central.
+
+A client MUST NOT treat a device that answers `unsupported_opcode` as
+non-conforming.
+
 ### 9.2 CAN subscriptions
 
 Installing a subscription returns a **handle**. The handle identifies that
@@ -729,9 +943,12 @@ exists. It MAY be reused once that subscription has been removed.
 A subscription matches a frame when `frame.id & mask == sub.id & mask`, taken
 over **bits 0–29**: the twenty-nine arbitration bits and bit 29, the standard/
 extended format bit. A set bit in `mask` is a bit that a frame must match; a
-clear bit is a bit that may hold anything. Bits 30 and 31 — CAN FD and RTR —
-describe how a frame was transmitted rather than which frame it is, and take no
-part in matching; a device MUST ignore them in both `id` and `mask`.
+clear bit is a bit that may hold anything. One entry therefore covers a family
+of identifiers, and a mask of zero covers every frame on the bus. Bits 30 and
+31 — CAN FD and RTR — describe how a frame was transmitted rather than which
+frame it is, and take no part in matching; a device MUST ignore them in both
+`id` and `mask`. Why the table is addressed this way rather than by identifier
+is RATIONALE §6.
 
 `CAN_SUBSCRIBE` is exactly `CAN_SUBSCRIBE_MASK` with a mask of `0x3FFFFFFF`.
 
@@ -831,71 +1048,6 @@ subscriptions installed at the moment the page was produced.
 A device MUST report its table exactly as installed. `CAN_LIST` exists so a
 client can verify device state rather than assume it, and a device that
 normalises, reorders or summarises here defeats its only purpose.
-
-### 9.1 Link parameters
-
-The detail of a successful `GET_LINK_PARAMS` response is one `link_params`
-record:
-
-<!-- BEGIN GENERATED: link_params -->
-*The device's view of the negotiated link. Reported, never negotiated here.*
-
-Total: **16 bytes**. All fields little-endian.
-
-| Off | Size | Type | Field | Notes |
-| --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `validity` | bitmask `link_validity` |
-| 2 | 2 | `u16` | `att_mtu` | `bytes`; valid when `validity` bit 0 (`att_mtu`) is set |
-| 4 | 2 | `u16` | `ll_max_tx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
-| 6 | 2 | `u16` | `ll_max_rx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
-| 8 | 2 | `u16` | `conn_interval` | `1.25ms`; valid when `validity` bit 2 (`conn_params`) is set |
-| 10 | 2 | `u16` | `peripheral_latency` | valid when `validity` bit 2 (`conn_params`) is set; Connection events the device may skip |
-| 12 | 2 | `u16` | `supervision_timeout` | `10ms`; valid when `validity` bit 2 (`conn_params`) is set |
-| 14 | 1 | `u8` | `phy_tx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
-| 15 | 1 | `u8` | `phy_rx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
-<!-- END GENERATED: link_params -->
-
-<!-- BEGIN GENERATED: bitmask:link_validity -->
-| Bit | Name | Meaning |
-| --- | --- | --- |
-| 0 | `att_mtu` | att_mtu carries the negotiated value |
-| 1 | `ll_data_length` | ll_max_tx_octets and ll_max_rx_octets are valid |
-| 2 | `conn_params` | conn_interval, peripheral_latency and supervision_timeout are all valid |
-| 3 | `phy` | phy_tx and phy_rx are valid |
-| 4+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
-<!-- END GENERATED: bitmask:link_validity -->
-
-`phy_tx` and `phy_rx`:
-
-<!-- BEGIN GENERATED: enum:phy -->
-| Value | Name | Meaning |
-| --- | --- | --- |
-| 1 | `le_1m` | LE 1M |
-| 2 | `le_2m` | LE 2M |
-| 3 | `le_coded` | LE Coded |
-| *other* | *unknown* | MUST decode as unknown, never as a default |
-<!-- END GENERATED: enum:phy -->
-
-This record is **reporting only**. Nothing in it is negotiated through VTP/1,
-and a device MUST NOT change its link configuration in response to this request.
-
-Each validity bit governs the fields listed against it, under the same rule as
-§5.1: if the bit is clear the device MUST write those fields as zero and the
-receiver MUST report them absent. A device whose controller does not expose a
-given parameter MUST clear the corresponding bit rather than report a guess.
-There is no PHY value zero, so a zeroed `phy_tx` cannot be mistaken for LE 1M.
-
-A device SHOULD implement this opcode. Its purpose is to let a client verify the
-transport requirements of §2.1-§2.3, none of which a client can observe from its
-own Bluetooth stack: negotiated link-layer payload, PHY and connection interval
-are unavailable to applications on at least one major mobile platform. A client
-that finds a device reporting a link-layer payload well below its ATT MTU SHOULD
-surface that to the user as a device defect, since it costs roughly three times
-the radio airtime per byte delivered and that cost is borne by every other
-device sharing the central.
-
-A client MUST NOT treat a device that answers `unsupported_opcode` as
-non-conforming.
 
 ---
 

@@ -199,6 +199,10 @@ def field_rows(schema, rec):
             notes.append(f"`{f['units']}`")
         if f.get("scale"):
             notes.append(f"scale {f['scale']:g}")
+        # The description leads the qualifiers: what the field IS is what a
+        # reader needs first, and a validity clause in front of it buries it.
+        if f.get("desc"):
+            notes.append(f["desc"])
         if f.get("enum"):
             notes.append(f"enum `{f['enum']}`")
         if f.get("bitmask"):
@@ -214,8 +218,6 @@ def field_rows(schema, rec):
             notes.append(
                 f"present when `{pres['record']}.{pres['field']}` bit "
                 f"{pres['bits'][pb]} (`{pb}`) is set")
-        if f.get("desc"):
-            notes.append(f["desc"])
         rows.append(f"| {f['offset']} | {f['size']} | `{f['type']}` | `{f['name']}` | "
                     f"{'; '.join(notes) if notes else '—'} |")
     return rows

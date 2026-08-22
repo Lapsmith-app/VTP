@@ -76,6 +76,71 @@ conformance vector.
   size.** A released entry records what that release contained, and rewriting
   it to match today's count would falsify history. Only `[Unreleased]` is now
   checked against the corpus on disk.
+### Clarified
+- **The specification says who the "device", the "client" and a "receiver" are,
+  and what shape each stream has, before it uses any of them** (SPEC.md §1.2,
+  §1.3). The three words were used consistently throughout and defined nowhere,
+  which is a cost paid by every first-time reader and by nobody who already
+  knew. §1.3 puts the payload shape of every characteristic in one table — one
+  fix per notification, a batch header plus records for CAN and IMU — so the
+  framing is known before the field tables that assume it, along with the three
+  properties (`seq`, `dropped`, one device clock) that §8 specifies for all
+  three streams at once.
+- **Field descriptions spell out the abbreviations.** `vel_n`, `h_acc`,
+  `s_acc`, `p_dop` and `num_sv` were legible only to a reader who already knew
+  a GNSS receiver's vocabulary. The description now also leads the Notes column
+  instead of trailing a validity clause, so what a field *is* arrives before
+  when it is valid.
+- **A worked example for scaled and signed fields** (§5). Latitude and
+  longitude carry the hemisphere in the sign of a two's-complement integer,
+  which is where client implementations have historically gone wrong. The
+  example decodes a southern and a western coordinate, gives their bytes, and
+  states what an unsigned read produces instead.
+- **A worked example of a CAN batch** (§6, §6.1): the byte layout of a
+  three-frame notification, and a batch whose `dt` values are decoded to
+  arrival times. `t_base` is now stated to be an absolute reading of the device
+  clock and `dt` an offset from the `t_base` in the same notification — neither
+  accumulates, which is a reading the previous text permitted.
+- **"Shedding load" is defined where the flag is** (§6.3) rather than three
+  sections away, and the IMU's `period` is explained against the CAN record's
+  `dt` (§7): a bus frame arrives when the bus decides and a sample when the
+  device asks, so one carries a per-item offset and the other one interval.
+- **Microseconds are written `µs` in the generated tables**, matching the prose,
+  which always did.
+- **The datum is stated** (SPEC.md §5). `lat`, `lon` and `alt_ellipsoid` MUST
+  be referenced to WGS-84, which every implementation was already assuming and
+  none could check. A coordinate in an unstated datum is metres of silent error
+  against a map the device knows nothing about — a plausible wrong value in the
+  one place a client cannot detect one. `alt_msl` is explicitly *not* pinned to
+  a geoid model, since the receiver's model is the receiver's business and the
+  difference between the two altitude fields is the separation.
+- **`head_mot` and the velocity triple have a stated frame** (§5.4, retitled
+  "Reference frames and derived quantities"). Heading is clockwise from true
+  north, never magnetic and never a grid bearing, and the triple is a local
+  north-east-down frame at the reported position, so a climbing vehicle reports
+  a negative `vel_d`. Both were implied by §5.4's `atan2(vel_e, vel_n)` and
+  neither was said.
+- **§9.1 is where §9.1 belongs.** Link parameters were numbered first and
+  printed last, after §9.5. The text is unchanged and so is every reference to
+  it; only the reading order is fixed.
+- **Why the CAN subscription table is addressed by mask** (RATIONALE §6). The
+  usual reason for masks — too few hardware acceptance filters — does not apply
+  to a device that unpacks every frame anyway, and nothing said what the actual
+  reasons are: one slot covering a family of identifiers against a declared
+  `can_subscription_slots`, a mask of zero surveying a bus whose identifiers
+  are not yet known, and the specificity ordering of §9.3 letting those two
+  compose. The cost is stated with them.
+
+### Changed — device behaviour
+- **A frame that a subscription mode did not select is not `dropped`**
+  (SPEC.md §8.3, §6.3). `dropped` already excluded frames matching no
+  subscription; it said nothing about a frame that matched a `periodic`,
+  `on_change` or `every_nth` subscription and was not forwarded because the
+  mode said not to. Both are filtering working as instructed, and counting the
+  second would send a client hunting a capacity fault that does not exist. The
+  reference peripheral already behaved this way — only the specification was
+  silent, which is the kind of gap that produces two conforming devices whose
+  drop counters cannot be compared.
 
 ### Changed
 - **The peripheral's synthetic vehicle now varies.** It ran at constant speed on
