@@ -783,10 +783,18 @@ A gap therefore means one thing and one thing only: notifications the device
 sent that the client did not receive. A receiver MUST NOT treat a wrap from
 65535 to 0 as a gap.
 
-`seq` restarts at 0 on the first notification sent on that characteristic after
-a connection is established. A client consequently never has to distinguish a
-reconnection from a wrap, and the protocol needs no session or boot identifier
-to make that distinction for it.
+**The first notification sent on a characteristic after a connection is
+established carries `seq` 0**, and the second carries 1. A client consequently
+never has to distinguish a reconnection from a wrap, and the protocol needs no
+session or boot identifier to make that distinction for it.
+
+Stated as a property of the notification rather than of the counter because
+the counter phrasing is ambiguous, and the ambiguity has already cost
+something: "restarts at 0" can be read as the counter being zeroed and the
+first notification then taking the next value, which puts 1 on the wire. A
+device did exactly that, and its own conformance check was written to match —
+asserting the first notification carried 1 — so the test agreed with the bug it
+existed to catch.
 
 Counting notifications rather than source items is what makes the field uniform.
 A CAN batch header cannot count frames the device never accepted, and an IMU
