@@ -226,7 +226,7 @@ int vtp_encode_monitor_list(const vtp_monitor_page_t *p,
                    + (size_t)i * VTP_MONITOR_CHANNEL_SIZE;
         e[VTP_MONITOR_CHANNEL_OFF_SLOT] = entries[i].slot;
         wr16(e + VTP_MONITOR_CHANNEL_OFF_CHANNEL, entries[i].channel);
-        e[VTP_MONITOR_CHANNEL_OFF_RESERVED] = entries[i].reserved;
+        e[VTP_MONITOR_CHANNEL_OFF_MAX_AGE] = entries[i].max_age;
     }
     return (int)needed;
 }

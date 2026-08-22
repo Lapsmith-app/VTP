@@ -18,25 +18,25 @@
           {
             "slot": 0,
             "channel": 1,
-            "reserved": 0,
+            "max_age": 0,
             "channel_known": true
           },
           {
             "slot": 1,
             "channel": 2,
-            "reserved": 0,
+            "max_age": 0,
             "channel_known": true
           },
           {
             "slot": 2,
             "channel": 4,
-            "reserved": 0,
+            "max_age": 0,
             "channel_known": true
           },
           {
             "slot": 3,
             "channel": 6,
-            "reserved": 0,
+            "max_age": 0,
             "channel_known": true
           }
         ]
@@ -73,7 +73,7 @@
           {
             "slot": 9,
             "channel": 4242,
-            "reserved": 0,
+            "max_age": 0,
             "channel_known": false
           }
         ]
@@ -229,6 +229,142 @@
       "record": "monitor_list",
       "hex": "0100000001000001000000",
       "must_reject": "length"
+    },
+    {
+      "name": "per-channel-expiry",
+      "desc": "Three channels with different max_age. SPEC.md 13.5 -- a lap time ticking up is wrong within a second of going stale, a best lap stays true until it is beaten, so the deadline is per channel and 0 means never.",
+      "record": "monitor_list",
+      "hex": "030000000300000100140103000002070005",
+      "expect": {
+        "page": {
+          "total": 3,
+          "index": 0,
+          "count": 3,
+          "reserved": 0
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 20,
+            "channel_known": true
+          },
+          {
+            "slot": 1,
+            "channel": 3,
+            "max_age": 0,
+            "channel_known": true
+          },
+          {
+            "slot": 2,
+            "channel": 7,
+            "max_age": 5,
+            "channel_known": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "max-age-at-ceiling",
+      "desc": "max_age 255 is 25.5 seconds, the longest a device can ask for short of never.",
+      "record": "monitor_list",
+      "hex": "010000000100000300ff",
+      "expect": {
+        "page": {
+          "total": 1,
+          "index": 0,
+          "count": 1,
+          "reserved": 0
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 3,
+            "max_age": 255,
+            "channel_known": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-slot-in-declaration",
+      "desc": "Two entries claiming slot 0. MUST be rejected: the slot is how a value is addressed, so every later update would be ambiguous. SPEC.md 13.3.",
+      "record": "monitor_list",
+      "hex": "0200000002000001000a0007000a",
+      "expect": {
+        "page": {
+          "total": 2,
+          "index": 0,
+          "count": 2,
+          "reserved": 0
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          },
+          {
+            "slot": 0,
+            "channel": 7,
+            "max_age": 10,
+            "channel_known": true
+          }
+        ]
+      },
+      "must_reject": "duplicate-slot"
+    },
+    {
+      "name": "more-channels-than-fit",
+      "desc": "A declaration of 16 channels. SPEC.md 13.4 requires every write to carry every slot, and 16 values do not fit beside a header in one write at the minimum ATT MTU -- so the device has made its own rule unsatisfiable and this MUST be rejected.",
+      "record": "monitor_list",
+      "hex": "1000000001000001000a",
+      "expect": {
+        "page": {
+          "total": 16,
+          "index": 0,
+          "count": 1,
+          "reserved": 0
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 10,
+            "channel_known": true
+          }
+        ]
+      },
+      "must_reject": "too-many-channels"
+    },
+    {
+      "name": "duplicate-slot-in-update",
+      "desc": "Two values for slot 0 in one write. MUST be rejected: nothing says which wins, so a device choosing either chooses on every client's behalf. SPEC.md 13.4.",
+      "record": "monitor_update",
+      "hex": "28000200000101000000000102000000",
+      "expect": {
+        "header": {
+          "seq": 40,
+          "count": 2,
+          "reserved": 0
+        },
+        "values": [
+          {
+            "slot": 0,
+            "validity": 1,
+            "value": 1,
+            "absent": []
+          },
+          {
+            "slot": 0,
+            "validity": 1,
+            "value": 2,
+            "absent": []
+          }
+        ]
+      },
+      "must_reject": "duplicate-slot"
     }
   ]
 }

@@ -9,6 +9,56 @@ conformance vector.
 ## [Unreleased]
 
 ### Changed — wire format
+- **A Monitor value now expires (§13.5).** The rule had been the opposite:
+  there was no minimum rate and a device MUST NOT infer that an un-updated
+  value had gone stale. The reasoning — a client sends nothing precisely when
+  nothing has changed — is true, and is not the failure that matters.
+
+  The failure that matters is a client that stopped sending because it
+  crashed, was backgrounded or wedged. The link is still up, so the device
+  sees nothing wrong; silence is the only symptom it ever gets. Under the old
+  rule such a device displayed a lap time from four minutes ago, indefinitely,
+  and the driver reading it had no way to tell. A stale value shown as current
+  is a plausible wrong value, and the display is the worst place in this
+  protocol to allow one.
+
+  `monitor_channel.reserved` becomes `max_age`, in 100 ms units, taken from the
+  byte Appendix A had reserved for per-channel metadata. A device MUST render a
+  value as unavailable once `max_age` has passed, exactly as it renders one
+  whose `present` bit is clear; 0 never expires. Per channel because the
+  channels differ in kind — a `lap_time` ticking up is wrong within a second of
+  going stale, a `best_lap_time` stays true until it is beaten — and a single
+  device-wide timeout would be set for the most perishable and then demand
+  pointless traffic for the rest.
+
+- **Every Monitor write MUST now carry every slot the device asked for
+  (§13.4).** A write is a complete statement of what the client can supply, not
+  a set of changes to what it said before. Complete writes cost almost nothing
+  at any plausible channel count and buy two things deltas do not: a lost write
+  changes nothing permanently, so `seq` gaps need no recovery procedure and
+  there is none to get wrong; and the client never has to remember what it last
+  sent, which is the state that diverges silently when an app is backgrounded
+  and resumed.
+
+- **A slot MUST appear at most once in a write, and once in a declaration.**
+  Nothing said which of two values for one slot wins, so a device choosing
+  either was choosing on every client's behalf. Both decoders reject it.
+
+- **A device MUST NOT ask for more than 15 channels (§13.4)** — as many values
+  as fit beside a header in one write at §2's minimum ATT MTU. Complete writes
+  are only a workable rule if a complete write always fits, and a device asking
+  for more has made the rule unsatisfiable rather than made itself more
+  capable. The constant is derived from the record sizes in both references
+  rather than restated.
+
+### Fixed
+- **The peripheral held Monitor values forever.** It now stamps each write and
+  reports a value past its channel's `max_age` as not present, so the debug
+  panel goes blank rather than lying — the behaviour a real device's screen
+  must have. Its declaration carries a deadline per channel: 1 s for speed, 2 s
+  for the ticking lap timers, never for a best lap or lap number.
+
+### Changed — wire format
 - **`TIME_SYNC` now answers with two readings of the device clock (§9.7).**
   It had answered with one, and one timestamp cannot bound its own error. A
   client knows when it wrote and when it heard back, but with a single device

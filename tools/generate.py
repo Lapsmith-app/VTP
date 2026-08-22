@@ -1165,7 +1165,48 @@ def vectors(schema):
                  + encode(schema, "monitor_channel", dict(slot=0, channel=1))
                  + b"\x00").hex(),
          "must_reject": "length"},
+        monitor_list("per-channel-expiry",
+                     "Three channels with different max_age. SPEC.md 13.5 -- a "
+                     "lap time ticking up is wrong within a second of going "
+                     "stale, a best lap stays true until it is beaten, so the "
+                     "deadline is per channel and 0 means never.",
+                     dict(total=3, index=0, count=3),
+                     [dict(slot=0, channel=1, max_age=20),    # lap_time, 2 s
+                      dict(slot=1, channel=3, max_age=0),     # best_lap, never
+                      dict(slot=2, channel=7, max_age=5)]),   # speed, 500 ms
+        monitor_list("max-age-at-ceiling",
+                     "max_age 255 is 25.5 seconds, the longest a device can ask "
+                     "for short of never.",
+                     dict(total=1, index=0, count=1),
+                     [dict(slot=0, channel=3, max_age=255)]),
+        monitor_list("duplicate-slot-in-declaration",
+                     "Two entries claiming slot 0. MUST be rejected: the slot is "
+                     "how a value is addressed, so every later update would be "
+                     "ambiguous. SPEC.md 13.3.",
+                     dict(total=2, index=0, count=2),
+                     [dict(slot=0, channel=1, max_age=10),
+                      dict(slot=0, channel=7, max_age=10)],
+                     must_reject="duplicate-slot"),
+        monitor_list("more-channels-than-fit",
+                     "A declaration of 16 channels. SPEC.md 13.4 requires every "
+                     "write to carry every slot, and 16 values do not fit beside "
+                     "a header in one write at the minimum ATT MTU -- so the "
+                     "device has made its own rule unsatisfiable and this MUST "
+                     "be rejected.",
+                     dict(total=16, index=0, count=1),
+                     [dict(slot=0, channel=1, max_age=10)],
+                     must_reject="too-many-channels"),
     ]
+
+    files["monitor.json"].append(
+        monitor_update("duplicate-slot-in-update",
+                       "Two values for slot 0 in one write. MUST be rejected: "
+                       "nothing says which wins, so a device choosing either "
+                       "chooses on every client's behalf. SPEC.md 13.4.",
+                       dict(seq=40, count=2),
+                       [dict(slot=0, validity=PRESENT, value=1),
+                        dict(slot=0, validity=PRESENT, value=2)],
+                       must_reject="duplicate-slot"))
 
     # ---- Link params -----------------------------------------------------
     L = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["link_validity"]["bits"]}

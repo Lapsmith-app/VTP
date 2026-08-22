@@ -1560,7 +1560,7 @@ Total: **4 bytes**. All fields little-endian.
 | --- | --- | --- | --- | --- |
 | 0 | 1 | `u8` | `slot` | The device's own name for this value; used in monitor_value |
 | 1 | 2 | `u16` | `channel` | enum `channel` |
-| 3 | 1 | `u8` | `reserved` | **reserved — MUST be zero** |
+| 3 | 1 | `u8` | `max_age` | `100ms`; Longest this value may be shown without a refresh; 0 never expires (SPEC.md 13.5) |
 <!-- END GENERATED: monitor_channel -->
 
 `slot` is the device's own name for the value; the client quotes it back in
@@ -1613,11 +1613,65 @@ session there is no last lap time, and a device that displays 0.000 for it has
 been told something false. The client MUST clear the bit rather than omit the
 slot or send a placeholder.
 
-A client SHOULD write only when a value it has been asked for changes. There is
-no minimum rate; a device MUST NOT infer that an un-updated value has expired,
-because the client sends nothing precisely when nothing has changed.
+**Every write MUST carry a value for every slot the device asked for.** A
+Monitor write is a complete statement of what the client can currently supply,
+not a set of changes to what it said before.
 
-### 13.5 What Monitor is not
+Complete writes cost almost nothing here — the whole set is one small write at
+any plausible channel count — and they buy two things that deltas do not. A
+write that is lost changes nothing permanently, because the next one restates
+everything, so `seq` gaps need no recovery procedure and there is none to get
+wrong. And the client never has to remember what it last sent, which is the
+state that silently diverges when an app is backgrounded and resumed.
+
+A slot MUST appear at most once in a write. A device MUST reject a write
+containing a slot twice, because nothing in this specification says which of
+the two wins and a device choosing either is choosing for every client.
+
+A device MUST NOT ask for more channels than fit in a single write at the
+minimum ATT MTU of §2: with a 4-byte header and 6 bytes per value that is
+**15 channels**. Complete writes are only a workable rule if a complete write
+always fits, and a device that asks for more has made the rule unsatisfiable
+rather than made itself more capable.
+
+### 13.5 Freshness
+
+A value the client stopped updating is a value the device cannot display
+honestly, and the device is the one with the screen.
+
+Each channel in the declaration carries `max_age`, in units of 100 ms. **A
+device MUST render a value as unavailable once `max_age` has passed since the
+write that last carried it**, exactly as it renders one whose `present` bit is
+clear. A `max_age` of zero means the value never expires.
+
+The client MUST refresh before then. A client SHOULD still write only when
+something it can supply has changed — but "nothing has changed" is not a reason
+to let a value expire, so it MUST write anyway as the deadline approaches, and
+that write costs one small packet at whatever interval the device chose.
+
+This replaces a rule that said the opposite: that there was no minimum rate and
+a device MUST NOT infer expiry from silence. The reasoning was that a client
+sends nothing precisely when nothing has changed, which is true and is not the
+failure that matters. The failure that matters is a client that has stopped
+sending because it crashed, was backgrounded, or wedged — with the link still
+up, so the device sees nothing wrong. Under the old rule such a device
+displayed a lap time from four minutes ago, indefinitely, and the driver
+reading it had no way to tell. A stale value shown as current is a plausible
+wrong value, which §1.1 exists to prevent, and the display is the worst place
+in this protocol to allow one.
+
+`max_age` is per channel because the channels differ in kind. A `lap_time`
+ticking up is wrong within a second of going stale; a `best_lap_time` stays
+true until it is beaten and can reasonably never expire. A single device-wide
+timeout would be set for the most perishable channel and would then demand
+pointless traffic for the rest.
+
+A device SHOULD choose a `max_age` several times its expected update interval.
+It bounds how wrong a display may be, not how often a client must talk, and one
+set close to the update rate turns an ordinary scheduling delay into a
+flickering screen.
+
+### 13.6 What Monitor is not
 
 It is not a route for vehicle data. A client MUST NOT use it to send back
 anything it received from the device, and a device MUST NOT rely on it for
@@ -1635,7 +1689,6 @@ anything it records. Monitor drives a display; the recording is the client's.
 | `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (§6.9); high byte unassigned |
 | `can_list_page.reserved` | 1 byte | Paging metadata |
 | `monitor_page.reserved` | 1 byte | Paging metadata |
-| `monitor_channel.reserved` | 1 byte | Per-channel metadata |
 | `monitor_header.reserved` | 1 byte | Update metadata |
 | `monitor_value.validity` | bits 1–7 | Validity for values added in a later minor |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |

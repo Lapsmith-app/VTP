@@ -168,8 +168,15 @@ typedef struct {
 typedef struct {
     uint8_t  slot;
     uint16_t channel;
-    uint8_t  reserved;
+    uint8_t  max_age;   /* 100 ms units; 0 never expires. SPEC.md §13.5 */
 } vtp_monitor_channel_t;
+
+/* SPEC.md §13.4 -- the most channels a device may ask for: as many values as
+ * fit beside a monitor_header in one write at the §2 minimum ATT MTU, less the
+ * 3-byte ATT write header. A complete write is only a workable rule if a
+ * complete write always fits. */
+#define VTP_MONITOR_MAX_CHANNELS \
+    ((VTP_MIN_ATT_MTU - 3 - VTP_MONITOR_HEADER_SIZE) / VTP_MONITOR_VALUE_SIZE)
 
 typedef struct {
     uint16_t seq;

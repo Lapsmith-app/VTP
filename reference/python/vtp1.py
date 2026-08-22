@@ -199,6 +199,15 @@ def decode_can_list(buf):
     return {"page": page, "entries": entries}
 
 
+# SPEC.md §13.4 — the most channels a device may ask for: as many values as fit
+# beside a monitor_header in one write at the §2 minimum ATT MTU, less the
+# 3-byte ATT write header. Derived so the constant cannot drift from the record
+# sizes it depends on.
+MONITOR_MAX_CHANNELS = (
+    (SCHEMA["protocol"]["min_att_mtu"] - 3 - _size("monitor_header"))
+    // _size("monitor_value"))
+
+
 def decode_monitor_list(buf):
     """SPEC.md §13.3 — one page of the channels a device asks for."""
     hsz, esz = _size("monitor_page"), _size("monitor_channel")
@@ -218,6 +227,16 @@ def decode_monitor_list(buf):
         # client answers the slot absent rather than substituting another.
         e["channel_known"] = e["channel"] in known
         entries.append(e)
+
+    # SPEC.md §13.3 — a device MUST NOT repeat a slot; the slot is how a value
+    # is addressed, so two entries claiming one make every update ambiguous.
+    slots = [e["slot"] for e in entries]
+    if len(set(slots)) != len(slots):
+        raise Reject("duplicate-slot")
+    # SPEC.md §13.4 — a complete write must fit at the minimum ATT MTU, so a
+    # declaration larger than that has made its own rule unsatisfiable.
+    if page["total"] > MONITOR_MAX_CHANNELS:
+        raise Reject("too-many-channels")
     return {"page": page, "entries": entries}
 
 
@@ -242,6 +261,12 @@ def decode_monitor_update(buf):
         # that the channel is zero.
         v["absent"] = ([] if v["validity"] & (1 << bit["present"]) else ["value"])
         values.append(v)
+
+    # SPEC.md §13.4 — nothing says which of two values for one slot wins, so a
+    # device choosing either is choosing on every client's behalf.
+    slots = [v["slot"] for v in values]
+    if len(set(slots)) != len(slots):
+        raise Reject("duplicate-slot")
     return {"header": hdr, "values": values}
 
 

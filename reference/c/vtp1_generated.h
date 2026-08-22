@@ -98,7 +98,7 @@
 #define VTP_MONITOR_CHANNEL_SIZE 4
 #define VTP_MONITOR_CHANNEL_OFF_SLOT 0
 #define VTP_MONITOR_CHANNEL_OFF_CHANNEL 1
-#define VTP_MONITOR_CHANNEL_OFF_RESERVED 3
+#define VTP_MONITOR_CHANNEL_OFF_MAX_AGE 3
 
 /* Batch header for a client-to-device value update. Followed by `count` monitor_value entries. */
 #define VTP_MONITOR_HEADER_SIZE 4
