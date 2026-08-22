@@ -211,10 +211,11 @@ int main(void) {
 
             printf("{\"ok\":true,\"header\":{\"seq\":%u,\"dropped\":%u,"
                    "\"t_base\":%" PRIu64 ",\"period\":%u,\"count\":%u,"
-                   "\"flags\":%u,\"reserved\":%u},"
+                   "\"flags\":%u,\"reserved\":%u,\"saturated\":%s},"
                    "\"samples\":[",
                    h.seq, h.dropped, h.t_base, h.period, h.count, h.flags,
-                   h.reserved);
+                   h.reserved,
+                   (h.flags & VTP_IMU_FLAG_SATURATED) ? "true" : "false");
             for (uint8_t i = 0; i < h.count; i++) {
                 const vtp_imu_sample_t *s = &samples[i];
                 printf("%s{\"ax\":%d,\"ay\":%d,\"az\":%d,\"gx\":%d,\"gy\":%d,\"gz\":%d,"

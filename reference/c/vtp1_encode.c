@@ -34,6 +34,13 @@ int vtp_encode_gps_fix(const vtp_gps_fix_t *f,
     /* Reporting success for bytes that were never written is worse than
      * failing: the caller transmits whatever the buffer happened to hold. */
     if (ext_len && !ext) return -1;
+    /* SPEC.md §5.4 -- ranges, where a validity bit claims a meaning. */
+    if (f->validity & VTP_GPS_VALIDITY_POSITION) {
+        if (f->lat > 900000000 || f->lat < -900000000) return -1;
+        if (f->lon > 1800000000 || f->lon < -1800000000) return -1;
+    }
+    if ((f->validity & VTP_GPS_VALIDITY_HEAD_MOT)
+        && (f->head_mot < 0 || f->head_mot >= 36000000)) return -1;
     /* SPEC.md §5.5 — the notification length MUST equal the base record plus
      * exactly the bytes accounted for by ext_count. An encoder that writes a
      * count disagreeing with its own payload emits something no conforming
@@ -157,6 +164,8 @@ int vtp_encode_imu_batch(const vtp_imu_header_t *h,
                          uint8_t *out, size_t cap) {
     const size_t needed =
         (size_t)VTP_IMU_HEADER_SIZE + (size_t)h->count * VTP_IMU_SAMPLE_SIZE;
+    /* An encoder must not emit what its own decoder rejects. SPEC.md §7. */
+    if (h->period == 0) return -1;
     if (cap < needed) return -1;
 
     memset(out, 0, needed);

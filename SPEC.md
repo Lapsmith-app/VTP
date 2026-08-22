@@ -336,6 +336,15 @@ A receiver that reads those two negative rows as unsigned gets 395.7099296° and
 western hemispheres are a sign rather than a flag somebody has to remember to
 apply.
 
+**Ranges.** When its validity bit is set, `lat` MUST lie within ±90°, `lon`
+within ±180°, and `head_mot` within 0° to 360° exclusive of 360. A receiver
+MUST reject a fix that breaks any of these.
+
+Rejected rather than clamped, under §1.1. A latitude of 91° is not a place a
+clamp could move it closer to; it is a field that has been corrupted, and every
+other field in the same record came from the same bytes. Clamping to 90° would
+put the vehicle at the north pole and let the client draw it there.
+
 **Datum.** `lat`, `lon` and `alt_ellipsoid` MUST be referenced to WGS-84. A
 position is plotted against a map the device knows nothing about, and a
 coordinate in an unstated datum is metres of silent error: a plausible wrong
@@ -724,7 +733,7 @@ Total: **20 bytes**. All fields little-endian.
 | 4 | 8 | `u64` | `t_base` | `µs`; Device-clock timestamp of sample 0 (§8.1) |
 | 12 | 4 | `u32` | `period` | `µs`; Interval between consecutive samples |
 | 16 | 1 | `u8` | `count` | — |
-| 17 | 1 | `u8` | `flags` | bit0 accel present, bit1 gyro present |
+| 17 | 1 | `u8` | `flags` | bit0 accel present, bit1 gyro present, bit2 a sample in this batch saturated (SPEC.md 7.2) |
 | 18 | 2 | `u16` | `reserved` | **reserved — MUST be zero** |
 <!-- END GENERATED: imu_header -->
 
@@ -782,7 +791,60 @@ in a batch of nineteen samples the worst case is about 9 µs, which is below the
 limiting term in any cross-channel alignment.
 
 `period` is a `u32`, so representable intervals run from 1 µs to about 4295
-seconds. A device MUST NOT report a period of zero.
+seconds. A device MUST NOT report a period of zero, and a receiver MUST reject
+a batch that does: zero says every sample in the batch was taken at the same
+instant, which describes no measurement, and a client dividing by it to recover
+a rate divides by zero.
+
+### 7.1 Axes and signs
+
+The sensor frame is the device's own. **Vehicle alignment is the client's job**
+— this specification does not say where the device is mounted or which way it
+faces, because it cannot know.
+
+What it must say is how to read the numbers, because a client cannot infer any
+of it and getting it wrong produces a plausible result rather than an obvious
+one:
+
+- The three axes form a **right-handed** frame: with *x* forward and *y* left,
+  *z* is up.
+- The accelerometer reports **specific force**, not acceleration. A device at
+  rest reports **+1000 mg on whichever axis points up**, because the sensor
+  measures the reaction that holds it against gravity. In free fall it reports
+  zero on every axis.
+- The gyroscope follows the **right-hand rule**: a positive `gx` is a rotation
+  that carries *y* toward *z*. Viewed from the positive end of an axis looking
+  back at the origin, positive is counter-clockwise.
+
+The accelerometer convention is the one worth stating twice. Both signs are in
+use in the wild — some parts and some libraries report the gravity vector
+instead, which is the exact negative — and a client that assumes the wrong one
+sees a car braking when it is accelerating. The mistake survives every
+plausible sanity check, because the magnitudes are right.
+
+### 7.2 Saturation
+
+A sample beyond the sensor's range is a measurement the device did not make.
+`i16` at these scales gives ±32.767 g and ±1638.35 °/s, and a real part
+saturates well before either — but whatever the limit, the reading at it is
+"at least this much", not "this much".
+
+A device MUST set `imu_header.flags` bit 2 when any sample in the batch is at
+or beyond the range of the sensor that produced it. A client MUST treat every
+sample in a batch so marked as a lower bound on the magnitude rather than a
+measurement, and SHOULD NOT integrate one.
+
+The flag is per batch rather than per sample because `imu_sample` has no room
+for one and is deliberately closed (§11.3): twelve bytes at up to 833 Hz is the
+one stream where a per-sample byte costs real airtime. A batch is a short
+enough window — nineteen samples at 833 Hz is 23 ms — that "something in here
+clipped" is enough for a client to distrust the batch and say so.
+
+Saturation is not absence. A saturated axis still has its presence flag set,
+because the sensor is fitted and did report: what is in doubt is the value's
+magnitude, not whether there is one. That is why this is a flag of its own
+rather than a cleared presence bit — §1.1 asks for the honest state, and
+"present but railed" is a different state from "not fitted".
 
 `flags` declares which sensor groups are populated. If a group's flag is clear,
 its fields MUST be zero and the receiver MUST report them absent — not as a
@@ -1692,5 +1754,5 @@ anything it records. Monitor drives a display; the recording is the client's.
 | `monitor_header.reserved` | 1 byte | Update metadata |
 | `monitor_value.validity` | bits 1–7 | Validity for values added in a later minor |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
-| `imu_header.flags` | bits 2–7 | Additional sensor groups |
+| `imu_header.flags` | bits 3–7 | Additional sensor groups |
 | Extension types | `0x00`–`0xFF` | `0x80`–`0xFF` are reserved for vendor-private use and MUST NOT be assigned by this specification |

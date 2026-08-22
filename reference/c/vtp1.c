@@ -68,6 +68,24 @@ int vtp_decode_gps_fix(const uint8_t *b, size_t len,
 
     o->ext_offset = VTP_GPS_FIX_SIZE;
     o->ext_bytes  = off - VTP_GPS_FIX_SIZE;
+
+    /* SPEC.md §5.4 -- a coordinate outside the earth is a corrupted field, and
+     * every other field came from the same bytes. Rejected, not clamped:
+     * clamping 91 degrees to 90 puts the vehicle at the pole and lets the
+     * client draw it there. Checked only where a validity bit claims the field
+     * means something. */
+    if (o->validity & VTP_GPS_VALIDITY_POSITION) {
+        if (o->lat > 900000000 || o->lat < -900000000) {
+            *err = "lat-out-of-range"; return -1;
+        }
+        if (o->lon > 1800000000 || o->lon < -1800000000) {
+            *err = "lon-out-of-range"; return -1;
+        }
+    }
+    if ((o->validity & VTP_GPS_VALIDITY_HEAD_MOT)
+        && (o->head_mot < 0 || o->head_mot >= 36000000)) {
+        *err = "head-out-of-range"; return -1;
+    }
     return 0;
 }
 
@@ -176,6 +194,10 @@ int vtp_decode_imu_batch(const uint8_t *b, size_t len,
         *err = "length";
         return -1;
     }
+    /* SPEC.md §7 -- zero says every sample in the batch was taken at the same
+     * instant, which describes no measurement, and a client recovering a rate
+     * from it divides by zero. */
+    if (h->period == 0) { *err = "period-zero"; return -1; }
     return 0;
 }
 

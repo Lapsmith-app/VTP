@@ -15,7 +15,8 @@
           "period": 5000,
           "count": 2,
           "flags": 3,
-          "reserved": 0
+          "reserved": 0,
+          "saturated": false
         },
         "samples": [
           {
@@ -55,7 +56,8 @@
           "period": 1200,
           "count": 2,
           "flags": 3,
-          "reserved": 0
+          "reserved": 0,
+          "saturated": false
         },
         "samples": [
           {
@@ -95,7 +97,8 @@
           "period": 5000,
           "count": 1,
           "flags": 3,
-          "reserved": 0
+          "reserved": 0,
+          "saturated": false
         },
         "samples": [
           {
@@ -124,7 +127,8 @@
           "period": 100000,
           "count": 2,
           "flags": 3,
-          "reserved": 0
+          "reserved": 0,
+          "saturated": false
         },
         "samples": [
           {
@@ -163,7 +167,8 @@
           "period": 5000,
           "count": 1,
           "flags": 0,
-          "reserved": 0
+          "reserved": 0,
+          "saturated": false
         },
         "samples": [
           {
@@ -197,6 +202,43 @@
       "must_reject": "length"
     },
     {
+      "name": "saturated-batch",
+      "desc": "A batch flagged saturated (flags bit 2) with a sample at the i16 rail. SPEC.md 7.2 -- the reading is 'at least this much', not 'this much', so a client MUST treat it as a lower bound and MUST NOT integrate it. Note the presence bits stay SET: the sensor is fitted and did report, which is a different state from absent.",
+      "record": "imu_batch",
+      "hex": "15000000404b4c0000000000b004000001070000ff7f0080e803ff7f00000080",
+      "expect": {
+        "header": {
+          "seq": 21,
+          "dropped": 0,
+          "t_base": 5000000,
+          "period": 1200,
+          "count": 1,
+          "flags": 7,
+          "reserved": 0,
+          "saturated": true
+        },
+        "samples": [
+          {
+            "ax": 32767,
+            "ay": -32768,
+            "az": 1000,
+            "gx": 32767,
+            "gy": 0,
+            "gz": -32768,
+            "t_device_us": 5000000,
+            "absent": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "period-zero",
+      "desc": "A period of zero says every sample in the batch was taken at the same instant, which describes no measurement -- and a client recovering a rate from it divides by zero. SPEC.md 7 forbids emitting it; this vector makes a decoder reject it, which neither reference did.",
+      "record": "imu_batch",
+      "hex": "1600000001000000000000000000000001030000010002000300040005000600",
+      "must_reject": "period-zero"
+    },
+    {
       "name": "count-exceeds-payload",
       "desc": "Header declares four samples, one is present. MUST be rejected: a decoder that trusts count without checking the buffer reads three samples of whatever follows the notification.",
       "record": "imu_batch",
@@ -223,7 +265,8 @@
           "period": 5000,
           "count": 1,
           "flags": 3,
-          "reserved": 0
+          "reserved": 0,
+          "saturated": false
         },
         "samples": [
           {
@@ -252,7 +295,8 @@
           "period": 10000,
           "count": 1,
           "flags": 1,
-          "reserved": 0
+          "reserved": 0,
+          "saturated": false
         },
         "samples": [
           {
