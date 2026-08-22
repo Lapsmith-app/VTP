@@ -1,0 +1,9 @@
+# Everything the specification's own tooling needs: generation, the conformance
+# runner, the corpus and documentation checks, and the mutation sweep.
+#
+# Pinned rather than floated. The generator turns schema/vtp1.yaml into SPEC.md
+# tables, the C header and the conformance corpus, so the YAML parser sits
+# upstream of every artefact in this repository -- a silent change in how it
+# orders mappings or coerces scalars would land in generated output that CI
+# then compares against itself and finds consistent.
+PyYAML==6.0.3

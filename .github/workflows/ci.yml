@@ -16,7 +16,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install pyyaml
+        run: pip install -r requirements.txt
 
       # The schema is the source of truth. If any generated artefact has
       # drifted from it, the spec tables, the vectors and the reference header
@@ -111,6 +111,15 @@ jobs:
           cp /tmp/vtp1.h.orig reference/c/vtp1.h
           make -C reference/c
           echo "Mutation sweep correctly refuses to pass on a broken build."
+
+      # SPEC.md 12 promises an existing vector never changes meaning within a
+      # major version. The corpus is generated, so a schema edit can quietly
+      # change what one expects and every other check here would still pass --
+      # generator, decoders and runner would simply agree about the new answer.
+      # The corpus is compared against itself; this compares it against what it
+      # used to say.
+      - name: No existing vector changed meaning
+        run: python3 tools/check_baseline.py --check
 
       # A partial implementation runs the roles it declares (SPEC.md 12). If
       # this stops filtering, a GPS-only decoder is handed CAN vectors and
