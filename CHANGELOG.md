@@ -8,6 +8,49 @@ conformance vector.
 
 ## [Unreleased]
 
+### Fixed — the harness
+Four ways the verification tooling could pass without verifying anything. The
+pattern is worth naming, because this is the fourth time in this repository's
+short life that a check has silently become a no-op: a stale build, a missing
+runner, a stale `__pycache__`, and a selftest assertion written to match the
+bug. A check that cannot fail is not a check.
+
+- **A mutation sweep that could not build reported success.** Breaking a
+  header made all 79 mutations of one operator fail to compile, and
+  `tools/mutate.py` printed "0 caught, 0 survived, 79 uncompilable" and
+  **exited 0**. CI runs this step, so a broken build turned the strongest
+  check in the repository into a green tick. Build failures now fail the run,
+  and a new CI step breaks the build on purpose to prove the sweep still
+  refuses to pass.
+
+- **An operator that matched nothing reported success.** `bound` targeted the
+  `plen > 64` check removed with the CAN FD length rules, so it generated zero
+  mutations and said so in one line of output nobody reads. It now targets the
+  §6.10 bounds that replaced it — the Classic limit and the FD ladder, two
+  mutations, both caught — and an operator generating nothing fails the run.
+
+- **The runner could not tell `true` from `1`.** In Python `True == 1`, so a
+  decoder emitting `1` for a boolean field compared equal and passed; likewise
+  `5.0` for an integer. The runner exists to check what an implementation put
+  on stdout, and JSON distinguishes these even where Python does not.
+
+- **The runner had no notion of a role.** SPEC.md §12 asks an implementation
+  to pass the vectors for the roles it declares, and the runner handed every
+  vector to everything — so a GPS-only decoder failed conformance for records
+  it had never claimed. `--roles gps,can` runs a subset with `core` always
+  included, and the summary names the scope so a partial pass cannot read as a
+  full one.
+
+### Fixed
+- **The Python GPS encoder ignored `ext_count`.** "`ext` must match
+  `ext_count`" was a docstring rather than a check, so it produced a fix
+  declaring three extensions and carrying none — a record its own decoder
+  rejects as `ext-truncated`. The C encoder had validated this all along, so
+  the two references disagreed about what they would emit, which is exactly
+  the asymmetry a corpus of decode vectors cannot see. The extensions are now
+  walked, since §5.5 defines them as `[type][len][value]` and walking them is
+  the only way to know the count is right.
+
 ### Fixed — device behaviour
 - **The first notification of every connection carried `seq` 1, not 0.**
   `_next_seq` pre-incremented, so a client counting from 0 saw a

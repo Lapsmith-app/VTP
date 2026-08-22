@@ -98,8 +98,36 @@ def _payload_bytes(record):
 
 
 def encode_gps_fix(fix, ext=b""):
-    """SPEC.md §5. `ext` is appended verbatim and must match `ext_count`."""
-    return _pack("gps_fix", _gate("gps_fix", fix)) + bytes(ext)
+    """SPEC.md §5. `ext` is appended verbatim and MUST match `ext_count`.
+
+    "Must" had been a docstring rather than a check, so this encoder happily
+    produced a fix declaring three extensions and carrying none -- a record its
+    own decoder rejects as `ext-truncated`. An encoder that emits what it
+    cannot read hands the defect to whoever is on the other end of the link.
+
+    The extensions are walked rather than counted, because §5.5 defines them as
+    `[type][len][value]` and the only way to know that `ext_count` is right is
+    to follow them to the end.
+    """
+    ext = bytes(ext)
+    declared = fix.get("ext_count", 0)
+    off, seen = 0, 0
+    while off < len(ext):
+        if off + 2 > len(ext):
+            raise EncodeError(
+                f"gps_fix extension {seen} is truncated: a header needs two "
+                f"bytes and {len(ext) - off} remain")
+        end = off + 2 + ext[off + 1]
+        if end > len(ext):
+            raise EncodeError(
+                f"gps_fix extension {seen} declares {ext[off + 1]} value "
+                f"byte(s) and only {len(ext) - off - 2} remain")
+        off, seen = end, seen + 1
+    if seen != declared:
+        raise EncodeError(
+            f"gps_fix.ext_count is {declared} but the extension bytes hold "
+            f"{seen}")
+    return _pack("gps_fix", _gate("gps_fix", fix)) + ext
 
 
 def encode_can_batch(header, records):
