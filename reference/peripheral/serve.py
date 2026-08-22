@@ -210,6 +210,30 @@ class ControlQueue:
         return n
 
 
+# SPEC.md §10 — a device MAY require an encrypted link on any characteristic,
+# all of them, or none, and a client MUST support whichever it meets. These are
+# the three postures this peripheral can present, kept as a pure function so
+# the selftest can check them without a radio.
+ENCRYPTION_POSTURES = ("all", "control", "none")
+
+
+def encrypted_characteristics(posture):
+    """Names of the characteristics that require an encrypted link.
+
+    Info is absent from every posture: §10.2 says to leave it readable so that
+    a client which cannot pair can still identify what it found rather than
+    reporting a device that is present, advertising a VTP service and
+    apparently broken.
+    """
+    if posture == "all":
+        return {"gps", "can", "imu", "control", "monitor_values"}
+    if posture == "control":
+        return {"control"}
+    if posture == "none":
+        return set()
+    raise ValueError(f"unknown encryption posture {posture!r}")
+
+
 # SPEC.md §3.4 SHOULD — the Device Information Service. It carries no protocol
 # meaning, which is exactly why it is worth exposing: when someone asks which
 # firmware is on a logger that is misbehaving, this is where every generic BLE
@@ -262,7 +286,7 @@ class Peripheral:
         # it found. "control" is the common-but-incoherent arrangement §10.2
         # warns about, kept so a client can be tested against it. "none" is a
         # device that protects nothing, which §10 equally permits.
-        assert encrypt in ("all", "control", "none")
+        assert encrypt in ENCRYPTION_POSTURES
         self.encrypt = encrypt
         self.server = None
         self.screen = screen
@@ -493,11 +517,17 @@ class Peripheral:
         # the GATT permission, never an application check. The ATT layer then
         # answers with Insufficient Encryption, which every major central stack
         # turns into a pairing attempt on its own.
+        # perms(0), not 0: GATTAttributePermissions is a Flag, so `readable | 0`
+        # raises. Written once and applied by name, rather than once per group.
         crypt = perms.read_encryption_required | perms.write_encryption_required
-        stream_crypt = crypt if self.encrypt == "all" else 0
-        control_crypt = crypt if self.encrypt in ("all", "control") else 0
-        log.info("encryption posture: %s (SPEC.md 10 leaves this to the "
-                 "device; a client MUST support all of them)", self.encrypt)
+        encrypted = encrypted_characteristics(self.encrypt)
+
+        def guard(name):
+            return crypt if name in encrypted else perms(0)
+
+        log.info("encryption posture: %s — encrypted: %s (SPEC.md 10 leaves "
+                 "this to the device; a client MUST support all of them)",
+                 self.encrypt, ", ".join(sorted(encrypted)) or "nothing")
 
         # SPEC.md §10.2 — Info stays readable whatever the posture, so a client
         # that cannot pair can still identify what it has found and say so,
@@ -505,12 +535,12 @@ class Peripheral:
         # service and apparently broken.
         await add("info", read, self.device.info(), readable)
         for name in ("gps", "can", "imu"):
-            await add(name, notify, None, readable | stream_crypt)
+            await add(name, notify, None, readable | guard(name))
         await add("control", write | indicate, None,
-                  readable | writeable | control_crypt)
+                  readable | writeable | guard("control"))
         # The client writes values here; the device only ever reads them.
         await add("monitor_values", write, None,
-                  readable | writeable | stream_crypt)
+                  readable | writeable | guard("monitor_values"))
 
         # SPEC.md §3.4 SHOULD.
         log.info("creating service %s (Device Information)", DIS_SERVICE)
@@ -791,7 +821,7 @@ def main():
     ap.add_argument("--imu-hz", type=int, default=100)
     ap.add_argument("--no-display", action="store_true",
                     help="run headless; do not open the device screen")
-    ap.add_argument("--encrypt", choices=("all", "control", "none"),
+    ap.add_argument("--encrypt", choices=ENCRYPTION_POSTURES,
                     default="all",
                     help="which characteristics require an encrypted link. "
                          "all (default) protects everything except Info, which "
