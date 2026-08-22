@@ -8,6 +8,57 @@ conformance vector.
 
 ## [Unreleased]
 
+### Simplifications — spending complexity where it earns its keep
+
+Four things this protocol carried because they seemed prudent, each of which
+cost every implementer something and bought a hobbyist nothing.
+
+- **One outstanding Control request.** A client writes, waits for the
+  indication, and writes again. Gone with the old rule are: the "at least four
+  outstanding" floor, the ordering guarantee across pipelined requests, and the
+  reasoning about queue depth in §9.6.
+
+  `busy` survives, and deliberately. It is now what a device says to a client
+  that pipelines anyway — without it, such a device must choose between silence
+  and applying a request it cannot answer, and §9.6 forbids both.
+
+  The `duplicate-tag` refusal is gone entirely, and this is the part worth
+  reading. One-outstanding does not *detect* tag ambiguity better; it removes
+  the state that made it possible. A second request written before the first is
+  answered is refused whatever tag it carries, and one written afterwards has
+  nothing to collide with. **A device needs no table of outstanding tags at
+  all** — it echoes the tag and forgets it.
+
+- **Empty CAN batches are forbidden.** `t_base` is defined as the bus-arrival
+  time of record 0, so a batch with no record 0 timestamps a frame that does
+  not exist — precisely the argument that already forbade an empty IMU batch.
+  Last release justified the asymmetry by saying a CAN `t_base` "describes a
+  bus that was observed and found quiet"; the field's own definition says
+  otherwise, and one rule for both batch types is the honest reading. A quiet
+  bus is reported by sending nothing.
+
+- **Monitor is not paged, and no longer pretends to be.** §13.4 caps a device
+  at 15 channels — the most that fit in one complete client write at the
+  minimum ATT MTU — and 15 channels are 62 bytes against the 97 a response
+  carries at that same MTU. So `total` could never differ from `count`, `index`
+  could never be anything but 0, and `MONITOR_LIST`'s `start` could never be
+  anything but 0 either.
+
+  `monitor_page` is now `monitor_declaration`, two bytes instead of six, and
+  `MONITOR_LIST` takes no parameters. §9.5's CAN table keeps its paging, and
+  the difference is now stated rather than left to look like an oversight:
+  `can_subscription_slots` may be far larger than one response can carry, so
+  `CAN_LIST` must page and does. Monitor cannot need it.
+
+- **Empty Monitor writes are forbidden** (carried over from the previous
+  round's fix, and the same shape as the two above): §13.4 makes every write a
+  complete statement of what the client can supply, and a write naming no slots
+  is the one thing a complete statement cannot be.
+
+Each of these makes a conforming implementation smaller. None of them makes a
+device less capable — every one removes a mechanism whose reachable state space
+was empty.
+
 ### Review of PR #24, second pass — interoperability
 
 - **C and Python produced different wire bytes.** `can_header.flags`,

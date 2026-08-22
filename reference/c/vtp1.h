@@ -169,10 +169,11 @@ void vtp_can_subscription_at(const uint8_t *buf, uint8_t index,
  * Channels are enumerated rather than computed, so nothing here parses an
  * expression. */
 
+/* Not paged: MONITOR_LIST answers with the whole declaration (SPEC.md 13.3).
+ * `total` and `index` are gone with the paging they described. */
 typedef struct {
-    uint16_t total, index;
     uint8_t  count, reserved;
-} vtp_monitor_page_t;
+} vtp_monitor_declaration_t;
 
 typedef struct {
     uint8_t  slot;
@@ -203,7 +204,7 @@ typedef struct {
 int vtp_channel_known(uint16_t channel);
 
 int vtp_decode_monitor_list(const uint8_t *buf, size_t len,
-                            vtp_monitor_page_t *page, const char **err);
+                            vtp_monitor_declaration_t *page, const char **err);
 void vtp_monitor_channel_at(const uint8_t *buf, uint8_t index,
                             vtp_monitor_channel_t *out);
 

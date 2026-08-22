@@ -258,28 +258,45 @@ def main():
     # against the transport's queue directly: it holds no Bluetooth state
     # precisely so that this is testable without a radio.
     q = serve.ControlQueue()
-    check(q.depth >= 4,
-          f"SPEC.md 9 requires at least four outstanding requests, not "
+    check(q.depth == serve.CONTROL_OUTSTANDING == 1,
+          f"SPEC.md 9 allows ONE outstanding request; the queue declares "
           f"{q.depth}")
-    for tag in range(q.depth):
-        check(q.admit(tag) == "apply",
-              f"request {tag + 1} of {q.depth} MUST be admitted")
-        q.hold(tag, bytes([0x02, tag, 0]))
-    check(q.admit(200) == "busy",
-          "a request beyond the queue depth MUST be answered busy, not "
-          "silently discarded")
 
-    # SPEC.md §9 — the tag is the only means of correlation, so a second
-    # request bearing an outstanding one cannot be applied. Checked with room
-    # in the queue: capacity is tested first now, because a duplicate-tag
-    # refusal is still a response and still needs somewhere to sit. Testing the
-    # tag first let one reused tag hold a thousand responses against a depth
-    # of four.
-    q.delivered()                      # frees a slot; tag 0 leaves the queue
-    check(q.admit(1) == "duplicate-tag",
-          "a tag that is still outstanding MUST NOT be admitted a second time")
-    check(q.admit(0) == "apply",
-          "a tag MUST become reusable once its response has been delivered")
+    check(q.admit(7) == "apply", "the first request MUST be admitted")
+    q.hold(7, bytes([0x02, 7, 0]))
+
+    # A client that pipelines anyway. It gets `busy` -- which is why the status
+    # survived the removal of the queue it used to describe: the alternatives
+    # are silence and applying a request the device cannot answer, and §9.6
+    # forbids both.
+    check(q.admit(8) == "busy",
+          "a second request written before the first was answered MUST be "
+          "answered busy, not silently discarded and not applied")
+
+    # ...and `busy` is a response, so it needs somewhere to sit. A device whose
+    # only slot holds the answer it already owes has nothing left to say busy
+    # with, which is why the queue is one deeper than the rule.
+    q.hold(8, bytes([0x02, 8, 5]))
+    check(len(q) == 2,
+          f"the busy refusal must be queued behind the response it was "
+          f"refused for, not dropped; queue holds {len(q)}")
+
+    # SPEC.md §9 — with one request outstanding, tag ambiguity is not
+    # prevented, it is impossible: a second request written before the first is
+    # answered is refused whatever tag it carries, and one written after cannot
+    # collide with anything. There is no duplicate-tag verdict to test, and a
+    # device needs no tag table.
+    q.delivered()
+    q.delivered()
+    check(q.admit(9) == "apply", "the queue should be empty again")
+    q.hold(9, bytes([0x02, 9, 0]))
+    check(q.admit(9) == "busy",
+          "a request reusing the outstanding tag is refused for the same "
+          "reason any other concurrent request is: the answer is still owed")
+    q.delivered()
+    check(q.admit(9) == "apply",
+          "a tag MUST become reusable once its response has been delivered; "
+          "the rule is `not while outstanding`, not `never twice`")
 
     # Nothing is owed to a client that has gone.
     q.hold(0, bytes([0x02, 0, 0]))
@@ -356,12 +373,12 @@ def main():
     mon = dev.VtpDevice(now_us=lambda: mclk[0], gps_hz=0, imu_hz=0)
     mon.on_connect()
     declared = vtp1.decode_monitor_list(
-        mon.handle_control(bytes([dev.MONITOR_LIST, 1])
-                           + struct.pack("<H", 0))[3:])
+        mon.handle_control(bytes([dev.MONITOR_LIST, 1]))[3:])
     by_slot = {e["slot"]: e for e in declared["entries"]}
-    check(declared["page"]["total"] <= vtp1.MONITOR_MAX_CHANNELS,
+    check(declared["declaration"]["count"] <= vtp1.MONITOR_MAX_CHANNELS,
           f"a device MUST NOT ask for more channels than fit in one complete "
-          f"write: {declared['page']['total']} > {vtp1.MONITOR_MAX_CHANNELS}")
+          f"write: {declared['declaration']['count']} > "
+          f"{vtp1.MONITOR_MAX_CHANNELS}")
     # SPEC.md §13.5 — every declared channel carries a deadline, and none of
     # them is zero. There used to be two kinds of channel here, "perishable"
     # and "durable", plus a derived device-wide liveness bound to expire the
@@ -753,12 +770,17 @@ def main():
     check(info2["capabilities"] & (1 << 3),
           "a device implementing Monitor MUST declare capability bit 3")
 
-    listing = mon.handle_control(bytes([dev.MONITOR_LIST, 1])
-                                 + struct.pack("<H", 0))
+    listing = mon.handle_control(bytes([dev.MONITOR_LIST, 1]))
     check(listing[2] == dev.ST_OK, "MONITOR_LIST was refused")
     table = vtp1.decode_monitor_list(listing[3:])
-    check(table["page"]["total"] == 6,
-          f"expected 6 requested channels, got {table['page']['total']}")
+    check(table["declaration"]["count"] == 6,
+          f"expected 6 requested channels, got {table['declaration']['count']}")
+
+    # SPEC.md §13.3 — parameterless. A trailing `start` is a malformed request
+    # now, not a page number, and §9 rejects trailing parameters.
+    check(mon.handle_control(bytes([dev.MONITOR_LIST, 2])
+                             + struct.pack("<H", 0))[2] == dev.ST_BAD_PARAMS,
+          "MONITOR_LIST takes no parameters; a trailing start MUST be refused")
     check(all(e["channel_known"] for e in table["entries"]),
           "the device asked for a channel the reference decoder cannot name")
 

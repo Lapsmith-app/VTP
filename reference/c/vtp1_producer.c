@@ -408,20 +408,18 @@ static void do_info(const jctx *c, const jv *in) {
 }
 
 static void do_monitor_list(const jctx *c, const jv *in) {
-    const jv *p = jget(c, in, "page");
+    const jv *p = jget(c, in, "declaration");
     const jv *es = jget(c, in, "entries");
-    if (!p) { refuse("no `page` object"); return; }
+    if (!p) { refuse("no `declaration` object"); return; }
     int n = jlen(c, es);
     if (n < 0) { refuse("no `entries` array"); return; }
     if (n > MAX_ENTRIES) { refuse("too many entries for this harness"); return; }
 
-    vtp_monitor_page_t page;
+    vtp_monitor_declaration_t page;
     memset(&page, 0, sizeof page);
-    page.total    = (uint16_t)jint(c, p, "total");
-    page.index    = (uint16_t)jint(c, p, "index");
     page.count    = (uint8_t) jint(c, p, "count");
     page.reserved = (uint8_t) jint(c, p, "reserved");
-    if ((int)page.count != n) { refuse("monitor_page.count disagrees with `entries`"); return; }
+    if ((int)page.count != n) { refuse("monitor_declaration.count disagrees with `entries`"); return; }
 
     static vtp_monitor_channel_t entries[MAX_ENTRIES];
     memset(entries, 0, sizeof entries);

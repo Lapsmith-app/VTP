@@ -76,7 +76,7 @@ static void missing_arrays(void) {
     }
     {
         SETUP;
-        vtp_monitor_page_t p;
+        vtp_monitor_declaration_t p;
         memset(&p, 0, sizeof p);
         p.total = 2;
         p.count = 2;
@@ -138,10 +138,10 @@ static void missing_arrays(void) {
      * there -- refusing it would reject the empty page every pager ends on. */
     {
         SETUP;
-        vtp_monitor_page_t p;
+        vtp_monitor_declaration_t p;
         memset(&p, 0, sizeof p);
         ok(vtp_encode_monitor_list(&p, NULL, out, sizeof out)
-               == VTP_MONITOR_PAGE_SIZE,
+               == VTP_MONITOR_DECLARATION_SIZE,
            "monitor_list(count=0, entries=NULL) is a legal empty page");
     }
 }

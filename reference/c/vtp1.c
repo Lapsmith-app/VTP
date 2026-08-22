@@ -130,6 +130,11 @@ int vtp_can_batch_begin(const uint8_t *b, size_t len,
      * reserved content to be ignored, not rejected. A later minor may assign
      * it, and this build must keep working when it does. */
 
+    /* SPEC.md §6.2 -- t_base IS the bus-arrival time of record 0, so a batch
+     * with no record 0 carries a timestamp naming a frame that does not
+     * exist. A quiet bus is reported by sending nothing. */
+    if (h->count == 0) { *err = "empty-batch"; return -1; }
+
     /* Walk the whole batch before yielding anything, so a truncated trailing
      * record rejects the notification instead of half-decoding it. */
     size_t off = VTP_CAN_HEADER_SIZE;
@@ -368,31 +373,30 @@ int vtp_channel_known(uint16_t c) {
 }
 
 int vtp_decode_monitor_list(const uint8_t *b, size_t len,
-                            vtp_monitor_page_t *p, const char **err) {
-    if (len < VTP_MONITOR_PAGE_SIZE) { *err = "length"; return -1; }
-    p->total    = rd16(b + VTP_MONITOR_PAGE_OFF_TOTAL);
-    p->index    = rd16(b + VTP_MONITOR_PAGE_OFF_INDEX);
-    p->count    = b[VTP_MONITOR_PAGE_OFF_COUNT];
-    p->reserved = b[VTP_MONITOR_PAGE_OFF_RESERVED];
+                            vtp_monitor_declaration_t *p, const char **err) {
+    if (len < VTP_MONITOR_DECLARATION_SIZE) { *err = "length"; return -1; }
+    p->count    = b[VTP_MONITOR_DECLARATION_OFF_COUNT];
+    p->reserved = b[VTP_MONITOR_DECLARATION_OFF_RESERVED];
 
-    const size_t needed = (size_t)VTP_MONITOR_PAGE_SIZE
+    const size_t needed = (size_t)VTP_MONITOR_DECLARATION_SIZE
                         + (size_t)p->count * VTP_MONITOR_CHANNEL_SIZE;
     if (len < needed) { *err = "truncated-record"; return -1; }
     if (len != needed) { *err = "length"; return -1; }
 
-    /* SPEC.md §13.4 -- a declaration too large for one complete write has made
-     * its own rule unsatisfiable. */
-    if (p->total > VTP_MONITOR_MAX_CHANNELS) {
+    /* SPEC.md §13.4 -- a declaration too large for one complete client write
+     * has made its own rule unsatisfiable. `count` IS the whole declaration
+     * now, so this is the only number there is to check. */
+    if (p->count > VTP_MONITOR_MAX_CHANNELS) {
         *err = "too-many-channels"; return -1;
     }
     /* SPEC.md §13.3 -- the slot is how a value is addressed, so two entries
      * claiming one make every later update ambiguous. */
     for (uint8_t i = 0; i < p->count; i++) {
-        const uint8_t si = b[VTP_MONITOR_PAGE_SIZE
+        const uint8_t si = b[VTP_MONITOR_DECLARATION_SIZE
                              + (size_t)i * VTP_MONITOR_CHANNEL_SIZE
                              + VTP_MONITOR_CHANNEL_OFF_SLOT];
         for (uint8_t j = (uint8_t)(i + 1); j < p->count; j++) {
-            const uint8_t sj = b[VTP_MONITOR_PAGE_SIZE
+            const uint8_t sj = b[VTP_MONITOR_DECLARATION_SIZE
                                  + (size_t)j * VTP_MONITOR_CHANNEL_SIZE
                                  + VTP_MONITOR_CHANNEL_OFF_SLOT];
             if (si == sj) { *err = "duplicate-slot"; return -1; }
@@ -403,7 +407,7 @@ int vtp_decode_monitor_list(const uint8_t *b, size_t len,
      * "no deadline of its own", reconciled by a derived device-wide liveness
      * bound; one rule per channel replaced both. */
     for (uint8_t i = 0; i < p->count; i++) {
-        if (b[VTP_MONITOR_PAGE_SIZE + (size_t)i * VTP_MONITOR_CHANNEL_SIZE
+        if (b[VTP_MONITOR_DECLARATION_SIZE + (size_t)i * VTP_MONITOR_CHANNEL_SIZE
               + VTP_MONITOR_CHANNEL_OFF_MAX_AGE] == 0) {
             *err = "zero-max-age"; return -1;
         }
@@ -413,7 +417,7 @@ int vtp_decode_monitor_list(const uint8_t *b, size_t len,
 
 void vtp_monitor_channel_at(const uint8_t *b, uint8_t index,
                             vtp_monitor_channel_t *o) {
-    const uint8_t *e = b + VTP_MONITOR_PAGE_SIZE
+    const uint8_t *e = b + VTP_MONITOR_DECLARATION_SIZE
                      + (size_t)index * VTP_MONITOR_CHANNEL_SIZE;
     o->slot     = e[VTP_MONITOR_CHANNEL_OFF_SLOT];
     o->channel  = rd16(e + VTP_MONITOR_CHANNEL_OFF_CHANNEL);

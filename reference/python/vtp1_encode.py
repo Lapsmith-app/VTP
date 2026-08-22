@@ -230,7 +230,11 @@ def encode_can_batch(header, records):
         raise EncodeError(
             f"can_header.count is {header.get('count', 0)} but "
             f"{len(records)} record(s) were supplied")
-    if records and records[0].get("dt", 0) != 0:
+    if not records:
+        raise EncodeError(
+            "can_header.count is zero, but t_base is the bus-arrival time of "
+            "record 0; a quiet bus is reported by sending nothing")
+    if records[0].get("dt", 0) != 0:
         raise EncodeError(
             f"can_record[0].dt is {records[0]['dt']}; t_base is record 0's "
             f"arrival time, so its offset from t_base is zero (SPEC.md §6.1)")
@@ -364,11 +368,11 @@ MONITOR_MAX_CHANNELS = (
     // SCHEMA["records"]["monitor_value"]["size"])
 
 
-def encode_monitor_list(page, entries):
-    """SPEC.md §13.3."""
-    if len(entries) != page.get("count", 0):
+def encode_monitor_list(declaration, entries):
+    """SPEC.md §13.3 — the whole declaration, never a page of it."""
+    if len(entries) != declaration.get("count", 0):
         raise EncodeError(
-            f"monitor_page.count is {page.get('count', 0)} but "
+            f"monitor_declaration.count is {declaration.get('count', 0)} but "
             f"{len(entries)} entr(ies) were supplied")
     # SPEC.md §13.3, §13.4 — both already enforced by the decoder, so emitting
     # either produced a declaration this repository's own reader refuses.
@@ -377,11 +381,11 @@ def encode_monitor_list(page, entries):
         raise EncodeError(
             "monitor_list: a slot appears twice, so every later update naming "
             "it would be ambiguous")
-    if page.get("total", 0) > MONITOR_MAX_CHANNELS:
+    if declaration.get("count", 0) > MONITOR_MAX_CHANNELS:
         raise EncodeError(
-            f"monitor_page.total is {page.get('total')}, more than the "
-            f"{MONITOR_MAX_CHANNELS} that fit in one complete write at the "
-            f"minimum ATT MTU")
+            f"monitor_declaration.count is {declaration.get('count')}, more "
+            f"than the {MONITOR_MAX_CHANNELS} that fit in one complete write "
+            f"at the minimum ATT MTU")
     # SPEC.md §13.5 — every declared channel carries a deadline.
     for e in entries:
         if not e.get("max_age"):
@@ -389,7 +393,8 @@ def encode_monitor_list(page, entries):
                 f"monitor_channel slot {e.get('slot')} declares max_age 0; "
                 f"a channel with no deadline is a value that can be displayed "
                 f"forever after the client stopped sending it")
-    out = bytearray(_pack("monitor_page", _zero_reserved("monitor_page", page)))
+    out = bytearray(_pack("monitor_declaration",
+                          _zero_reserved("monitor_declaration", declaration)))
     for e in entries:
         out += _pack("monitor_channel", _zero_reserved("monitor_channel", e))
     return bytes(out)
@@ -448,7 +453,7 @@ ENCODERS = {
     "info": encode_info,
     "link_params": encode_link_params,
     "can_list": lambda d: encode_can_list(d["page"], d["entries"]),
-    "monitor_list": lambda d: encode_monitor_list(d["page"], d["entries"]),
+    "monitor_list": lambda d: encode_monitor_list(d["declaration"], d["entries"]),
     "monitor_update": lambda d: encode_monitor_update(d["header"], d["values"]),
     "control_response": encode_control_response,
     "time_sync": encode_time_sync,

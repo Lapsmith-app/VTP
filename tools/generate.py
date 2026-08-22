@@ -824,9 +824,15 @@ def _reserved_case(schema, record, field, value):
         return ({"fix": dict(clean, **{field: value})},
                 encode(schema, "gps_fix", dict(clean, **{field: value})))
     if record == "can_header":
-        clean = dict(seq=1, dropped=0, t_base=0, count=0, reserved=0)
-        return ({"header": dict(clean, **{field: value}), "records": []},
-                encode(schema, "can_header", dict(clean, **{field: value})))
+        # One record: SPEC.md 6.2 forbids an empty batch, so a case about the
+        # reserved bits of `flags` still has to be a batch that could exist.
+        clean = dict(seq=1, dropped=0, t_base=0, count=1, reserved=0)
+        frame = dict(dt=0, id=0x1A0, extended=False, fd=False, rtr=False,
+                     len=1, payload="00")
+        return ({"header": dict(clean, **{field: value}), "records": [frame]},
+                encode(schema, "can_header", dict(clean, **{field: value}))
+                + encode(schema, "can_record", dict(dt=0, id=0x1A0, len=1))
+                + b"\x00")
     if record == "imu_header":
         clean = dict(seq=1, dropped=0, t_base=0, period=1000, count=1, reserved=0)
         sample = dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6)
@@ -1176,9 +1182,14 @@ def vectors(schema):
                   [{"dt": 0, "id": 0x1A0, "extended": False, "fd": False, "rtr": False,
                     "len": 1, "payload": "00", "t_device_us": 17_000_000}]),
         can_batch("empty-batch",
-                  "count 0. Legal, and means the bus is quiet — NOT an error and NOT a "
-                  "disconnect. A decoder MUST accept it.",
-                  dict(seq=5, dropped=0, t_base=11_000_000, count=0, flags=0), [], []),
+                  "count 0. MUST be rejected: SPEC.md 6.2 defines t_base as the "
+                  "bus-arrival time of record 0, so a batch with no record 0 "
+                  "timestamps a frame that does not exist. A quiet bus is reported "
+                  "by sending nothing, exactly as an idle IMU is (SPEC.md 7). This "
+                  "vector used to assert the opposite, which made CAN and IMU "
+                  "disagree about a field with one definition.",
+                  dict(seq=5, dropped=0, t_base=11_000_000, count=0, flags=0), [], [],
+                  must_reject="empty-batch"),
         can_batch("shedding-load",
                   "The device dropped 400 frames and is signalling overload in flags bit 0. "
                   "A decoder MUST surface both.",
@@ -1317,13 +1328,21 @@ def vectors(schema):
                  "deliberately non-canonical: it is the only one that asserts "
                  "both at once.",
          "record": "can_batch",
+         # One record, because SPEC.md 6.2 forbids an empty batch: t_base names
+         # record 0. This vector is about the reserved BYTES and carries the
+         # minimum that lets it be about only those.
          "hex": (encode(schema, "can_header",
-                        dict(seq=8, dropped=0, t_base=1, count=0, flags=0, reserved=0xBEEF)).hex()),
-         "expect": {"header": {"seq": 8, "dropped": 0, "t_base": 1, "count": 0,
-                               "flags": 0, "reserved": 0xBEEF}, "records": []},
+                        dict(seq=8, dropped=0, t_base=1, count=1, flags=0, reserved=0xBEEF))
+                 + can_rec(0, 0x1A0, bytes.fromhex("00"))).hex(),
+         "expect": {"header": {"seq": 8, "dropped": 0, "t_base": 1, "count": 1,
+                               "flags": 0, "reserved": 0xBEEF},
+                    "records": [{"dt": 0, "id": 0x1A0, "extended": False,
+                                 "fd": False, "rtr": False, "len": 1,
+                                 "payload": "00", "t_device_us": 1}]},
          "canonical": False,
          "expect_roundtrip_hex": (encode(schema, "can_header",
-                        dict(seq=8, dropped=0, t_base=1, count=0, flags=0, reserved=0)).hex())},
+                        dict(seq=8, dropped=0, t_base=1, count=1, flags=0, reserved=0))
+                 + can_rec(0, 0x1A0, bytes.fromhex("00"))).hex()},
     ]
 
     # ---- IMU -------------------------------------------------------------
@@ -1667,7 +1686,7 @@ def vectors(schema):
 
     # ---- Monitor ---------------------------------------------------------
     def monitor_list(name, desc, page, entries, **kw):
-        raw = encode(schema, "monitor_page", page) + b"".join(
+        raw = encode(schema, "monitor_declaration", page) + b"".join(
             encode(schema, "monitor_channel", e) for e in entries)
         known = {m["value"] for m in SCHEMA_ENUMS["channel"]}
         exp = []
@@ -1677,8 +1696,8 @@ def vectors(schema):
             row["channel_known"] = row["channel"] in known
             exp.append(row)
         c = {"name": name, "desc": desc, "record": "monitor_list", "hex": raw.hex(),
-             "expect": {"page": {f["name"]: page.get(f["name"], 0)
-                                 for f in schema["records"]["monitor_page"]["fields"]},
+             "expect": {"declaration": {f["name"]: page.get(f["name"], 0)
+                                        for f in schema["records"]["monitor_declaration"]["fields"]},
                         "entries": exp}}
         c.update(kw)
         return c
@@ -1721,7 +1740,7 @@ def vectors(schema):
         monitor_list("dash-asks-for-four",
                      "A display device asking for the four values a lap timer shows. "
                      "It names channels; it does not send an expression to evaluate.",
-                     dict(total=4, index=0, count=4),
+                     dict(count=4),
                      # Every channel carries a deadline (SPEC.md 13.5). This
                      # vector used to leave max_age defaulted to 0 on all four
                      # -- the canonical declaration violating the section that
@@ -1733,12 +1752,12 @@ def vectors(schema):
         monitor_list("no-channels-requested",
                      "A device that implements the role but currently wants nothing. "
                      "Legal, and the state before it has configured itself.",
-                     dict(total=0, index=0, count=0), []),
+                     dict(count=0), []),
         monitor_list("unknown-channel-requested",
                      "A device asking for a channel from a later minor. A client MUST "
                      "report it unknown, MUST NOT substitute another, and MUST answer "
                      "the slot as absent rather than omitting it.",
-                     dict(total=1, index=0, count=1),
+                     dict(count=1),
                      [dict(slot=9, channel=4242, max_age=20)]),
         monitor_update("first-lap-nothing-to-report",
                        "Mid first lap: elapsed time is known, but there is no last lap "
@@ -1796,25 +1815,25 @@ def vectors(schema):
                  + encode(schema, "monitor_value",
                           dict(slot=0, validity=PRESENT, value=1))).hex(),
          "must_reject": "truncated-record"},
-        {"name": "short-page",
-         "desc": "5 bytes: shorter than the page header. MUST be rejected.",
+        {"name": "short-declaration",
+         "desc": "1 byte: shorter than the declaration header. MUST be rejected.",
          "record": "monitor_list",
-         "hex": encode(schema, "monitor_page", dict(total=0, index=0, count=0))[:-1].hex(),
+         "hex": encode(schema, "monitor_declaration", dict(count=0))[:-1].hex(),
          "must_reject": "length"},
-        {"name": "count-exceeds-page",
-         "desc": "Page declares three entries, one is present. MUST be rejected: "
+        {"name": "count-exceeds-declaration",
+         "desc": "The declaration claims three entries, one is present. MUST be rejected: "
                  "a decoder that trusts count without checking the buffer reads "
                  "two channel assignments out of adjacent memory.",
          "record": "monitor_list",
-         "hex": (encode(schema, "monitor_page", dict(total=3, index=0, count=3))
+         "hex": (encode(schema, "monitor_declaration", dict(count=3))
                  + encode(schema, "monitor_channel",
                             dict(slot=0, channel=1, max_age=20))).hex(),
          "must_reject": "length"},
-        {"name": "long-page",
+        {"name": "long-declaration",
          "desc": "One entry declared, one present, plus a trailing byte. MUST be "
                  "rejected.",
          "record": "monitor_list",
-         "hex": (encode(schema, "monitor_page", dict(total=1, index=0, count=1))
+         "hex": (encode(schema, "monitor_declaration", dict(count=1))
                  + encode(schema, "monitor_channel",
                             dict(slot=0, channel=1, max_age=20))
                  + b"\x00").hex(),
@@ -1825,7 +1844,7 @@ def vectors(schema):
                      "of going stale while a best lap stays true until it is "
                      "beaten, so the deadline is per channel. Every channel "
                      "has one.",
-                     dict(total=3, index=0, count=3),
+                     dict(count=3),
                      [dict(slot=0, channel=1, max_age=20),    # lap_time, 2 s
                       dict(slot=1, channel=3, max_age=255),   # best_lap, 25.5 s
                       dict(slot=2, channel=7, max_age=5)]),   # speed, 500 ms
@@ -1833,7 +1852,7 @@ def vectors(schema):
                      "max_age 255 is 25.5 seconds, the longest deadline this "
                      "field can express. A channel that changes rarely takes "
                      "this rather than none: SPEC.md 13.5 has no `never`.",
-                     dict(total=1, index=0, count=1),
+                     dict(count=1),
                      [dict(slot=0, channel=3, max_age=255)]),
         monitor_list("zero-max-age",
                      "A channel declaring max_age 0. MUST be rejected: SPEC.md "
@@ -1842,7 +1861,7 @@ def vectors(schema):
                      "used to mean `no deadline of its own`, reconciled by a "
                      "derived device-wide liveness bound -- two rules, and a "
                      "canonical vector that satisfied neither.",
-                     dict(total=2, index=0, count=2),
+                     dict(count=2),
                      [dict(slot=0, channel=1, max_age=20),
                       dict(slot=1, channel=3, max_age=0)],
                      must_reject="zero-max-age"),
@@ -1850,7 +1869,7 @@ def vectors(schema):
                      "Two entries claiming slot 0. MUST be rejected: the slot is "
                      "how a value is addressed, so every later update would be "
                      "ambiguous. SPEC.md 13.3.",
-                     dict(total=2, index=0, count=2),
+                     dict(count=2),
                      [dict(slot=0, channel=1, max_age=10),
                       dict(slot=0, channel=7, max_age=10)],
                      must_reject="duplicate-slot"),
@@ -1859,9 +1878,12 @@ def vectors(schema):
                      "write to carry every slot, and 16 values do not fit beside "
                      "a header in one write at the minimum ATT MTU -- so the "
                      "device has made its own rule unsatisfiable and this MUST "
-                     "be rejected.",
-                     dict(total=16, index=0, count=1),
-                     [dict(slot=0, channel=1, max_age=10)],
+                     "be rejected. All 16 are really here: `total` used to carry "
+                     "the count for a declaration that arrived a page at a time, "
+                     "and with paging gone the only number is the one in front "
+                     "of the entries.",
+                     dict(count=16),
+                     [dict(slot=i, channel=1, max_age=10) for i in range(16)],
                      must_reject="too-many-channels"),
     ]
 
@@ -2152,6 +2174,12 @@ def vectors(schema):
          "input": {"header": dict(seq=0, dropped=0, t_base=0, period=0, count=1,
                                   flags=0b011),
                    "samples": [dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6)]}},
+        {"name": "can-empty-batch",
+         "record": "can_batch", "must_refuse": True,
+         "desc": "SPEC.md 6.2 -- t_base names record 0, so a batch with no "
+                 "records timestamps a frame that does not exist.",
+         "input": {"header": dict(seq=0, dropped=0, t_base=0, count=0, flags=0),
+                   "records": []}},
         {"name": "imu-empty-batch",
          "record": "imu_batch", "must_refuse": True,
          "desc": "SPEC.md 7 -- t_base names sample 0, so a batch with no "
@@ -2164,7 +2192,7 @@ def vectors(schema):
          "desc": "SPEC.md 13.3 -- the decoder already rejected this, so an "
                  "encoder emitting it produced a declaration its own reader "
                  "refuses.",
-         "input": {"page": dict(total=2, index=0, count=2),
+         "input": {"declaration": dict(count=2),
                    "entries": [dict(slot=0, channel=1, max_age=10),
                                dict(slot=0, channel=7, max_age=10)]}},
         {"name": "monitor-channel-with-no-deadline",
@@ -2172,14 +2200,15 @@ def vectors(schema):
          "desc": "SPEC.md 13.5 -- every declared channel carries a deadline. "
                  "A channel with none is a value a device can go on "
                  "displaying forever after the client stopped sending it.",
-         "input": {"page": dict(total=2, index=0, count=2),
+         "input": {"declaration": dict(count=2),
                    "entries": [dict(slot=0, channel=1, max_age=20),
                                dict(slot=1, channel=3, max_age=0)]}},
         {"name": "monitor-asks-for-more-than-fits",
          "record": "monitor_list", "must_refuse": True,
          "desc": "SPEC.md 13.4 -- more channels than fit in one complete write.",
-         "input": {"page": dict(total=99, index=0, count=1),
-                   "entries": [dict(slot=0, channel=1, max_age=10)]}},
+         "input": {"declaration": dict(count=16),
+                   "entries": [dict(slot=i, channel=1, max_age=10)
+                               for i in range(16)]}},
         {"name": "monitor-update-with-no-values",
          "record": "monitor_update", "must_refuse": True,
          "desc": "SPEC.md 13.4 -- an empty write is not a complete statement "
@@ -2220,12 +2249,11 @@ def vectors(schema):
         {"name": "monitor-well-formed-declaration",
          "record": "monitor_list", "must_refuse": False,
          "desc": "Distinct slots, inside the channel cap.",
-         "input": {"page": dict(total=2, index=0, count=2),
+         "input": {"declaration": dict(count=2),
                    "entries": [dict(slot=0, channel=1, max_age=10),
                                dict(slot=1, channel=3, max_age=255)]},
          "expect_hex": (
-             encode(schema, "monitor_page",
-                    dict(total=2, index=0, count=2, reserved=0))
+             encode(schema, "monitor_declaration", dict(count=2, reserved=0))
              + encode(schema, "monitor_channel", dict(slot=0, channel=1, max_age=10))
              + encode(schema, "monitor_channel", dict(slot=1, channel=3, max_age=255))
          ).hex()},

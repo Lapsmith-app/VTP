@@ -242,6 +242,22 @@
       }
     },
     {
+      "name": "can-empty-batch",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 6.2 -- t_base names record 0, so a batch with no records timestamps a frame that does not exist.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 0,
+          "flags": 0
+        },
+        "records": []
+      }
+    },
+    {
       "name": "imu-empty-batch",
       "record": "imu_batch",
       "must_refuse": true,
@@ -264,9 +280,7 @@
       "must_refuse": true,
       "desc": "SPEC.md 13.3 -- the decoder already rejected this, so an encoder emitting it produced a declaration its own reader refuses.",
       "input": {
-        "page": {
-          "total": 2,
-          "index": 0,
+        "declaration": {
           "count": 2
         },
         "entries": [
@@ -289,9 +303,7 @@
       "must_refuse": true,
       "desc": "SPEC.md 13.5 -- every declared channel carries a deadline. A channel with none is a value a device can go on displaying forever after the client stopped sending it.",
       "input": {
-        "page": {
-          "total": 2,
-          "index": 0,
+        "declaration": {
           "count": 2
         },
         "entries": [
@@ -314,14 +326,87 @@
       "must_refuse": true,
       "desc": "SPEC.md 13.4 -- more channels than fit in one complete write.",
       "input": {
-        "page": {
-          "total": 99,
-          "index": 0,
-          "count": 1
+        "declaration": {
+          "count": 16
         },
         "entries": [
           {
             "slot": 0,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 1,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 2,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 3,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 4,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 5,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 6,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 7,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 8,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 9,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 10,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 11,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 12,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 13,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 14,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 15,
             "channel": 1,
             "max_age": 10
           }
@@ -422,9 +507,7 @@
       "must_refuse": false,
       "desc": "Distinct slots, inside the channel cap.",
       "input": {
-        "page": {
-          "total": 2,
-          "index": 0,
+        "declaration": {
           "count": 2
         },
         "entries": [
@@ -440,7 +523,7 @@
           }
         ]
       },
-      "expect_hex": "0200000002000001000a010300ff"
+      "expect_hex": "02000001000a010300ff"
     },
     {
       "name": "imu-ordinary-batch",
@@ -590,13 +673,23 @@
           "seq": 1,
           "dropped": 0,
           "t_base": 0,
-          "count": 0,
+          "count": 1,
           "reserved": 0,
           "flags": 129
         },
-        "records": []
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00"
+          }
+        ]
       },
-      "expect_hex": "01000000000000000000000000010000"
+      "expect_hex": "010000000000000000000000010100000000a00100000100"
     },
     {
       "name": "reserved-bits-imu-header-flags",

@@ -263,14 +263,14 @@ int main(void) {
             finish(enc, vtp_encode_can_list(&pg, subs, enc, sizeof enc));
 
         } else if (!strcmp(record, "monitor_list")) {
-            vtp_monitor_page_t pg;
+            vtp_monitor_declaration_t pg;
             if (vtp_decode_monitor_list(buf, len, &pg, &err)) { reject(err); continue; }
             vtp_monitor_channel_t chans[256];
             for (uint8_t i = 0; i < pg.count; i++)
                 vtp_monitor_channel_at(buf, i, &chans[i]);
-            printf("{\"ok\":true,\"page\":{\"total\":%u,\"index\":%u,"
+            printf("{\"ok\":true,\"declaration\":{"
                    "\"count\":%u,\"reserved\":%u},\"entries\":[",
-                   pg.total, pg.index, pg.count, pg.reserved);
+                   pg.count, pg.reserved);
             for (uint8_t i = 0; i < pg.count; i++) {
                 printf("%s{\"slot\":%u,\"channel\":%u,\"max_age\":%u,"
                        "\"channel_known\":%s}",

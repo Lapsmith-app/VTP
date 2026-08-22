@@ -39,7 +39,7 @@ def produce(record, data):
     if record == "info":
         return enc.encode_info(data)
     if record == "monitor_list":
-        return enc.encode_monitor_list(data["page"], data["entries"])
+        return enc.encode_monitor_list(data["declaration"], data["entries"])
     if record == "monitor_update":
         return enc.encode_monitor_update(data["header"], data["values"])
     if record == "can_list":

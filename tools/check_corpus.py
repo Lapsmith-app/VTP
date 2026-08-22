@@ -52,7 +52,7 @@ PACK = {"u8": "B", "i8": "b", "u16": "H", "i16": "h",
 COMPOSITE = {"can_batch": ("can_header", "can_record"),
              "imu_batch": ("imu_header", "imu_sample"),
              "can_list": ("can_list_page", "can_subscription"),
-             "monitor_list": ("monitor_page", "monitor_channel"),
+             "monitor_list": ("monitor_declaration", "monitor_channel"),
              "monitor_update": ("monitor_header", "monitor_value")}
 STANDALONE = ("gps_fix", "info", "link_params", "control_response",
               "time_sync")

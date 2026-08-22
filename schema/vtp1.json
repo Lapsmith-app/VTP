@@ -152,7 +152,7 @@
         {
           "value": 2,
           "name": "bad_params",
-          "desc": "Parameters malformed or out of range, or the tag is already outstanding"
+          "desc": "Parameters malformed or out of range"
         },
         {
           "value": 3,
@@ -167,7 +167,7 @@
         {
           "value": 5,
           "name": "busy",
-          "desc": "No room for another outstanding request; retry (SPEC.md 9)"
+          "desc": "A response is already outstanding; wait for it, then retry (SPEC.md 9)"
         },
         {
           "value": 6,
@@ -999,39 +999,25 @@
         }
       ]
     },
-    "monitor_page": {
+    "monitor_declaration": {
       "access": "control",
-      "size": 6,
-      "desc": "One page of the channels a device asks for. Followed by `count` monitor_channel entries.",
+      "size": 2,
+      "desc": "Every channel this device asks the client to supply. Followed by `count` monitor_channel entries.",
       "fields": [
         {
-          "name": "total",
-          "offset": 0,
-          "size": 2,
-          "type": "u16",
-          "desc": "Channels requested, across all pages"
-        },
-        {
-          "name": "index",
-          "offset": 2,
-          "size": 2,
-          "type": "u16",
-          "desc": "Table index of the first entry in this page"
-        },
-        {
           "name": "count",
-          "offset": 4,
+          "offset": 0,
           "size": 1,
           "type": "u8",
-          "desc": "Entries in this page"
+          "desc": "Channels requested; the whole declaration, never a page of it"
         },
         {
           "name": "reserved",
-          "offset": 5,
+          "offset": 1,
           "size": 1,
           "type": "u8",
           "reserved": true,
-          "desc": "Paging metadata"
+          "desc": "Declaration metadata"
         }
       ]
     },
@@ -1398,9 +1384,9 @@
       {
         "value": 64,
         "name": "MONITOR_LIST",
-        "params": "start:u16",
-        "response": "monitor_page record",
-        "desc": "One page of the channels this device asks the client to supply"
+        "params": "",
+        "response": "monitor_declaration record",
+        "desc": "Every channel this device asks the client to supply, in one response (SPEC.md 13.3)"
       }
     ]
   }

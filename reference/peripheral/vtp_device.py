@@ -607,10 +607,19 @@ class VtpDevice:
         return max(1, (self.notify_bytes - header) // (7 + 8))
 
     def _flush_can(self, now):
+        """The pending batch, or None when there is nothing to send.
+
+        SPEC.md 6.2 -- t_base is the bus-arrival time of record 0, so a batch
+        with no record 0 has no honest timestamp to carry. A quiet bus is
+        reported by sending nothing, and the timer below therefore produces a
+        notification only when there is something in it.
+        """
+        if not self._can_pending:
+            return None
         header = {
             "seq": self.SEQ_PLACEHOLDER,   # stamped at delivery (§8.2)
             "dropped": self._take_dropped("can"),
-            "t_base": self._can_batch_t0 if self._can_pending else now,
+            "t_base": self._can_batch_t0,
             "count": len(self._can_pending),
             "flags": 0,
             "reserved": 0,
@@ -660,7 +669,9 @@ class VtpDevice:
             # so a batch MUST be flushed before it would overflow.
             dt = (frame["_t"] - self._can_batch_t0) // 10
             if dt > 0xFFFF or len(self._can_pending) >= self._can_capacity():
-                out.append(("can", self._flush_can(now)))
+                batch = self._flush_can(now)
+                if batch is not None:
+                    out.append(("can", batch))
                 self._can_batch_t0 = frame["_t"]
                 dt = 0
             self._can_pending.append({
@@ -672,7 +683,9 @@ class VtpDevice:
         # Flush partial batches on a timer so a quiet bus or a slow ODR still
         # delivers, rather than waiting for a batch that may never fill.
         if self._subscriptions and now >= self._next_can_flush_us:
-            out.append(("can", self._flush_can(now)))
+            batch = self._flush_can(now)
+            if batch is not None:
+                out.append(("can", batch))
             self._next_can_flush_us = now + 100_000
         return [(c, p) for c, p in out if p is not None]
 
@@ -892,10 +905,12 @@ class VtpDevice:
             return reply(ST_OK, self._link_params())
 
         if opcode == MONITOR_LIST:
-            if len(params) != 2:
+            # SPEC.md §13.3 — parameterless: the declaration is not paged, so
+            # there is no `start` to take. It used to take one, mirroring
+            # CAN_LIST, and the index could never be anything but zero.
+            if params:
                 return reply(ST_BAD_PARAMS)
-            (start,) = struct.unpack("<H", params)
-            return reply(ST_OK, self._monitor_page(start))
+            return reply(ST_OK, self._monitor_declaration())
 
         return reply(ST_UNSUPPORTED)
 
@@ -914,14 +929,17 @@ class VtpDevice:
 
     # -- Monitor (SPEC.md §13) --------------------------------------------
 
-    def _monitor_page(self, start):
-        room = (self.notify_bytes - 3 - 6) // 4
-        page = self._monitor_channels[start:start + max(0, room)]
+    def _monitor_declaration(self):
+        """SPEC.md §13.3 — every channel this device asks for, in one response.
+
+        No paging and no room calculation. §13.4 caps a device at 15 channels,
+        which is 2 + 15*4 = 62 bytes, and the smallest response this protocol
+        allows carries 97. The declaration always fits by construction.
+        """
         return enc.encode_monitor_list(
-            {"total": len(self._monitor_channels), "index": start,
-             "count": len(page), "reserved": 0},
+            {"count": len(self._monitor_channels), "reserved": 0},
             [{"slot": s, "channel": c, "max_age": MONITOR_MAX_AGE.get(c, 20)}
-             for s, c in page])
+             for s, c in self._monitor_channels])
 
     def handle_monitor_write(self, payload):
         """SPEC.md §13.4 — a client-to-device batch of values.

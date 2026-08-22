@@ -87,12 +87,10 @@
 #define VTP_IMU_SAMPLE_OFF_GY 8
 #define VTP_IMU_SAMPLE_OFF_GZ 10
 
-/* One page of the channels a device asks for. Followed by `count` monitor_channel entries. */
-#define VTP_MONITOR_PAGE_SIZE 6
-#define VTP_MONITOR_PAGE_OFF_TOTAL 0
-#define VTP_MONITOR_PAGE_OFF_INDEX 2
-#define VTP_MONITOR_PAGE_OFF_COUNT 4
-#define VTP_MONITOR_PAGE_OFF_RESERVED 5
+/* Every channel this device asks the client to supply. Followed by `count` monitor_channel entries. */
+#define VTP_MONITOR_DECLARATION_SIZE 2
+#define VTP_MONITOR_DECLARATION_OFF_COUNT 0
+#define VTP_MONITOR_DECLARATION_OFF_RESERVED 1
 
 /* One channel a device asks the client to supply. */
 #define VTP_MONITOR_CHANNEL_SIZE 4

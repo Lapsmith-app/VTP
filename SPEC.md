@@ -763,8 +763,17 @@ flush far more frequently — once per connection interval is RECOMMENDED.
 
 ### 6.2 Batches
 
-`count` MAY be zero. An empty batch means the bus is quiet; it is not an error
-and a receiver MUST accept it.
+**`count` MUST NOT be zero**, and a receiver MUST reject a batch that carries
+no records. `t_base` is defined as the bus-arrival time of record 0, so a batch
+with no record 0 carries a timestamp naming a frame that does not exist — the
+same reason §7 forbids an empty IMU batch.
+
+A quiet bus is reported by sending nothing. There is no empty-batch heartbeat
+and none is needed: a client learns the device is alive from any of the streams
+it subscribed to, and a device with a genuinely silent bus and nothing else to
+send has nothing to say. `dropped` and the shedding flag ride on the next batch
+that has content, which §8.3 already permits — they are a best-effort
+diagnostic, not a delivery obligation.
 
 A receiver MUST reject a notification whose length does not exactly match the
 header plus `count` complete records.
@@ -964,10 +973,8 @@ Samples are evenly spaced: sample *i* is at `t_base + i × period` microseconds.
 **`count` MUST NOT be zero.** `t_base` is defined as the acquisition time of
 sample 0, so a batch with no sample 0 has a timestamp naming a sample that does
 not exist. A device with nothing to report sends nothing; there is no empty-IMU
-notification and a receiver MUST reject one. This differs from §6's CAN batch,
-where `count` MAY be zero, and the difference is not an inconsistency: a CAN
-`t_base` describes a bus that was observed and found quiet, while an IMU
-`t_base` describes a sample.
+notification and a receiver MUST reject one. §6's CAN batch says the same, for
+the same reason.
 
 `t_base` MUST be the acquisition time of sample 0 — the instant the sensor
 took that reading — and not the instant the device read it out.
@@ -1204,14 +1211,36 @@ Requests are `[opcode:u8][tag:u8][params…]`. Responses are
 requests and responses can be correlated. A device MUST respond to every
 request it applies.
 
+**A client MUST have at most one request outstanding.** It writes a request,
+waits for the indication that answers it, and only then writes the next one.
+
+That is the whole of the control lifecycle, and it is deliberately the
+simplest thing that works. An earlier draft let a client pipeline and required
+a device to accept at least four outstanding requests, which bought one thing —
+installing a subscription table without a round trip per connection interval —
+and cost every implementer a queue, a depth, an ordering guarantee and a
+refusal to hold them together. Nothing in this protocol is latency-critical on
+the control plane: subscriptions are installed once at connect, rates change
+when a user changes them, and `TIME_SYNC` measures the round trip it is
+already waiting for.
+
+A device MUST answer `busy` to a request that arrives while it still owes a
+response, and MUST NOT apply it. A client that receives `busy` has broken the
+rule above; it MUST wait for the outstanding response and MAY then retry, and
+MUST NOT treat the request as refused — `busy` says nothing about the request
+itself. The status exists so that a device meeting a client which pipelines
+anyway has something true to say, rather than a choice between silence and
+applying what it cannot answer.
+
 A client MUST NOT reuse a `tag` while a request bearing it is still
-outstanding, and a device MUST answer `bad_params` to a request whose tag
-matches one it has already accepted and not yet answered. Correlation is the
-tag's only job, and two outstanding requests sharing one produce two responses
-the client cannot tell apart — the failure is silent, and it lands on whichever
-request the client happens to match first. Detection costs a device nothing,
-because a device that may hold requests outstanding already knows which tags
-they carry.
+outstanding. It needs no enforcement: with one request outstanding, a second
+written before the answer arrives is refused `busy` whatever tag it carries,
+and one written afterwards has nothing to collide with. **Tag ambiguity is
+therefore not prevented, it is impossible** — and a device needs no table of
+outstanding tags at all. It echoes the tag and forgets it.
+
+A tag becomes reusable as soon as its response has been sent. The rule is "not
+while outstanding", not "never twice".
 
 **`detail` is present if and only if `status` is `ok`.** A refused request is
 answered with exactly three bytes, and a client MUST NOT read the detail of a
@@ -1249,7 +1278,7 @@ an opcode it does not implement as opaque rather than malformed.
 | `0x20` | `IMU_SET_RATE` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
 | `0x30` | `TIME_SYNC` | — | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
 | `0x31` | `GET_LINK_PARAMS` | — | `link_params record` | — |
-| `0x40` | `MONITOR_LIST` | `start:u16` | `monitor_page record` | One page of the channels this device asks the client to supply |
+| `0x40` | `MONITOR_LIST` | — | `monitor_declaration record` | Every channel this device asks the client to supply, in one response (SPEC.md 13.3) |
 <!-- END GENERATED: control -->
 
 `status` values:
@@ -1259,10 +1288,10 @@ an opcode it does not implement as opaque rather than malformed.
 | --- | --- | --- |
 | 0 | `ok` | Request accepted |
 | 1 | `unsupported_opcode` | Opcode not implemented |
-| 2 | `bad_params` | Parameters malformed or out of range, or the tag is already outstanding |
+| 2 | `bad_params` | Parameters malformed or out of range |
 | 3 | `table_full` | No free subscription slot |
 | 4 | `rate_exceeded` | Requested rate is above gps_max_rate_hz or imu_max_rate_hz (SPEC.md 9.8). Never used for CAN |
-| 5 | `busy` | No room for another outstanding request; retry (SPEC.md 9) |
+| 5 | `busy` | A response is already outstanding; wait for it, then retry (SPEC.md 9) |
 | 6 | `needs_encryption` | Allocated, never sent: encryption is enforced by GATT permission (SPEC.md 10) |
 | 7 | `unknown_handle` | No subscription with that handle |
 | *other* | *unknown* | MUST decode as unknown, never as a default |
@@ -1283,18 +1312,7 @@ Subscription modes:
 A device MUST reject a subscription that would exceed `can_subscription_slots`
 with `table_full`, rather than accepting it and silently discarding frames.
 
-A client MAY have several requests outstanding. A device MUST process them in
-the order received and MUST respond to each. `tag` is opaque to the device and
-MUST be echoed unchanged.
-
-A device MUST accept at least **four** outstanding requests, and MUST answer
-`busy` rather than silently discarding one it has no room for. Four is a fixed
-floor rather than a value advertised in Info: a client installing a table of
-subscriptions is otherwise held to one round trip per connection interval, and
-a negotiated depth would cost a field in a record that can never grow again
-(§11.2) to solve what a constant solves. A client that receives `busy` MUST
-retry rather than treat the request as refused — `busy` says nothing about the
-request itself.
+`tag` is opaque to the device and MUST be echoed unchanged.
 ### 9.1 Link parameters
 
 The detail of a successful `GET_LINK_PARAMS` response is one `link_params`
@@ -1514,7 +1532,7 @@ to a characteristic before using it, so this costs a client nothing to satisfy
 and removes a state a device would otherwise have to reason about.
 
 **A device MUST NOT apply a request it cannot answer.** If the response cannot
-be delivered — indications not enabled, or no room in the queue above — the
+be delivered — indications not enabled, or a response already outstanding — the
 request MUST NOT take effect, and the device MUST NOT count it as received.
 Deliverability is therefore decided *before* dispatch, not after.
 
@@ -1789,7 +1807,7 @@ all.
 | `can_record` | No — closed for major version 1 | Up to 4000 per second |
 | `imu_header` | No — closed for major version 1 | One per notification |
 | `imu_sample` | No — closed for major version 1 | Up to 833 per second |
-| `monitor_page` | No — closed for major version 1 | — |
+| `monitor_declaration` | No — closed for major version 1 | — |
 | `monitor_channel` | No — closed for major version 1 | — |
 | `monitor_header` | No — closed for major version 1 | — |
 | `monitor_value` | No — closed for major version 1 | — |
@@ -1942,18 +1960,16 @@ unrecognised channel value as unknown and MUST NOT substitute another.
 
 ### 13.3 The declaration
 
-<!-- BEGIN GENERATED: monitor_page -->
-*One page of the channels a device asks for. Followed by `count` monitor_channel entries.*
+<!-- BEGIN GENERATED: monitor_declaration -->
+*Every channel this device asks the client to supply. Followed by `count` monitor_channel entries.*
 
-Total: **6 bytes**. All fields little-endian.
+Total: **2 bytes**. All fields little-endian.
 
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `total` | Channels requested, across all pages |
-| 2 | 2 | `u16` | `index` | Table index of the first entry in this page |
-| 4 | 1 | `u8` | `count` | Entries in this page |
-| 5 | 1 | `u8` | `reserved` | Paging metadata; **reserved — MUST be zero** |
-<!-- END GENERATED: monitor_page -->
+| 0 | 1 | `u8` | `count` | Channels requested; the whole declaration, never a page of it |
+| 1 | 1 | `u8` | `reserved` | Declaration metadata; **reserved — MUST be zero** |
+<!-- END GENERATED: monitor_declaration -->
 
 followed by `count` entries:
 
@@ -1971,7 +1987,18 @@ Total: **4 bytes**. All fields little-endian.
 
 `slot` is the device's own name for the value; the client quotes it back in
 every update. A device MAY use any slot numbers it likes and MUST NOT repeat
-one. Paging works exactly as §9.5 describes.
+one.
+
+**The declaration is not paged.** `MONITOR_LIST` takes no parameters and
+answers with the whole of it. §13.4 caps a device at 15 channels — the most
+that fit in one complete client write at the minimum ATT MTU — and 15 channels
+are 62 bytes, comfortably inside the 97 a response carries at that same MTU. A
+page index could never be anything but zero.
+
+This is where Monitor and §9.5's CAN table genuinely differ, and the reason is
+worth stating: `can_subscription_slots` may be far larger than one response can
+carry, so `CAN_LIST` must page and does. Monitor cannot need it, so it does not
+have it.
 
 ### 13.4 Values
 
@@ -2117,7 +2144,7 @@ record tables above.
 | `link_params.validity` | bits 4–15 | Validity for link parameters added in a later minor |
 | `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
-| `monitor_page.reserved` | 1 byte | Paging metadata |
+| `monitor_declaration.reserved` | 1 byte | Declaration metadata |
 | `monitor_header.reserved` | 1 byte | Update metadata |
 | `can_list_page.reserved` | 1 byte | Paging metadata |
 | Extension types | `0x80`–`0xFF` | Vendor-private; this specification MUST NOT assign them (§5.5) |

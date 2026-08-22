@@ -125,6 +125,11 @@ def decode_can_batch(buf):
     if len(buf) < hsz:
         raise Reject("length")
     hdr = _unpack("can_header", buf)
+    # SPEC.md §6.2 — t_base IS the bus-arrival time of record 0, so a batch
+    # with no record 0 carries a timestamp naming a frame that does not exist.
+    # A quiet bus is reported by sending nothing.
+    if hdr["count"] == 0:
+        raise Reject("empty-batch")
 
     rsz = _size("can_record")
     off, records = hsz, []
@@ -305,19 +310,19 @@ MONITOR_MAX_CHANNELS = (
 
 
 def decode_monitor_list(buf):
-    """SPEC.md §13.3 — one page of the channels a device asks for."""
-    hsz, esz = _size("monitor_page"), _size("monitor_channel")
+    """SPEC.md §13.3 — every channel a device asks for, in one response."""
+    hsz, esz = _size("monitor_declaration"), _size("monitor_channel")
     if len(buf) < hsz:
         raise Reject("length")
-    page = _unpack("monitor_page", buf)
-    if len(buf) < hsz + page["count"] * esz:
+    declaration = _unpack("monitor_declaration", buf)
+    if len(buf) < hsz + declaration["count"] * esz:
         raise Reject("truncated-record")
-    if len(buf) != hsz + page["count"] * esz:
+    if len(buf) != hsz + declaration["count"] * esz:
         raise Reject("length")
 
     known = {m["value"] for m in SCHEMA["enums"]["channel"]["members"]}
     entries = []
-    for i in range(page["count"]):
+    for i in range(declaration["count"]):
         e = _unpack("monitor_channel", buf, hsz + i * esz)
         # SPEC.md §13.2 — a channel from a later minor stays unknown, and the
         # client answers the slot absent rather than substituting another.
@@ -330,8 +335,10 @@ def decode_monitor_list(buf):
     if len(set(slots)) != len(slots):
         raise Reject("duplicate-slot")
     # SPEC.md §13.4 — a complete write must fit at the minimum ATT MTU, so a
-    # declaration larger than that has made its own rule unsatisfiable.
-    if page["total"] > MONITOR_MAX_CHANNELS:
+    # declaration larger than that has made its own rule unsatisfiable. `count`
+    # IS the whole declaration now that it is not paged, so it is the only
+    # number there is to check.
+    if declaration["count"] > MONITOR_MAX_CHANNELS:
         raise Reject("too-many-channels")
     # SPEC.md §13.5 — every declared channel carries a deadline, so a value the
     # client stops refreshing always stops being shown. Zero used to mean "no
@@ -339,7 +346,7 @@ def decode_monitor_list(buf):
     # one rule per channel replaced both.
     if any(e["max_age"] == 0 for e in entries):
         raise Reject("zero-max-age")
-    return {"page": page, "entries": entries}
+    return {"declaration": declaration, "entries": entries}
 
 
 def decode_monitor_update(buf):

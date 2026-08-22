@@ -161,8 +161,10 @@ int vtp_encode_can_batch(const vtp_can_header_t *h,
      * a producer that segfaults on malformed input is not a producer that
      * refused it, and refusing is the contract this file exists to keep. */
     if (h->count && !frames) return -1;
+    /* SPEC.md §6.2 -- t_base names record 0, so there is always a record 0. */
+    if (h->count == 0) return -1;
     /* SPEC.md §6.1 -- record 0's dt is zero by t_base's own definition. */
-    if (h->count && frames[0].dt != 0) return -1;
+    if (frames[0].dt != 0) return -1;
     size_t needed = VTP_CAN_HEADER_SIZE;
     for (uint8_t i = 0; i < h->count; i++) {
         /* An encoder must not emit a frame its own decoder rejects: a device
@@ -315,10 +317,10 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     return VTP_INFO_SIZE;
 }
 
-int vtp_encode_monitor_list(const vtp_monitor_page_t *p,
+int vtp_encode_monitor_list(const vtp_monitor_declaration_t *p,
                             const vtp_monitor_channel_t *entries,
                             uint8_t *out, size_t cap) {
-    const size_t needed = (size_t)VTP_MONITOR_PAGE_SIZE
+    const size_t needed = (size_t)VTP_MONITOR_DECLARATION_SIZE
                         + (size_t)p->count * VTP_MONITOR_CHANNEL_SIZE;
     if (cap < needed) return -1;
     /* The array first: the duplicate-slot sweep below reads through it, and
@@ -328,7 +330,7 @@ int vtp_encode_monitor_list(const vtp_monitor_page_t *p,
     /* SPEC.md §13.3, §13.4 -- both already enforced by the decoder, so
      * emitting either produced a declaration this repository's own reader
      * refuses to read. */
-    if (p->total > VTP_MONITOR_MAX_CHANNELS) return -1;
+    if (p->count > VTP_MONITOR_MAX_CHANNELS) return -1;
     for (uint8_t i = 0; i < p->count; i++)
         for (uint8_t j = (uint8_t)(i + 1); j < p->count; j++)
             if (entries[i].slot == entries[j].slot) return -1;
@@ -337,13 +339,11 @@ int vtp_encode_monitor_list(const vtp_monitor_page_t *p,
         if (entries[i].max_age == 0) return -1;
     memset(out, 0, needed);
 
-    wr16(out + VTP_MONITOR_PAGE_OFF_TOTAL, p->total);
-    wr16(out + VTP_MONITOR_PAGE_OFF_INDEX, p->index);
-    out[VTP_MONITOR_PAGE_OFF_COUNT] = p->count;
-    out[VTP_MONITOR_PAGE_OFF_RESERVED] = 0;   /* §2 */
+    out[VTP_MONITOR_DECLARATION_OFF_COUNT] = p->count;
+    out[VTP_MONITOR_DECLARATION_OFF_RESERVED] = 0;   /* §2 */
 
     for (uint8_t i = 0; i < p->count; i++) {
-        uint8_t *e = out + VTP_MONITOR_PAGE_SIZE
+        uint8_t *e = out + VTP_MONITOR_DECLARATION_SIZE
                    + (size_t)i * VTP_MONITOR_CHANNEL_SIZE;
         e[VTP_MONITOR_CHANNEL_OFF_SLOT] = entries[i].slot;
         wr16(e + VTP_MONITOR_CHANNEL_OFF_CHANNEL, entries[i].channel);

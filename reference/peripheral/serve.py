@@ -202,10 +202,16 @@ def _describe_request(value):
     return f"{name} tag={tag}{detail} params={params.hex() or '-'}"
 
 
-# SPEC.md §9 — a device MUST accept at least four outstanding requests. One
-# slot beyond that exists only to carry the `busy` refusal itself: a device
-# with nothing left to answer with cannot tell a client it is out of room.
-CONTROL_QUEUE_DEPTH = 4
+# SPEC.md §9 — a client has at most ONE request outstanding: it writes, waits
+# for the indication, and only then writes again.
+#
+# One slot beyond that still exists, and it is not slack. It carries the `busy`
+# refusal itself: a client that pipelines anyway must be told so, and a device
+# whose only slot is occupied by the response it already owes has nothing left
+# to say that with. §9.6 forbids both alternatives — silence, and applying a
+# request it cannot answer.
+CONTROL_OUTSTANDING = 1
+CONTROL_QUEUE_DEPTH = CONTROL_OUTSTANDING
 
 
 class ControlQueue:
@@ -222,34 +228,33 @@ class ControlQueue:
 
     def __init__(self, depth=CONTROL_QUEUE_DEPTH):
         self.depth = depth
-        # (tag, response) pairs awaiting delivery. Outstanding tags are read
-        # off this rather than tracked alongside it: two structures that must
-        # agree are two structures that can disagree.
+        # Responses awaiting delivery. The tag rides along for the log only:
+        # admission does not consult it, because with one request outstanding
+        # it cannot tell anything the depth has not already told us.
         self._out = collections.deque()
         self.dropped = 0
 
     def __len__(self):
         return len(self._out)
 
-    def outstanding(self, tag):
-        return any(t == tag for t, _ in self._out)
-
     def admit(self, tag):
-        """`apply`, `duplicate-tag`, `busy` or `full`.
+        """`apply`, `busy` or `full`.
 
-        Only `apply` permits the request to take effect. `duplicate-tag` and
-        `busy` are answered but not applied; `full` cannot even be answered.
+        Only `apply` permits the request to take effect. `busy` is answered but
+        not applied; `full` cannot even be answered.
+
+        There used to be a `duplicate-tag` verdict here, refusing a request
+        bearing a tag already outstanding. One-outstanding removed the state it
+        was detecting rather than the check: a second request written before
+        the first is answered is refused whatever tag it carries, and a request
+        written after cannot collide with anything. So tag ambiguity is not
+        prevented by this class any more, it is structurally impossible -- and
+        a device needs no tag table at all.
         """
-        # Capacity first. A duplicate-tag refusal is still a response and
-        # still needs somewhere to sit, so testing the tag before the depth let
-        # a client hold a thousand responses against a declared depth of four
-        # simply by reusing one tag.
         if len(self._out) > self.depth:
             return "full"
         if len(self._out) == self.depth:
             return "busy"
-        if self.outstanding(tag):
-            return "duplicate-tag"
         return "apply"
 
     def hold(self, tag, response):
@@ -457,13 +462,10 @@ class Peripheral:
                         _describe_request(request), len(self._control))
             self._control.dropped += 1
             return
-        if verdict == "duplicate-tag":
-            # SPEC.md §9 — the tag is the only means of correlation, so a
-            # second request bearing an outstanding one is refused rather than
-            # applied. The refusal necessarily echoes the same tag; that
-            # ambiguity is the client's own doing and this is what tells it so.
-            response = bytes([opcode, tag, 2])          # bad_params
-        elif verdict == "busy":
+        if verdict == "busy":
+            # SPEC.md §9 — a client has one request outstanding. This one wrote
+            # again before its answer arrived, so it is told to wait rather
+            # than having a request applied that cannot be answered (§9.6).
             response = bytes([opcode, tag, 5])          # busy
         else:
             response = self.device.handle_control(request, t_rx=t_rx)

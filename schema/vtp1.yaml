@@ -114,7 +114,10 @@ enums:
     members:
       - {value: 0, name: ok,                 desc: "Request accepted"}
       - {value: 1, name: unsupported_opcode, desc: "Opcode not implemented"}
-      - {value: 2, name: bad_params,         desc: "Parameters malformed or out of range, or the tag is already outstanding"}
+      # No longer "or the tag is already outstanding": with one request
+      # outstanding (SPEC.md 9) a concurrent request is refused `busy`
+      # whatever tag it carries, so bad_params is about parameters again.
+      - {value: 2, name: bad_params,         desc: "Parameters malformed or out of range"}
       - {value: 3, name: table_full,         desc: "No free subscription slot"}
       # NOT for CAN. SPEC.md 9.4 forbids refusing a CAN subscription on rate
       # grounds -- the device admits and sheds instead -- so a description
@@ -122,7 +125,12 @@ enums:
       # have. It is for the two rate setters, where the ceiling is a fact the
       # device already knows.
       - {value: 4, name: rate_exceeded,      desc: "Requested rate is above gps_max_rate_hz or imu_max_rate_hz (SPEC.md 9.8). Never used for CAN"}
-      - {value: 5, name: busy,               desc: "No room for another outstanding request; retry (SPEC.md 9)"}
+      # A client is allowed ONE outstanding request (SPEC.md 9), so this is
+      # what a device says to a client that pipelines anyway. Kept rather than
+      # removed with the queue it used to describe: without it a device meeting
+      # such a client must choose between silence and applying a request it
+      # cannot answer, and 9.6 forbids both.
+      - {value: 5, name: busy,               desc: "A response is already outstanding; wait for it, then retry (SPEC.md 9)"}
       - {value: 6, name: needs_encryption,   desc: "Allocated, never sent: encryption is enforced by GATT permission (SPEC.md 10)"}
       - {value: 7, name: unknown_handle,     desc: "No subscription with that handle"}
   sub_mode:
@@ -312,6 +320,8 @@ records:
     fields:
       - {name: seq,     offset: 0,  size: 2, type: u16, desc: "Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection"}
       - {name: dropped, offset: 2,  size: 2, type: u16, desc: "Frames accepted then discarded since the previous notification; excludes frames no subscription matched or a subscription mode did not select; saturates"}
+      # Record 0 always exists: count is never zero (SPEC.md 6.2), so this
+      # timestamp always names a frame that was actually received.
       - {name: t_base,  offset: 4,  size: 8, type: u64, units: µs, desc: "Bus-arrival time of record 0, on the device clock (§8.1)"}
       - {name: count,   offset: 12, size: 1, type: u8}
       - {name: flags,   offset: 13, size: 1, type: u8, bitmask: can_flags}
@@ -361,15 +371,21 @@ records:
       - {name: gy, offset: 8,  size: 2, type: i16, units: deg/s, scale: 0.05, presence_bit: gyro}
       - {name: gz, offset: 10, size: 2, type: i16, units: deg/s, scale: 0.05, presence_bit: gyro}
 
-  monitor_page:
+  # Not paged, and not a page. The whole declaration is at most 15 channels
+  # (SPEC.md 13.4, the most that fit in one complete client write at the
+  # minimum ATT MTU), which is 2 + 15*4 = 62 bytes -- inside the 97 a response
+  # has at that MTU with room to spare. So `total` could never differ from
+  # `count`, `index` could never be anything but 0, and MONITOR_LIST's `start`
+  # could never be anything but 0 either. Three fields and a parameter that
+  # existed to mirror can_list_page, where paging IS reachable because
+  # can_subscription_slots may be far larger than a response can carry.
+  monitor_declaration:
     access: control
-    size: 6
-    desc: "One page of the channels a device asks for. Followed by `count` monitor_channel entries."
+    size: 2
+    desc: "Every channel this device asks the client to supply. Followed by `count` monitor_channel entries."
     fields:
-      - {name: total,    offset: 0, size: 2, type: u16, desc: "Channels requested, across all pages"}
-      - {name: index,    offset: 2, size: 2, type: u16, desc: "Table index of the first entry in this page"}
-      - {name: count,    offset: 4, size: 1, type: u8,  desc: "Entries in this page"}
-      - {name: reserved, offset: 5, size: 1, type: u8,  reserved: true, desc: "Paging metadata"}
+      - {name: count,    offset: 0, size: 1, type: u8,  desc: "Channels requested; the whole declaration, never a page of it"}
+      - {name: reserved, offset: 1, size: 1, type: u8,  reserved: true, desc: "Declaration metadata"}
 
   monitor_channel:
     access: control
@@ -483,4 +499,4 @@ control:
     # refuses the dash outright.
     - {value: 0x30, name: TIME_SYNC,          params: "",                             response: "time_sync record",      desc: "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"}
     - {value: 0x31, name: GET_LINK_PARAMS,    params: "",                             response: "link_params record"}
-    - {value: 0x40, name: MONITOR_LIST,       params: "start:u16",                    response: "monitor_page record",   desc: "One page of the channels this device asks the client to supply"}
+    - {value: 0x40, name: MONITOR_LIST,       params: "",                             response: "monitor_declaration record", desc: "Every channel this device asks the client to supply, in one response (SPEC.md 13.3)"}
