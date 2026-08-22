@@ -7,7 +7,9 @@ conformance/README.md) and compares its output to the expected decode.
     python3 conformance/run.py --impl "reference/c/vtp1_cli"
     python3 conformance/run.py --impl "dart run reference/dart/bin/vtp_decode.dart"
 
-Exit status is 0 only when every case for every role passes.
+Exit status is 0 only when every case for every role passes. An
+implementation that declares a subset of roles runs that subset with --roles,
+and the summary says which.
 """
 import argparse, json, pathlib, shlex, subprocess, sys
 
@@ -15,10 +17,72 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 VECTORS = ROOT / "conformance" / "vectors"
 
 
-def load():
+# SPEC.md §12 — "Every implementation MUST pass those for the roles it
+# declares." The runner had no notion of a role, so a GPS-only decoder was
+# handed every CAN, IMU and Monitor vector and failed conformance for records
+# it never claimed to implement. Its only options were to fail, or to decode
+# things it does not support.
+#
+# `core` is not optional: Info, the control response envelope and link
+# parameters are what every device answers regardless of which streams it has.
+ROLES = {
+    # §4 — every device answers Info, whatever else it implements. Nothing
+    # else is unconditional.
+    "core":    {"info"},
+    # §9 — the Control characteristic is a capability (§4 bit 3), not a
+    # requirement. `core` used to carry the control-plane records, so
+    # `--roles gps` demanded a Control characteristic from a GPS-only device
+    # that the specification permits not to have one, leaving it to fail
+    # conformance for records it never claimed or to implement things it does
+    # not support.
+    "control": {"control_response", "link_params", "time_sync"},
+    "gps":     {"gps_fix"},
+    "can":     {"can_batch", "can_list"},
+    "imu":     {"imu_batch"},
+    "monitor": {"monitor_list", "monitor_update"},
+}
+
+# A role whose records only exist if another one does. This is not the runner's
+# own rule any more: SPEC.md §4.1 makes `can` and `monitor` require `control`
+# normatively, and the table below is read from the schema that generates it.
+#
+# It used to be a hard-coded dict, which meant the runner enforced an
+# implication the specification did not state — canonical Info vectors blessed
+# a CAN device with no Control characteristic while `--roles can` demanded
+# control responses from it. Two answers to one question, in one repository.
+def _implications():
+    import yaml
+    schema = yaml.safe_load((ROOT / "schema" / "vtp1.yaml").read_text())
+    bits = schema["bitmasks"]["capabilities"]["bits"]
+    implies = {}
+    for b in bits:
+        # Only capabilities that are also conformance roles: `can_fd` implies
+        # `can`, but there is no `can_fd` role to run.
+        if b["name"] not in ROLES:
+            continue
+        needed = tuple(r for r in (b.get("implies") or []) if r in ROLES)
+        if needed:
+            implies[b["name"]] = needed
+    return implies
+
+
+IMPLIES = _implications()
+
+
+def load(roles=None):
+    """Every vector, or only those for the given roles. `core` is always in."""
+    wanted = None
+    if roles is not None:
+        wanted = set(ROLES["core"])
+        for role in roles:
+            wanted |= ROLES[role]
+            for implied in IMPLIES.get(role, ()):
+                wanted |= ROLES[implied]
     cases = []
     for path in sorted(VECTORS.glob("*.json")):
         for c in json.loads(path.read_text())["cases"]:
+            if wanted is not None and c["record"] not in wanted:
+                continue
             c["_file"] = path.name
             cases.append(c)
     return cases
@@ -49,6 +113,16 @@ def diff(expect, got, path=""):
         if isinstance(expect, str) and isinstance(got, str):
             if expect.lower() != got.lower():
                 yield f"{path}: expected {expect!r}, got {got!r}"
+        # In Python `True == 1` and `False == 0`, so a decoder emitting 1 for a
+        # boolean field -- or 1.0 for an integer one -- compared equal and
+        # passed. The runner exists to check what an implementation put on
+        # stdout, and JSON distinguishes these even where Python does not.
+        elif isinstance(expect, bool) != isinstance(got, bool):
+            yield (f"{path}: expected {expect!r} ({type(expect).__name__}), "
+                   f"got {got!r} ({type(got).__name__})")
+        elif isinstance(expect, int) and isinstance(got, float):
+            yield (f"{path}: expected the integer {expect!r}, got the float "
+                   f"{got!r}")
         elif expect != got:
             yield f"{path}: expected {expect!r}, got {got!r}"
 
@@ -58,9 +132,26 @@ def main():
     ap.add_argument("--impl", required=True,
                     help="command implementing the runner contract")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--roles", metavar="LIST",
+                    help="comma-separated roles this implementation declares "
+                         f"({', '.join(r for r in ROLES if r != 'core')}). "
+                         "Vectors for other roles are skipped; core is always "
+                         "included. Omit to run every vector.")
     args = ap.parse_args()
 
-    cases = load()
+    roles = None
+    if args.roles:
+        roles = [r.strip() for r in args.roles.split(",") if r.strip()]
+        unknown = [r for r in roles if r not in ROLES]
+        if unknown:
+            print(f"unknown role(s): {', '.join(unknown)}. Known: "
+                  f"{', '.join(sorted(ROLES))}", file=sys.stderr)
+            return 2
+
+    cases = load(roles)
+    if not cases:
+        print("no vectors selected", file=sys.stderr)
+        return 2
     stdin = "".join(f"{c['record']}\t{c['hex']}\n" for c in cases)
 
     proc = subprocess.run(shlex.split(args.impl), input=stdin, text=True,
@@ -160,7 +251,10 @@ def main():
             if args.verbose:
                 print(f"    ok   {case['name']}")
 
-    print(f"\n{passed} passed, {failed} failed, {len(cases)} total")
+    # Name the roles, or a green partial run reads as full conformance.
+    scope = ("every role" if roles is None
+             else f"roles: core, {', '.join(sorted(roles))}")
+    print(f"\n{passed} passed, {failed} failed, {len(cases)} total ({scope})")
     if roundtripped:
         print(f"{roundtripped} of those also verified byte-identical through the encoder")
     else:

@@ -115,12 +115,22 @@ typedef struct {
     uint16_t gps_rate_hz, gps_max_rate_hz, can_subscription_slots;
     uint32_t can_max_frames_per_s;
     uint16_t imu_rate_hz, imu_max_rate_hz;
-    uint8_t  can_max_payload, clock_flags;
+    uint8_t  reserved_20;   /* was can_max_payload; SPEC.md 4.2 derives it */
+    uint8_t  clock_flags;
     uint16_t max_notify_bytes;
 } vtp_info_t;
 
 int vtp_decode_info(const uint8_t *buf, size_t len,
                     vtp_info_t *out, const char **err);
+
+/* SPEC.md §4.1 -- non-zero when this capability word satisfies the profile
+ * matrix: every implication met, and every capacity field zero behind a
+ * cleared bit. `info` may be NULL to check only the implications, which is
+ * what an ENCODER has before it has written anything. On a false result `why`
+ * (when not NULL) names the bit or field that failed. */
+int vtp_capabilities_coherent(uint32_t capabilities,
+                              const uint8_t *info, size_t len,
+                              const char **why);
 
 /* ---- CAN subscription table ------------------------------------------ */
 
@@ -160,16 +170,24 @@ void vtp_can_subscription_at(const uint8_t *buf, uint8_t index,
  * Channels are enumerated rather than computed, so nothing here parses an
  * expression. */
 
+/* Not paged: MONITOR_LIST answers with the whole declaration (SPEC.md 13.3).
+ * `total` and `index` are gone with the paging they described. */
 typedef struct {
-    uint16_t total, index;
     uint8_t  count, reserved;
-} vtp_monitor_page_t;
+} vtp_monitor_declaration_t;
 
 typedef struct {
     uint8_t  slot;
     uint16_t channel;
-    uint8_t  reserved;
+    uint8_t  max_age;   /* 100 ms units; never zero. SPEC.md §13.5 */
 } vtp_monitor_channel_t;
+
+/* SPEC.md §13.4 -- the most channels a device may ask for: as many values as
+ * fit beside a monitor_header in one write at the §2 minimum ATT MTU, less the
+ * 3-byte ATT write header. A complete write is only a workable rule if a
+ * complete write always fits. */
+#define VTP_MONITOR_MAX_CHANNELS \
+    ((VTP_MIN_ATT_MTU - 3 - VTP_MONITOR_HEADER_SIZE) / VTP_MONITOR_VALUE_SIZE)
 
 typedef struct {
     uint16_t seq;
@@ -187,7 +205,7 @@ typedef struct {
 int vtp_channel_known(uint16_t channel);
 
 int vtp_decode_monitor_list(const uint8_t *buf, size_t len,
-                            vtp_monitor_page_t *page, const char **err);
+                            vtp_monitor_declaration_t *page, const char **err);
 void vtp_monitor_channel_at(const uint8_t *buf, uint8_t index,
                             vtp_monitor_channel_t *out);
 
@@ -195,6 +213,11 @@ int vtp_decode_monitor_update(const uint8_t *buf, size_t len,
                               vtp_monitor_header_t *hdr, const char **err);
 void vtp_monitor_value_at(const uint8_t *buf, uint8_t index,
                           vtp_monitor_value_t *out);
+
+/* SPEC.md §7.2 -- imu_header.flags bit 2: at least one sample in this batch
+ * was at or beyond the range of the sensor that produced it. The reading is a
+ * lower bound on the magnitude, not a measurement. */
+#define VTP_IMU_FLAG_SATURATED 0x04
 
 /* ---- Link parameters ------------------------------------------------- */
 
@@ -243,6 +266,16 @@ int vtp_status_known(uint8_t status);
 
 int vtp_decode_control_response(const uint8_t *buf, size_t len,
                                 vtp_control_response_t *out, const char **err);
+
+/* SPEC.md §9.7 -- two readings of the device clock, so a client can take the
+ * device's own processing time out of the round trip and bound its error. */
+typedef struct {
+    uint64_t t_device_rx;
+    uint64_t t_device_tx;
+} vtp_time_sync_t;
+
+int vtp_decode_time_sync(const uint8_t *buf, size_t len,
+                         vtp_time_sync_t *out, const char **err);
 
 #ifdef __cplusplus
 }

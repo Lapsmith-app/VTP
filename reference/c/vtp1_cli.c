@@ -211,10 +211,11 @@ int main(void) {
 
             printf("{\"ok\":true,\"header\":{\"seq\":%u,\"dropped\":%u,"
                    "\"t_base\":%" PRIu64 ",\"period\":%u,\"count\":%u,"
-                   "\"flags\":%u,\"reserved\":%u},"
+                   "\"flags\":%u,\"reserved\":%u,\"saturated\":%s},"
                    "\"samples\":[",
                    h.seq, h.dropped, h.t_base, h.period, h.count, h.flags,
-                   h.reserved);
+                   h.reserved,
+                   (h.flags & VTP_IMU_FLAG_SATURATED) ? "true" : "false");
             for (uint8_t i = 0; i < h.count; i++) {
                 const vtp_imu_sample_t *s = &samples[i];
                 printf("%s{\"ax\":%d,\"ay\":%d,\"az\":%d,\"gx\":%d,\"gy\":%d,\"gz\":%d,"
@@ -233,12 +234,12 @@ int main(void) {
             printf("{\"ok\":true,\"protocol_major\":%u,\"protocol_minor\":%u,"
                    "\"capabilities\":%u,\"gps_rate_hz\":%u,\"gps_max_rate_hz\":%u,"
                    "\"can_subscription_slots\":%u,\"can_max_frames_per_s\":%u,"
-                   "\"imu_rate_hz\":%u,\"imu_max_rate_hz\":%u,\"can_max_payload\":%u,"
+                   "\"imu_rate_hz\":%u,\"imu_max_rate_hz\":%u,\"reserved_20\":%u,"
                    "\"clock_flags\":%u,\"max_notify_bytes\":%u",
                    v.protocol_major, v.protocol_minor, v.capabilities,
                    v.gps_rate_hz, v.gps_max_rate_hz, v.can_subscription_slots,
                    v.can_max_frames_per_s, v.imu_rate_hz, v.imu_max_rate_hz,
-                   v.can_max_payload, v.clock_flags, v.max_notify_bytes);
+                   v.reserved_20, v.clock_flags, v.max_notify_bytes);
             finish(enc, vtp_encode_info(&v, enc, sizeof enc));
 
         } else if (!strcmp(record, "can_list")) {
@@ -262,19 +263,19 @@ int main(void) {
             finish(enc, vtp_encode_can_list(&pg, subs, enc, sizeof enc));
 
         } else if (!strcmp(record, "monitor_list")) {
-            vtp_monitor_page_t pg;
+            vtp_monitor_declaration_t pg;
             if (vtp_decode_monitor_list(buf, len, &pg, &err)) { reject(err); continue; }
             vtp_monitor_channel_t chans[256];
             for (uint8_t i = 0; i < pg.count; i++)
                 vtp_monitor_channel_at(buf, i, &chans[i]);
-            printf("{\"ok\":true,\"page\":{\"total\":%u,\"index\":%u,"
+            printf("{\"ok\":true,\"declaration\":{"
                    "\"count\":%u,\"reserved\":%u},\"entries\":[",
-                   pg.total, pg.index, pg.count, pg.reserved);
+                   pg.count, pg.reserved);
             for (uint8_t i = 0; i < pg.count; i++) {
-                printf("%s{\"slot\":%u,\"channel\":%u,\"reserved\":%u,"
+                printf("%s{\"slot\":%u,\"channel\":%u,\"max_age\":%u,"
                        "\"channel_known\":%s}",
                        i ? "," : "", chans[i].slot, chans[i].channel,
-                       chans[i].reserved,
+                       chans[i].max_age,
                        vtp_channel_known(chans[i].channel) ? "true" : "false");
             }
             printf("]");
@@ -326,6 +327,15 @@ int main(void) {
             put_hex(r.detail, r.detail_len);
             printf("\"");
             finish(enc, vtp_encode_control_response(&r, enc, sizeof enc));
+
+        } else if (!strcmp(record, "time_sync")) {
+            vtp_time_sync_t t;
+            if (vtp_decode_time_sync(buf, len, &t, &err)) { reject(err); continue; }
+            printf("{\"ok\":true,\"t_device_rx\":%" PRIu64 ","
+                   "\"t_device_tx\":%" PRIu64 ",\"processing_us\":%" PRIu64,
+                   t.t_device_rx, t.t_device_tx,
+                   t.t_device_tx - t.t_device_rx);
+            finish(enc, vtp_encode_time_sync(&t, enc, sizeof enc));
 
         } else {
             reject("unknown-record");

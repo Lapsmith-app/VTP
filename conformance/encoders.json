@@ -1,0 +1,766 @@
+{
+  "protocol": "VTP/1",
+  "generated_by": "tools/generate.py",
+  "cases": [
+    {
+      "name": "can-id-above-arbitration-field",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "An identifier of 0x3FFFFFFF. MUST be refused, not masked: masking silently produced 0x1FFFFFFF, a frame the caller never asked for, on the field a client uses to decide what the payload means. The format is carried by `extended`, not by high bits of `id`.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 1073741823,
+            "extended": true,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00"
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-id-negative",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "An identifier of -1. Masking turned it into 0x1FFFFFFF -- the same frame an over-large identifier became, so two different mistakes produced one wrong answer.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": -1,
+            "extended": true,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00"
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-first-record-dt-nonzero",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 6.1 -- t_base IS record 0's arrival time.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 5,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00"
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-classic-nine-bytes",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 6.10 -- a Classic frame carries 0..8.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 9,
+            "payload": "000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-len-longer-than-payload",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 6 -- len 8 with one byte of payload. Padding to eight publishes seven bytes the caller never supplied, on a bus signal a client will decode as a measurement.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 8,
+            "payload": "00"
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-len-shorter-than-payload",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 6 -- len 0 with one byte of payload. Discarding it silently drops data the caller asked to send.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 0,
+            "payload": "aa"
+          }
+        ]
+      }
+    },
+    {
+      "name": "gps-latitude-beyond-the-pole",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position bit set so the range rule applies.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 4,
+          "lat": 910000000,
+          "lon": 0,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-rtk-float-and-fixed",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "desc": "SPEC.md 5.3 -- the two RTK bits are exclusive.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 0,
+          "fix_flags": 7,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-rtk-without-differential",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "desc": "SPEC.md 5.3 -- an RTK solution is a differentially corrected one, so the bit is implied and not optional.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 0,
+          "fix_flags": 2,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-ext-count-disagrees",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "desc": "SPEC.md 5.5 -- three extensions declared, none supplied.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 0,
+          "ext_count": 3
+        },
+        "ext_hex": ""
+      }
+    },
+    {
+      "name": "imu-period-zero",
+      "record": "imu_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 7 -- zero says every sample was taken at one instant.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "period": 0,
+          "count": 1,
+          "flags": 3
+        },
+        "samples": [
+          {
+            "ax": 1,
+            "ay": 2,
+            "az": 3,
+            "gx": 4,
+            "gy": 5,
+            "gz": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-empty-batch",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 6.2 -- t_base names record 0, so a batch with no records timestamps a frame that does not exist.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 0,
+          "flags": 0
+        },
+        "records": []
+      }
+    },
+    {
+      "name": "imu-empty-batch",
+      "record": "imu_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 7 -- t_base names sample 0, so a batch with no samples timestamps one that does not exist.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "period": 1000,
+          "count": 0,
+          "flags": 3
+        },
+        "samples": []
+      }
+    },
+    {
+      "name": "monitor-declaration-repeats-a-slot",
+      "record": "monitor_list",
+      "must_refuse": true,
+      "desc": "SPEC.md 13.3 -- the decoder already rejected this, so an encoder emitting it produced a declaration its own reader refuses.",
+      "input": {
+        "declaration": {
+          "count": 2
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 0,
+            "channel": 7,
+            "max_age": 10
+          }
+        ]
+      }
+    },
+    {
+      "name": "monitor-channel-with-no-deadline",
+      "record": "monitor_list",
+      "must_refuse": true,
+      "desc": "SPEC.md 13.5 -- every declared channel carries a deadline. A channel with none is a value a device can go on displaying forever after the client stopped sending it.",
+      "input": {
+        "declaration": {
+          "count": 2
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 20
+          },
+          {
+            "slot": 1,
+            "channel": 3,
+            "max_age": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "monitor-asks-for-more-than-fits",
+      "record": "monitor_list",
+      "must_refuse": true,
+      "desc": "SPEC.md 13.4 -- more channels than fit in one complete write.",
+      "input": {
+        "declaration": {
+          "count": 16
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 1,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 2,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 3,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 4,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 5,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 6,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 7,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 8,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 9,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 10,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 11,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 12,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 13,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 14,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 15,
+            "channel": 1,
+            "max_age": 10
+          }
+        ]
+      }
+    },
+    {
+      "name": "monitor-update-with-no-values",
+      "record": "monitor_update",
+      "must_refuse": true,
+      "desc": "SPEC.md 13.4 -- an empty write is not a complete statement of what the client can supply.",
+      "input": {
+        "header": {
+          "seq": 1,
+          "count": 0,
+          "reserved": 0
+        },
+        "values": []
+      }
+    },
+    {
+      "name": "monitor-update-repeats-a-slot",
+      "record": "monitor_update",
+      "must_refuse": true,
+      "desc": "SPEC.md 13.4 -- nothing says which of the two wins.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "count": 2,
+          "reserved": 0
+        },
+        "values": [
+          {
+            "slot": 3,
+            "validity": 1,
+            "value": 1
+          },
+          {
+            "slot": 3,
+            "validity": 1,
+            "value": 2
+          }
+        ]
+      }
+    },
+    {
+      "name": "control-detail-on-a-refusal",
+      "record": "control_response",
+      "must_refuse": true,
+      "desc": "SPEC.md 9 -- detail is present if and only if status is ok.",
+      "input": {
+        "opcode": 2,
+        "tag": 1,
+        "status": 2,
+        "detail_hex": "0700"
+      }
+    },
+    {
+      "name": "time-sync-answered-before-asked",
+      "record": "time_sync",
+      "must_refuse": true,
+      "desc": "SPEC.md 9.7 -- a negative round trip halved into an offset is a confidently wrong clock.",
+      "input": {
+        "t_device_rx": 9000000,
+        "t_device_tx": 8999000
+      }
+    },
+    {
+      "name": "can-ordinary-batch",
+      "record": "can_batch",
+      "must_refuse": false,
+      "desc": "A frame at the top of the arbitration field, which is legal.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 536870911,
+            "extended": true,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00"
+          }
+        ]
+      },
+      "expect_hex": "000000000000000000000000010000000000ffffff3f0100"
+    },
+    {
+      "name": "monitor-well-formed-declaration",
+      "record": "monitor_list",
+      "must_refuse": false,
+      "desc": "Distinct slots, inside the channel cap.",
+      "input": {
+        "declaration": {
+          "count": 2
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 1,
+            "channel": 3,
+            "max_age": 255
+          }
+        ]
+      },
+      "expect_hex": "02000001000a010300ff"
+    },
+    {
+      "name": "imu-ordinary-batch",
+      "record": "imu_batch",
+      "must_refuse": false,
+      "desc": "Accel and gyro both present, a non-zero period, two samples.",
+      "input": {
+        "header": {
+          "seq": 7,
+          "dropped": 0,
+          "t_base": 1000000,
+          "period": 10000,
+          "count": 2,
+          "flags": 3
+        },
+        "samples": [
+          {
+            "ax": 1,
+            "ay": -2,
+            "az": 1000,
+            "gx": 4,
+            "gy": -5,
+            "gz": 6
+          },
+          {
+            "ax": 2,
+            "ay": -3,
+            "az": 1001,
+            "gx": 5,
+            "gy": -6,
+            "gz": 7
+          }
+        ]
+      },
+      "expect_hex": "0700000040420f000000000010270000020300000100feffe8030400fbff06000200fdffe9030500faff0700"
+    },
+    {
+      "name": "time-sync-simultaneous",
+      "record": "time_sync",
+      "must_refuse": false,
+      "desc": "SPEC.md 9.7 -- t_device_tx MUST NOT be EARLIER than t_device_rx, so equal readings are legal. A device whose clock cannot resolve the two instants apart reports them equal rather than inventing a gap.",
+      "input": {
+        "t_device_rx": 9000000,
+        "t_device_tx": 9000000
+      },
+      "expect_hex": "40548900000000004054890000000000"
+    },
+    {
+      "name": "info-can-without-control",
+      "record": "info",
+      "must_refuse": true,
+      "desc": "SPEC.md 4.1 -- `can` requires `control`. A device that publishes this has advertised a role no client can use, because CAN_SUBSCRIBE is the only way to install one.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 3,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_subscription_slots": 32,
+        "can_max_frames_per_s": 2000,
+        "max_notify_bytes": 244
+      }
+    },
+    {
+      "name": "info-capacity-without-capability",
+      "record": "info",
+      "must_refuse": true,
+      "desc": "SPEC.md 4.1 -- every CAN capacity is zero while the `can` bit is clear. Masking the capacity instead would publish a different device from the one the caller described.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 1,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_max_frames_per_s": 4000,
+        "max_notify_bytes": 185
+      }
+    },
+    {
+      "name": "reserved-bits-info-capabilities",
+      "record": "info",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- info.capabilities bits 8-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 2147483903,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "max_notify_bytes": 244
+      },
+      "expect_hex": "0100ff0000000a000a00000000000000000000000000f400"
+    },
+    {
+      "name": "reserved-bits-info-clock-flags",
+      "record": "info",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- info.clock_flags bits 2-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 1,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "max_notify_bytes": 244,
+        "clock_flags": 131
+      },
+      "expect_hex": "0100010000000a000a00000000000000000000000003f400"
+    },
+    {
+      "name": "reserved-bits-gps-fix-validity",
+      "record": "gps_fix",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- gps_fix.validity bits 12-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "fix": {
+          "seq": 1,
+          "validity": 2147487743,
+          "ext_count": 0
+        }
+      },
+      "expect_hex": "01000000ff0f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "reserved-bits-gps-fix-fix-flags",
+      "record": "gps_fix",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- gps_fix.fix_flags bits 5-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "fix": {
+          "seq": 1,
+          "validity": 0,
+          "ext_count": 0,
+          "fix_flags": 157
+        }
+      },
+      "expect_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001d00"
+    },
+    {
+      "name": "reserved-bits-can-header-flags",
+      "record": "can_batch",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- can_header.flags bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "header": {
+          "seq": 1,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "reserved": 0,
+          "flags": 129
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00"
+          }
+        ]
+      },
+      "expect_hex": "010000000000000000000000010100000000a00100000100"
+    },
+    {
+      "name": "reserved-bits-imu-header-flags",
+      "record": "imu_batch",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- imu_header.flags bits 3-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "header": {
+          "seq": 1,
+          "dropped": 0,
+          "t_base": 0,
+          "period": 1000,
+          "count": 1,
+          "reserved": 0,
+          "flags": 135
+        },
+        "samples": [
+          {
+            "ax": 1,
+            "ay": 2,
+            "az": 3,
+            "gx": 4,
+            "gy": 5,
+            "gz": 6
+          }
+        ]
+      },
+      "expect_hex": "010000000000000000000000e803000001070000010002000300040005000600"
+    },
+    {
+      "name": "reserved-bits-monitor-value-validity",
+      "record": "monitor_update",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- monitor_value.validity bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "header": {
+          "seq": 1,
+          "count": 1,
+          "reserved": 0
+        },
+        "values": [
+          {
+            "slot": 2,
+            "value": 42,
+            "validity": 129
+          }
+        ]
+      },
+      "expect_hex": "0100010002012a000000"
+    },
+    {
+      "name": "reserved-bits-link-params-validity",
+      "record": "link_params",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- link_params.validity bits 4-15 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 15 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "validity": 32783
+      },
+      "expect_hex": "0f000000000000000000000000000000"
+    },
+    {
+      "name": "control-detail-on-ok",
+      "record": "control_response",
+      "must_refuse": false,
+      "desc": "SPEC.md 9 -- detail accompanies `ok`, and only `ok`. The refusal case above is only half the rule.",
+      "input": {
+        "opcode": 2,
+        "tag": 1,
+        "status": 0,
+        "detail_hex": "0700"
+      },
+      "expect_hex": "0201000700"
+    }
+  ]
+}

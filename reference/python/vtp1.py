@@ -68,6 +68,36 @@ def decode_gps_fix(buf):
     # this decoder by design (SPEC.md §5.5) but it is not free to discard them.
     fix["ext_hex"] = buf[_size("gps_fix"):].hex()
 
+    bit_of_valid = {b["name"]: b["bit"]
+                    for b in SCHEMA["bitmasks"]["gps_validity"]["bits"]}
+    # SPEC.md §5.4 — a coordinate outside the earth is a corrupted field, and
+    # every other field in the record came from the same bytes. Rejected rather
+    # than clamped: clamping 91° to 90° puts the vehicle at the pole and lets
+    # the client draw it there. Checked only where the validity bit claims the
+    # field means something.
+    if fix["validity"] & (1 << bit_of_valid["position"]):
+        if abs(fix["lat"]) > 900_000_000:
+            raise Reject("lat-out-of-range")
+        if abs(fix["lon"]) > 1_800_000_000:
+            raise Reject("lon-out-of-range")
+    if fix["validity"] & (1 << bit_of_valid["head_mot"]):
+        if not 0 <= fix["head_mot"] < 36_000_000:
+            raise Reject("head-out-of-range")
+
+    # SPEC.md 5.3 -- a carrier-phase solution has either resolved its
+    # integer ambiguities or it has not, so both RTK bits at once is a claim about
+    # solution quality that means nothing. The natural client reading of the pair is
+    # "fixed wins", which upgrades a device's accuracy claim on the strength of a
+    # bug. And either RTK bit implies `differential`, because an RTK solution IS a
+    # differentially corrected one.
+    flag = {b["name"]: 1 << b["bit"]
+            for b in SCHEMA["bitmasks"]["fix_flags"]["bits"]}
+    rtk = fix["fix_flags"] & (flag["rtk_float"] | flag["rtk_fixed"])
+    if rtk == (flag["rtk_float"] | flag["rtk_fixed"]):
+        raise Reject("rtk-both")
+    if rtk and not fix["fix_flags"] & flag["differential"]:
+        raise Reject("rtk-without-differential")
+
     known = {m["value"] for m in SCHEMA["enums"]["fix_type"]["members"]}
     fix["fix_type_known"] = fix["fix_type"] in known
 
@@ -95,6 +125,11 @@ def decode_can_batch(buf):
     if len(buf) < hsz:
         raise Reject("length")
     hdr = _unpack("can_header", buf)
+    # SPEC.md §6.2 — t_base IS the bus-arrival time of record 0, so a batch
+    # with no record 0 carries a timestamp naming a frame that does not exist.
+    # A quiet bus is reported by sending nothing.
+    if hdr["count"] == 0:
+        raise Reject("empty-batch")
 
     rsz = _size("can_record")
     off, records = hsz, []
@@ -104,6 +139,12 @@ def decode_can_batch(buf):
         r = _unpack("can_record", buf, off)
         if off + rsz + r["len"] > len(buf):
             raise Reject("truncated-record")
+        # SPEC.md §6.1 — t_base IS record 0's arrival time, so its dt is zero by
+        # definition. A non-zero one means the sender and the receiver disagree
+        # about what t_base is, and the receiver cannot tell which reading to
+        # trust.
+        if not records and r["dt"] != 0:
+            raise Reject("first-dt-nonzero")
         raw = r["id"]
         extended = bool(raw & (1 << 29))
         fd, rtr = bool(raw & (1 << 30)), bool(raw & (1 << 31))
@@ -143,6 +184,10 @@ def decode_can_batch(buf):
     return {"header": hdr, "records": records}
 
 
+# SPEC.md §7.2 — imu_header.flags bit 2.
+IMU_SATURATED = 0x04
+
+
 def decode_imu_batch(buf):
     hsz, ssz = _size("imu_header"), _size("imu_sample")
     if len(buf) < hsz:
@@ -150,6 +195,17 @@ def decode_imu_batch(buf):
     hdr = _unpack("imu_header", buf)
     if len(buf) != hsz + hdr["count"] * ssz:
         raise Reject("length")
+    # SPEC.md §7 — zero says every sample was taken at one instant, which
+    # describes no measurement, and a client recovering a rate divides by it.
+    if hdr["period"] == 0:
+        raise Reject("period-zero")
+    # SPEC.md §7 — t_base is the acquisition time of sample 0, so a batch with
+    # no sample 0 timestamps one that does not exist. Unlike §6's CAN batch,
+    # whose count MAY be zero because its t_base describes an observed bus.
+    if hdr["count"] == 0:
+        raise Reject("empty-batch")
+    # SPEC.md §7.2 — "at least this much" is not "this much".
+    hdr["saturated"] = bool(hdr["flags"] & IMU_SATURATED)
 
     # SPEC.md §7 — a sensor group whose presence flag is clear is ABSENT, not a
     # measurement of zero. Derived from the schema's `presence` declaration, so
@@ -169,10 +225,55 @@ def decode_imu_batch(buf):
     return {"header": hdr, "samples": samples}
 
 
+# SPEC.md §4.1 — the profile matrix, read from the schema rather than restated.
+CAP_BIT = {b["name"]: b["bit"]
+           for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
+CAP_IMPLIES = {b["name"]: b.get("implies") or []
+               for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
+CAP_CAPACITY = SCHEMA["profile"]["capacity"]
+
+
+def capability_problem(info):
+    """The first way `info` breaks SPEC.md §4.1, or None.
+
+    Reserved bits take no part: §2 says to ignore them on receive, and a bit
+    from a minor version this build has never heard of is exactly what they are
+    for. Only the implications of bits this build knows are enforced.
+    """
+    caps = info["capabilities"]
+    for name, implies in CAP_IMPLIES.items():
+        if not caps & (1 << CAP_BIT[name]):
+            continue
+        for req in implies:
+            if not caps & (1 << CAP_BIT[req]):
+                return (f"capabilities: `{name}` requires `{req}`, which is "
+                        f"clear; SPEC.md §4.1")
+    for cap, fields in CAP_CAPACITY.items():
+        if caps & (1 << CAP_BIT[cap]):
+            continue
+        for field in fields:
+            # A capacity of zero means "none" (§4). A non-zero one behind a
+            # cleared capability bit is a device publishing a role it does not
+            # have, and a client sizing a buffer from it has been told
+            # something false.
+            if info.get(field):
+                return (f"capabilities: {field} is {info[field]} while `{cap}` "
+                        f"is clear; SPEC.md §4.1")
+    return None
+
+
 def decode_info(buf):
     if len(buf) != _size("info"):
         raise Reject("length")
-    return _unpack("info", buf)
+    info = _unpack("info", buf)
+    # SPEC.md §4.1 — an Info that breaks the matrix is non-conforming, exactly
+    # as a protocol_major mismatch is. Decoding it and leaving the
+    # contradiction to the caller is how a client ends up subscribing to a CAN
+    # stream on a device with no way to install a subscription.
+    problem = capability_problem(info)
+    if problem:
+        raise Reject(problem)
+    return info
 
 
 def decode_can_list(buf):
@@ -199,26 +300,53 @@ def decode_can_list(buf):
     return {"page": page, "entries": entries}
 
 
+# SPEC.md §13.4 — the most channels a device may ask for: as many values as fit
+# beside a monitor_header in one write at the §2 minimum ATT MTU, less the
+# 3-byte ATT write header. Derived so the constant cannot drift from the record
+# sizes it depends on.
+MONITOR_MAX_CHANNELS = (
+    (SCHEMA["protocol"]["min_att_mtu"] - 3 - _size("monitor_header"))
+    // _size("monitor_value"))
+
+
 def decode_monitor_list(buf):
-    """SPEC.md §13.3 — one page of the channels a device asks for."""
-    hsz, esz = _size("monitor_page"), _size("monitor_channel")
+    """SPEC.md §13.3 — every channel a device asks for, in one response."""
+    hsz, esz = _size("monitor_declaration"), _size("monitor_channel")
     if len(buf) < hsz:
         raise Reject("length")
-    page = _unpack("monitor_page", buf)
-    if len(buf) < hsz + page["count"] * esz:
+    declaration = _unpack("monitor_declaration", buf)
+    if len(buf) < hsz + declaration["count"] * esz:
         raise Reject("truncated-record")
-    if len(buf) != hsz + page["count"] * esz:
+    if len(buf) != hsz + declaration["count"] * esz:
         raise Reject("length")
 
     known = {m["value"] for m in SCHEMA["enums"]["channel"]["members"]}
     entries = []
-    for i in range(page["count"]):
+    for i in range(declaration["count"]):
         e = _unpack("monitor_channel", buf, hsz + i * esz)
         # SPEC.md §13.2 — a channel from a later minor stays unknown, and the
         # client answers the slot absent rather than substituting another.
         e["channel_known"] = e["channel"] in known
         entries.append(e)
-    return {"page": page, "entries": entries}
+
+    # SPEC.md §13.3 — a device MUST NOT repeat a slot; the slot is how a value
+    # is addressed, so two entries claiming one make every update ambiguous.
+    slots = [e["slot"] for e in entries]
+    if len(set(slots)) != len(slots):
+        raise Reject("duplicate-slot")
+    # SPEC.md §13.4 — a complete write must fit at the minimum ATT MTU, so a
+    # declaration larger than that has made its own rule unsatisfiable. `count`
+    # IS the whole declaration now that it is not paged, so it is the only
+    # number there is to check.
+    if declaration["count"] > MONITOR_MAX_CHANNELS:
+        raise Reject("too-many-channels")
+    # SPEC.md §13.5 — every declared channel carries a deadline, so a value the
+    # client stops refreshing always stops being shown. Zero used to mean "no
+    # deadline of its own", reconciled by a derived device-wide liveness bound;
+    # one rule per channel replaced both.
+    if any(e["max_age"] == 0 for e in entries):
+        raise Reject("zero-max-age")
+    return {"declaration": declaration, "entries": entries}
 
 
 def decode_monitor_update(buf):
@@ -231,6 +359,14 @@ def decode_monitor_update(buf):
         raise Reject("truncated-record")
     if len(buf) != hsz + hdr["count"] * esz:
         raise Reject("length")
+    # SPEC.md §13.4 — a write is a COMPLETE statement of what the client can
+    # supply, and one naming no slots is the one thing a complete statement
+    # cannot be: on a device that asked for channels it names none of them,
+    # leaving every previous value standing. A client with nothing to supply
+    # writes every slot with the present bit clear; a client with nothing to
+    # say does not write at all.
+    if hdr["count"] == 0:
+        raise Reject("empty-update")
 
     bit = {b["name"]: b["bit"]
            for b in SCHEMA["bitmasks"]["monitor_validity"]["bits"]}
@@ -242,6 +378,12 @@ def decode_monitor_update(buf):
         # that the channel is zero.
         v["absent"] = ([] if v["validity"] & (1 << bit["present"]) else ["value"])
         values.append(v)
+
+    # SPEC.md §13.4 — nothing says which of two values for one slot wins, so a
+    # device choosing either is choosing on every client's behalf.
+    slots = [v["slot"] for v in values]
+    if len(set(slots)) != len(slots):
+        raise Reject("duplicate-slot")
     return {"header": hdr, "values": values}
 
 
@@ -272,6 +414,27 @@ def decode_control_response(buf):
     # it. Kept verbatim so a round-trip can re-emit it.
     resp["detail_hex"] = detail.hex()
     return resp
+
+
+def decode_time_sync(buf):
+    """SPEC.md §9.7 — the detail of a TIME_SYNC response.
+
+    Two readings of one clock. `t_device_tx` before `t_device_rx` would mean
+    the device finished answering before the question arrived, so it is
+    rejected rather than reported: a client that computed a delay from it
+    would get a negative round trip and, halved into an offset, a confidently
+    wrong clock.
+    """
+    if len(buf) != _size("time_sync"):
+        raise Reject("length")
+    ts = _unpack("time_sync", buf)
+    if ts["t_device_tx"] < ts["t_device_rx"]:
+        raise Reject("tx-before-rx")
+    # Reported so a client need not recompute it, and so the corpus can check
+    # it: the device's own processing time is the term §9.7 takes out of the
+    # round trip.
+    ts["processing_us"] = ts["t_device_tx"] - ts["t_device_rx"]
+    return ts
 
 
 def decode_link_params(buf):
@@ -309,6 +472,7 @@ DECODERS = {
     "monitor_list": decode_monitor_list,
     "monitor_update": decode_monitor_update,
     "control_response": decode_control_response,
+    "time_sync": decode_time_sync,
 }
 
 

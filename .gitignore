@@ -1,5 +1,20 @@
+# Built binaries. `make -C reference/c` produces the first two; `make san`
+# produces the sanitised copies and the C-API contract test.
 reference/c/vtp1_cli
+reference/c/vtp1_producer
+reference/c/encode_selftest
+reference/c/vtp1_cli_san
+reference/c/vtp1_producer_san
+# ...and the debug bundles the macOS linker leaves beside them. Machine- and
+# toolchain-specific, so a committed one is diff noise on every rebuild for
+# whoever shares the platform and dead weight for everyone else.
+*.dSYM/
 *.o
 __pycache__/
 .DS_Store
 VTPPeripheral.app/
+# The harness is a Python package, so building or running it from a clone
+# leaves the usual debris.
+.venv/
+dist/
+*.egg-info/

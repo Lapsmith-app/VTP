@@ -1,0 +1,53 @@
+# Packaging for the conformance harness ONLY.
+#
+# The specification's own tooling -- tools/generate.py, conformance/run.py and
+# the checks CI runs -- is not packaged and never should be: it operates on this
+# repository and has nothing to install. requirements.txt covers it.
+#
+# The harness is different. It is the one thing here meant to run on a machine
+# that is not this repository, on an operating system this repository was not
+# developed on, in front of somebody debugging their own firmware. It therefore
+# has to be installable, and the schema and the reference decoder have to travel
+# with it -- see the force-include block, which reproduces their repository
+# layout inside the wheel so the decoder finds its schema by the same relative
+# path either way.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vtp1-harness"
+version = "0.1.0"
+description = "Conformance harness for VTP/1 devices: connects over Bluetooth LE and exercises the specification against real firmware."
+readme = "harness/README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+  # The cross-platform BLE central. WinRT on Windows, CoreBluetooth on macOS,
+  # BlueZ on Linux, one API over all three.
+  "bleak>=0.22",
+  # Only because the reference decoder reads schema/vtp1.yaml at run time.
+  "PyYAML>=6",
+]
+
+[project.scripts]
+vtp1-harness = "vtp1_harness.__main__:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["harness/vtp1_harness"]
+
+# The decoder computes its schema path as parents[2] of its own file, so giving
+# it the same relative shape inside the wheel means it needs no change to work
+# installed. Copying the files into the package source instead would put a
+# second copy of the schema in the repository, which is the exact drift
+# tools/generate.py --check exists to prevent.
+[tool.hatch.build.targets.wheel.force-include]
+"schema/vtp1.yaml" = "vtp1_harness/_ref/schema/vtp1.yaml"
+"schema/vtp1.json" = "vtp1_harness/_ref/schema/vtp1.json"
+"schema/uuids.json" = "vtp1_harness/_ref/schema/uuids.json"
+"reference/python/vtp1.py" = "vtp1_harness/_ref/reference/python/vtp1.py"
+"reference/python/vtp1_encode.py" = "vtp1_harness/_ref/reference/python/vtp1_encode.py"
+# The software peripheral travels too, so --loopback works from an install and
+# not only from a clone: it is how somebody sees what a passing report looks
+# like before pointing the harness at hardware they are still debugging.
+"reference/peripheral/vtp_device.py" = "vtp1_harness/_ref/reference/peripheral/vtp_device.py"

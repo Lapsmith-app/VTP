@@ -172,7 +172,7 @@
     },
     {
       "name": "reserved-validity-bit-set",
-      "desc": "A future minor set link_validity bit 9. A decoder MUST ignore the unknown bit and decode every known field normally.",
+      "desc": "A future minor set link_validity bit 9. A decoder MUST ignore the unknown bit and decode every known field normally, and a VTP/1.0 encoder MUST normalise the bit away on transmit (SPEC.md 2).",
       "record": "link_params",
       "hex": "0f02f700fb00fb000c000000f4010202",
       "expect": {
@@ -188,7 +188,9 @@
         "phy_tx_known": true,
         "phy_rx_known": true
       },
-      "expect_absent": []
+      "expect_absent": [],
+      "canonical": false,
+      "expect_roundtrip_hex": "0f00f700fb00fb000c000000f4010202"
     },
     {
       "name": "short-payload",

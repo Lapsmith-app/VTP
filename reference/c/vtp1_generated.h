@@ -25,7 +25,7 @@
 #define VTP_INFO_OFF_CAN_MAX_FRAMES_PER_S 12
 #define VTP_INFO_OFF_IMU_RATE_HZ 16
 #define VTP_INFO_OFF_IMU_MAX_RATE_HZ 18
-#define VTP_INFO_OFF_CAN_MAX_PAYLOAD 20
+#define VTP_INFO_OFF_RESERVED_20 20
 #define VTP_INFO_OFF_CLOCK_FLAGS 21
 #define VTP_INFO_OFF_MAX_NOTIFY_BYTES 22
 
@@ -87,18 +87,16 @@
 #define VTP_IMU_SAMPLE_OFF_GY 8
 #define VTP_IMU_SAMPLE_OFF_GZ 10
 
-/* One page of the channels a device asks for. Followed by `count` monitor_channel entries. */
-#define VTP_MONITOR_PAGE_SIZE 6
-#define VTP_MONITOR_PAGE_OFF_TOTAL 0
-#define VTP_MONITOR_PAGE_OFF_INDEX 2
-#define VTP_MONITOR_PAGE_OFF_COUNT 4
-#define VTP_MONITOR_PAGE_OFF_RESERVED 5
+/* Every channel this device asks the client to supply. Followed by `count` monitor_channel entries. */
+#define VTP_MONITOR_DECLARATION_SIZE 2
+#define VTP_MONITOR_DECLARATION_OFF_COUNT 0
+#define VTP_MONITOR_DECLARATION_OFF_RESERVED 1
 
 /* One channel a device asks the client to supply. */
 #define VTP_MONITOR_CHANNEL_SIZE 4
 #define VTP_MONITOR_CHANNEL_OFF_SLOT 0
 #define VTP_MONITOR_CHANNEL_OFF_CHANNEL 1
-#define VTP_MONITOR_CHANNEL_OFF_RESERVED 3
+#define VTP_MONITOR_CHANNEL_OFF_MAX_AGE 3
 
 /* Batch header for a client-to-device value update. Followed by `count` monitor_value entries. */
 #define VTP_MONITOR_HEADER_SIZE 4
@@ -132,6 +130,11 @@
 #define VTP_CONTROL_RESPONSE_OFF_OPCODE 0
 #define VTP_CONTROL_RESPONSE_OFF_TAG 1
 #define VTP_CONTROL_RESPONSE_OFF_STATUS 2
+
+/* The detail of a TIME_SYNC response. Two readings of one clock, so a client can bound its own error. */
+#define VTP_TIME_SYNC_SIZE 16
+#define VTP_TIME_SYNC_OFF_T_DEVICE_RX 0
+#define VTP_TIME_SYNC_OFF_T_DEVICE_TX 8
 
 /* The device's view of the negotiated link. Reported, never negotiated here. */
 #define VTP_LINK_PARAMS_SIZE 16
@@ -202,11 +205,16 @@ typedef enum {
 #define VTP_GPS_VALIDITY_S_ACC (1u << 9)
 #define VTP_GPS_VALIDITY_P_DOP (1u << 10)
 #define VTP_GPS_VALIDITY_NUM_SV (1u << 11)
+#define VTP_GPS_VALIDITY_RESERVED 0xFFFFF000u
+#define VTP_GPS_VALIDITY_KNOWN (~(uint32_t)VTP_GPS_VALIDITY_RESERVED)
 
 #define VTP_FIX_FLAGS_DIFFERENTIAL (1u << 0)
 #define VTP_FIX_FLAGS_RTK_FLOAT (1u << 1)
 #define VTP_FIX_FLAGS_RTK_FIXED (1u << 2)
 #define VTP_FIX_FLAGS_CLOCK_DISCIPLINED (1u << 3)
+#define VTP_FIX_FLAGS_SOLUTION_EPOCH (1u << 4)
+#define VTP_FIX_FLAGS_RESERVED 0xE0u
+#define VTP_FIX_FLAGS_KNOWN (~(uint32_t)VTP_FIX_FLAGS_RESERVED)
 
 #define VTP_CAPABILITIES_GPS (1u << 0)
 #define VTP_CAPABILITIES_CAN (1u << 1)
@@ -216,12 +224,60 @@ typedef enum {
 #define VTP_CAPABILITIES_CAN_FD (1u << 5)
 #define VTP_CAPABILITIES_MASKED_SUBSCRIPTIONS (1u << 6)
 #define VTP_CAPABILITIES_ON_CHANGE_SUBSCRIPTIONS (1u << 7)
+#define VTP_CAPABILITIES_RESERVED 0xFFFFFF00u
+#define VTP_CAPABILITIES_KNOWN (~(uint32_t)VTP_CAPABILITIES_RESERVED)
+
+#define VTP_CAN_FLAGS_SHEDDING (1u << 0)
+#define VTP_CAN_FLAGS_RESERVED 0xFEu
+#define VTP_CAN_FLAGS_KNOWN (~(uint32_t)VTP_CAN_FLAGS_RESERVED)
+
+#define VTP_IMU_FLAGS_ACCEL (1u << 0)
+#define VTP_IMU_FLAGS_GYRO (1u << 1)
+#define VTP_IMU_FLAGS_SATURATED (1u << 2)
+#define VTP_IMU_FLAGS_RESERVED 0xF8u
+#define VTP_IMU_FLAGS_KNOWN (~(uint32_t)VTP_IMU_FLAGS_RESERVED)
+
+#define VTP_CLOCK_FLAGS_GNSS_DISCIPLINED (1u << 0)
+#define VTP_CLOCK_FLAGS_SURVIVES_RECONNECT (1u << 1)
+#define VTP_CLOCK_FLAGS_RESERVED 0xFCu
+#define VTP_CLOCK_FLAGS_KNOWN (~(uint32_t)VTP_CLOCK_FLAGS_RESERVED)
 
 #define VTP_MONITOR_VALIDITY_PRESENT (1u << 0)
+#define VTP_MONITOR_VALIDITY_RESERVED 0xFEu
+#define VTP_MONITOR_VALIDITY_KNOWN (~(uint32_t)VTP_MONITOR_VALIDITY_RESERVED)
 
 #define VTP_LINK_VALIDITY_ATT_MTU (1u << 0)
 #define VTP_LINK_VALIDITY_LL_DATA_LENGTH (1u << 1)
 #define VTP_LINK_VALIDITY_CONN_PARAMS (1u << 2)
 #define VTP_LINK_VALIDITY_PHY (1u << 3)
+#define VTP_LINK_VALIDITY_RESERVED 0xFFF0u
+#define VTP_LINK_VALIDITY_KNOWN (~(uint32_t)VTP_LINK_VALIDITY_RESERVED)
+
+/* SPEC.md 4.1 -- a capability bit and every bit it requires. */
+typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rule_t;
+#define VTP_CAPABILITY_RULES { \
+    { (1u << 0), 0x00000000u, "gps" }, \
+    { (1u << 1), 0x00000010u, "can" }, \
+    { (1u << 2), 0x00000000u, "imu" }, \
+    { (1u << 3), 0x00000010u, "monitor" }, \
+    { (1u << 4), 0x00000000u, "control" }, \
+    { (1u << 5), 0x00000002u, "can_fd" }, \
+    { (1u << 6), 0x00000002u, "masked_subscriptions" }, \
+    { (1u << 7), 0x00000002u, "on_change_subscriptions" }, \
+}
+#define VTP_CAPABILITY_RULE_COUNT 8
+
+/* SPEC.md 4.1 -- info fields that MUST be zero when their
+ * capability bit is clear. Offset and size, so one loop covers all. */
+typedef struct { uint32_t bit; uint8_t offset, size; const char *field; } vtp_capacity_rule_t;
+#define VTP_CAPACITY_RULES { \
+    { (1u << 0), 6, 2, "gps_rate_hz" }, \
+    { (1u << 0), 8, 2, "gps_max_rate_hz" }, \
+    { (1u << 1), 10, 2, "can_subscription_slots" }, \
+    { (1u << 1), 12, 4, "can_max_frames_per_s" }, \
+    { (1u << 2), 16, 2, "imu_rate_hz" }, \
+    { (1u << 2), 18, 2, "imu_max_rate_hz" }, \
+}
+#define VTP_CAPACITY_RULE_COUNT 6
 
 #endif /* VTP1_GENERATED_H */

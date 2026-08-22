@@ -99,24 +99,81 @@ CHAR_NAMES = {}
 
 
 class ConnectionTracker:
-    """Edge detection over a connection flag.
+    """Edge detection over "a central is being served".
 
     Separated out and kept pure because the two things that hang off an edge
-    are not cosmetic: a rising edge is where SPEC.md §8.2 restarts sequence
-    numbers and §9.2 clears the subscription table, and a device that never
+    are not cosmetic: a rising edge is where SPEC.md 8.2 restarts sequence
+    numbers and 9.2 clears the subscription table, and a device that never
     sees an edge never does either. This peripheral did not, for its whole
     life, because the transport never told it.
+
+    WHAT THIS EDGE ACTUALLY IS, which is not what it looks like
+    ----------------------------------------------------------
+    It is NOT a physical connect or disconnect. A CoreBluetooth peripheral is
+    never told about either one: the delegate has exactly two central-facing
+    callbacks, `didSubscribeToCharacteristic` and
+    `didUnsubscribeFromCharacteristic`, and no connect/disconnect pair at all.
+    bless 0.3.0's `is_connected()` therefore reports
+    `len(_central_subscriptions) > 0` -- "at least one central is subscribed to
+    at least one characteristic". That is the only link-ish signal the platform
+    offers a peripheral, and this file used to call it a connection without
+    saying so.
+
+    The difference is visible: a client that unsubscribes from every
+    characteristic while staying connected looks exactly like a disconnect, and
+    resubscribing looks exactly like a new connection.
+
+    WHY THE EDGE IS STILL TAKEN, AMBIGUITY AND ALL
+    ---------------------------------------------
+    Because the two possible mistakes are not symmetric.
+
+      * Resetting on a resubscribe that was not a reconnection costs the
+        client its CAN subscription table and restarts `seq`. A client must
+        already tolerate both -- they are what every real reconnection does --
+        and it can see the restart in the very next notification.
+
+      * NOT resetting on a reconnection that was not a resubscribe hands the
+        next connection the previous one's sequence numbers and subscription
+        table. SPEC.md 8.2 exists so a client never has to tell a reconnection
+        from a wrap, and 9.2 exists so it never inherits state it did not
+        install. A client cannot detect either failure.
+
+    The second is unrecoverable and silent, so where the signal is ambiguous
+    this errs towards resetting. `central` is tracked alongside so the log can
+    say which of the two it probably was -- a same-identity rising edge is
+    most likely a resubscribe, a different identity is certainly a new central
+    -- but both reset, because "probably" is not something to bet a client's
+    subscription table on.
+
+    A backend that does expose a real link edge (the fake transport in
+    gattsim.py can be told to, and a BlueZ peripheral has one) feeds it in here
+    unchanged and gets exactly the semantics the names suggest.
     """
 
     def __init__(self):
         self.connected = False
+        self.central = None
 
-    def update(self, is_connected):
-        """Return 'connected', 'disconnected', or None when nothing changed."""
+    def update(self, is_connected, central=None):
+        """Return 'connected', 'disconnected', or None when nothing changed.
+
+        `central` is the identity of the central being served, when the backend
+        exposes one. It never suppresses an edge; it is carried so the caller
+        can describe what it saw.
+        """
         if is_connected == self.connected:
+            # A different central without the flag ever dropping: on a backend
+            # that reports subscriptions, one central replacing another between
+            # two polls. Definitely a new connection.
+            if is_connected and central is not None and central != self.central:
+                self.central = central
+                return "connected"
             return None
         self.connected = is_connected
-        return "connected" if is_connected else "disconnected"
+        if is_connected:
+            self.central = central
+            return "connected"
+        return "disconnected"
 
 
 def _describe_request(value):
@@ -145,10 +202,16 @@ def _describe_request(value):
     return f"{name} tag={tag}{detail} params={params.hex() or '-'}"
 
 
-# SPEC.md §9 — a device MUST accept at least four outstanding requests. One
-# slot beyond that exists only to carry the `busy` refusal itself: a device
-# with nothing left to answer with cannot tell a client it is out of room.
-CONTROL_QUEUE_DEPTH = 4
+# SPEC.md §9 — a client has at most ONE request outstanding: it writes, waits
+# for the indication, and only then writes again.
+#
+# One slot beyond that still exists, and it is not slack. It carries the `busy`
+# refusal itself: a client that pipelines anyway must be told so, and a device
+# whose only slot is occupied by the response it already owes has nothing left
+# to say that with. §9.6 forbids both alternatives — silence, and applying a
+# request it cannot answer.
+CONTROL_OUTSTANDING = 1
+CONTROL_QUEUE_DEPTH = CONTROL_OUTSTANDING
 
 
 class ControlQueue:
@@ -165,34 +228,34 @@ class ControlQueue:
 
     def __init__(self, depth=CONTROL_QUEUE_DEPTH):
         self.depth = depth
-        # (tag, response) pairs awaiting delivery. Outstanding tags are read
-        # off this rather than tracked alongside it: two structures that must
-        # agree are two structures that can disagree.
+        # Responses awaiting delivery. The tag rides along for the log only:
+        # admission does not consult it, because with one request outstanding
+        # it cannot tell anything the depth has not already told us.
         self._out = collections.deque()
         self.dropped = 0
 
     def __len__(self):
         return len(self._out)
 
-    def outstanding(self, tag):
-        return any(t == tag for t, _ in self._out)
-
     def admit(self, tag):
-        """`apply`, `duplicate-tag`, `busy` or `full`.
+        """`apply`, `busy` or `full`.
 
-        Only `apply` permits the request to take effect. `duplicate-tag` and
-        `busy` are answered but not applied; `full` cannot even be answered.
+        Only `apply` permits the request to take effect. `busy` is answered but
+        not applied; `full` cannot even be answered.
+
+        There used to be a `duplicate-tag` verdict here, refusing a request
+        bearing a tag already outstanding. One-outstanding removed the state it
+        was detecting rather than the check: a second request written before
+        the first is answered is refused whatever tag it carries, and a request
+        written after cannot collide with anything. So tag ambiguity is not
+        prevented by this class any more, it is structurally impossible -- and
+        a device needs no tag table at all.
         """
-        if self.outstanding(tag):
-            return "duplicate-tag"
-        if len(self._out) < self.depth:
-            return "apply"
+        if len(self._out) > self.depth:
+            return "full"
         if len(self._out) == self.depth:
             return "busy"
-        # The client was told `busy` and wrote again anyway. There is no room
-        # left to refuse it with, so the request is discarded unapplied --
-        # which is the correct half of §9.6 when the other half is impossible.
-        return "full"
+        return "apply"
 
     def hold(self, tag, response):
         self._out.append((tag, response))
@@ -291,6 +354,10 @@ class Peripheral:
         self.server = None
         self.screen = screen
         self._link = ConnectionTracker()
+        # The identity served by the PREVIOUS link, kept past the reset so the
+        # log can say whether a rising edge was a new central or the same one
+        # resubscribing.
+        self._last_central = None
         # Everything the debug panel shows. Kept here rather than in the device
         # because it is transport truth, not device truth: how many
         # notifications the stack accepted is not something the device knows.
@@ -336,6 +403,7 @@ class Peripheral:
     def read_request(self, characteristic, **kwargs):
         """Info is regenerated per read: SPEC.md §4 forbids a client caching it
         across connections precisely because it can change."""
+        self._observe_link_up()
         name = CHAR_NAMES.get(characteristic.uuid.lower(), characteristic.uuid)
         log.info("READ  %s", name)
         if characteristic.uuid.lower() == CHAR["info"].lower():
@@ -343,6 +411,11 @@ class Peripheral:
         return characteristic.value or b""
 
     def write_request(self, characteristic, value, **kwargs):
+        # BEFORE anything is applied. This write is itself proof the link is
+        # up, and taking the connection edge here is what stops the pump
+        # noticing the connection a moment later and clearing away a request it
+        # has already applied.
+        self._observe_link_up()
         uuid = characteristic.uuid.lower()
         if uuid == CHAR["monitor_values"].lower():
             # SPEC.md §13.4 — the one direction that runs client-to-device.
@@ -368,6 +441,10 @@ class Peripheral:
             return
         if uuid != CHAR["control"].lower():
             return
+        # SPEC.md §9.7 — the arrival instant, read here because this callback
+        # is the closest this process gets to the write landing. Everything
+        # below happens after it.
+        t_rx = self.device.now_us()
         request = bytes(value)
         if len(request) < 2:
             # Too short to carry a tag, so there is nothing to correlate a
@@ -400,16 +477,13 @@ class Peripheral:
                         _describe_request(request), len(self._control))
             self._control.dropped += 1
             return
-        if verdict == "duplicate-tag":
-            # SPEC.md §9 — the tag is the only means of correlation, so a
-            # second request bearing an outstanding one is refused rather than
-            # applied. The refusal necessarily echoes the same tag; that
-            # ambiguity is the client's own doing and this is what tells it so.
-            response = bytes([opcode, tag, 2])          # bad_params
-        elif verdict == "busy":
+        if verdict == "busy":
+            # SPEC.md §9 — a client has one request outstanding. This one wrote
+            # again before its answer arrived, so it is told to wait rather
+            # than having a request applied that cannot be answered (§9.6).
             response = bytes([opcode, tag, 5])          # busy
         else:
-            response = self.device.handle_control(request)
+            response = self.device.handle_control(request, t_rx=t_rx)
             if response is None:
                 return
 
@@ -425,6 +499,21 @@ class Peripheral:
         self.control_log.append(
             (time.strftime("%H:%M:%S"),
              _describe_request(request).split(" params=")[0], status))
+
+    def _central_identity(self):
+        """Which central bless believes it is serving, or None.
+
+        The keys of `_central_subscriptions` are central UUID strings. Note
+        that CoreBluetooth keeps a CBCentral's identifier STABLE across
+        connections to the same peer, so an unchanged identity does not mean
+        the link never dropped -- it is a hint for the log, never a reason to
+        skip a reset. See ConnectionTracker.
+        """
+        try:
+            subs = self.server.peripheral_manager_delegate._central_subscriptions
+        except AttributeError:
+            return None
+        return sorted(subs)[0] if subs else None
 
     def _subscribed(self):
         """Characteristic names a central has enabled notifications on.
@@ -527,11 +616,104 @@ class Peripheral:
                         "requires; this link does not meet the specification",
                         att_mtu, dev.MIN_ATT_MTU)
 
+    # -- link edges -------------------------------------------------------
+    #
+    # SPEC.md 8.2 and 9.2 hang off these two, and the pump used to be the only
+    # thing that could see them: it polled `is_connected()` once a tick and ran
+    # the edge from what it found.
+    #
+    # A GATT callback is not polled. It arrives when the central's write
+    # arrives, which on every real stack can be BEFORE the next poll -- so a
+    # perfectly ordinary first request (the client connects, enables
+    # indications, writes CAN_SUBSCRIBE) was admitted, applied and queued, and
+    # then the pump noticed the connection it had already been serving and
+    # cleared the queue and the device state out from under it. The client's
+    # first request had taken effect and was never answered.
+    #
+    # The edge is therefore taken from whichever comes first: a GATT callback,
+    # which is proof the link exists, or the poll. `ConnectionTracker` makes
+    # that idempotent -- whichever loses the race sees no edge at all.
+
+    def _observe_link_up(self):
+        """A GATT callback is itself evidence that a central is being served."""
+        if self._link.update(True, self._central_identity()) == "connected":
+            self._on_connected()
+
+    def _on_connected(self):
+        # A connection starts from a known state. Without this the device
+        # carries the previous client's subscriptions and sequence numbers into
+        # the next connection, which 9.2 forbids.
+        same = (self._last_central is not None
+                and self._last_central == self._link.central)
+        self._last_central = self._link.central
+        self.device.on_connect()
+        # The device zeroes its accepted-update count in on_connect(), so this
+        # one has to be zeroed alongside it. The two are printed side by side
+        # in the status line, and a lifetime counter next to a per-connection
+        # one reads as a comparison when it is not: the previous client's
+        # malformed writes would be reported against the client that has just
+        # arrived. Not in _reset_transport_state() -- that runs on both edges,
+        # and clearing on disconnect would drop the count before the final
+        # status line could report it.
+        self._monitor_rejected = 0
+        self._reset_transport_state()
+        log.info("CLIENT CONNECTED — sequence numbers restarted, "
+                 "subscription table cleared")
+        if same:
+            # Worth saying out loud, because it is the one case where this
+            # peripheral resets state on a link that may never have dropped.
+            log.info("  (the same central identity as before: on this backend "
+                     "a reconnection and a resubscribe are indistinguishable, "
+                     "and SPEC.md 9.2 is the safe way to be wrong — see "
+                     "ConnectionTracker)")
+
+    def _on_disconnected(self):
+        # 9.2 clears the table when the LINK DROPS, not when the next one
+        # starts. Clearing only on connect left a disconnected device reporting
+        # three installed ids with nobody subscribed, which reads as a client
+        # fault.
+        self.device.on_disconnect()
+        undelivered = self._reset_transport_state()
+        if undelivered:
+            log.warning("%d control response(s) undelivered when the link "
+                        "dropped", undelivered)
+        log.info("CLIENT DISCONNECTED — subscription table cleared")
+        log.info("  (strictly: no central is subscribed to anything. This "
+                 "backend cannot tell that from a dropped link, so a client "
+                 "that unsubscribes from everything and stays connected "
+                 "reaches here too)")
+
+    def _reset_transport_state(self):
+        """Everything this transport holds on behalf of ONE link.
+
+        Both edges call it. A connect that cleared only the device's state left
+        payloads queued for the previous central sitting in `_pending`, and
+        `_observed_mtu` describing a link that had gone; a disconnect that
+        cleared only the control queue left the same payloads to be delivered
+        to whoever connected next. Returning the count lets the disconnect path
+        report what was owed and never arrived.
+        """
+        undelivered = self._control.discard_all()
+        self._pending.clear()
+        self._observed_mtu = None
+        self._ready = True
+        self._blocked_since = None
+        return undelivered
+
     def _deliver(self, characteristic, payload, sent, refused):
-        """One attempt. Returns True when the stack took it."""
+        """One attempt. Returns True when the stack took it.
+
+        SPEC.md §8.2 — the sequence number is written here and committed only
+        if the stack accepts the notification, because seq counts notifications
+        *sent*. A refusal therefore consumes nothing and the same number goes
+        out on the next attempt, which is what makes the count a count of
+        deliveries rather than of encodings.
+        """
         uuid = self._notify[characteristic]
-        self.server.get_characteristic(uuid).value = payload
+        stamped = self.device.stamp_seq(characteristic, payload)
+        self.server.get_characteristic(uuid).value = stamped
         if self.server.update_value(SERVICE, uuid):
+            self.device.commit_seq(characteristic)
             sent[characteristic] += 1
             return True
         self._ready = False
@@ -639,7 +821,15 @@ class Peripheral:
         log.info("Service Data (SPEC.md 3.3) is not advertised: the host "
                  "peripheral API does not expose it on every platform")
 
-    async def run(self, poll_hz=200, screen_hz=10):
+    async def run(self, poll_hz=200, screen_hz=10, max_ticks=None):
+        """The pump. `max_ticks` bounds it so the loop can be driven by a test.
+
+        Nothing else about the loop changes under test: transport_selftest.py
+        runs THIS function against a fake GATT link rather than a
+        reimplementation of it, because a second copy of a state machine is a
+        second state machine and the bugs it was written to catch all lived in
+        the ordering of this one.
+        """
         interval = 1.0 / poll_hz
         ticks = 0
         every = max(1, poll_hz // screen_hz)
@@ -650,6 +840,22 @@ class Peripheral:
         next_rate = time.monotonic() + 1.0
         last_counts = dict(sent)
         while True:
+            # SPEC.md §8.2, §9.2 — the connection edge is handled BEFORE
+            # anything is sent this tick. It used to run after the control
+            # drain and the telemetry pump, so a notification built for the
+            # previous central could be handed to a new one in the same tick
+            # that reset the device: data from a link that no longer exists,
+            # delivered under sequence numbers about to restart.
+            # A GATT callback may already have taken the rising edge; the
+            # tracker makes that idempotent, so this handles whichever the pump
+            # is first to see, and nothing twice.
+            event = self._link.update(await self.server.is_connected(),
+                                      self._central_identity())
+            if event == "connected":
+                self._on_connected()
+            elif event == "disconnected":
+                self._on_disconnected()
+
             subscribed = self._subscribed()
 
             # Control responses first, and retried until they land. They are
@@ -713,43 +919,6 @@ class Peripheral:
                     self.rate[name] = (sent[name] - last_counts[name]) / span
                 last_counts = dict(sent)
                 next_rate = now_wall + span
-
-            # Every tick, not once per screen refresh. This had been inside
-            # the `ticks % every` block, so the link edge was detected at the
-            # DISPLAY rate -- 10 Hz, up to 100 ms late, and tied to a setting
-            # that has nothing to do with it. In that window the device went on
-            # numbering notifications from the previous connection and then
-            # reset, so a client saw seq run 1500, 1501, 0: not a gap, which
-            # §8.2 defines, but a jump backwards, which it does not.
-            event = self._link.update(await self.server.is_connected())
-            if event == "connected":
-                # SPEC.md §8.2 and §9.2: a connection starts from a known
-                # state. Without this the device carries the previous client's
-                # subscriptions and sequence numbers into the next connection,
-                # which is exactly what §9.2 forbids.
-                self.device.on_connect()
-                # The device zeroes its accepted-update count here, so this
-                # one has to be zeroed alongside it. The two are printed side
-                # by side in the status line, and a lifetime counter next to a
-                # per-connection one reads as a comparison when it is not: the
-                # previous client's malformed writes would be reported against
-                # the client that has just arrived.
-                self._monitor_rejected = 0
-                log.info("CLIENT CONNECTED — sequence numbers restarted, "
-                         "subscription table cleared")
-            elif event == "disconnected":
-                # SPEC.md §9.2 clears the table when the LINK DROPS, not when
-                # the next one starts. Clearing only on connect left a
-                # disconnected device reporting three installed ids with
-                # nobody subscribed, which reads as a client fault.
-                self.device.on_disconnect()
-                self._observed_mtu = None
-                # The client is gone; nothing is owed to it any more.
-                undelivered = self._control.discard_all()
-                if undelivered:
-                    log.warning("%d control response(s) undelivered when the "
-                                "link dropped", undelivered)
-                log.info("CLIENT DISCONNECTED — subscription table cleared")
 
             now = self.device.now_us() / 1e6
             if now >= next_report:
@@ -846,6 +1015,8 @@ class Peripheral:
                 if not alive:
                     log.info("display closed; stopping")
                     return
+            if max_ticks is not None and ticks >= max_ticks:
+                return
             await asyncio.sleep(interval)
 
     def telemetry(self, subscribed):

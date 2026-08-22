@@ -68,6 +68,40 @@ int vtp_decode_gps_fix(const uint8_t *b, size_t len,
 
     o->ext_offset = VTP_GPS_FIX_SIZE;
     o->ext_bytes  = off - VTP_GPS_FIX_SIZE;
+
+    /* SPEC.md §5.4 -- a coordinate outside the earth is a corrupted field, and
+     * every other field came from the same bytes. Rejected, not clamped:
+     * clamping 91 degrees to 90 puts the vehicle at the pole and lets the
+     * client draw it there. Checked only where a validity bit claims the field
+     * means something. */
+    if (o->validity & VTP_GPS_VALIDITY_POSITION) {
+        if (o->lat > 900000000 || o->lat < -900000000) {
+            *err = "lat-out-of-range"; return -1;
+        }
+        if (o->lon > 1800000000 || o->lon < -1800000000) {
+            *err = "lon-out-of-range"; return -1;
+        }
+    }
+    if ((o->validity & VTP_GPS_VALIDITY_HEAD_MOT)
+        && (o->head_mot < 0 || o->head_mot >= 36000000)) {
+        *err = "head-out-of-range"; return -1;
+    }
+    /* SPEC.md 5.3 -- a carrier-phase solution has either resolved its
+     * integer ambiguities or it has not, so both RTK bits at once is a claim about
+     * solution quality that means nothing. The natural client reading of the pair is
+     * "fixed wins", which upgrades a device's accuracy claim on the strength of a
+     * bug. And either RTK bit implies `differential`, because an RTK solution IS a
+     * differentially corrected one. */
+    {
+        const uint8_t rtk = o->fix_flags
+            & (VTP_FIX_FLAGS_RTK_FLOAT | VTP_FIX_FLAGS_RTK_FIXED);
+        if (rtk == (VTP_FIX_FLAGS_RTK_FLOAT | VTP_FIX_FLAGS_RTK_FIXED)) {
+            *err = "rtk-both"; return -1;
+        }
+        if (rtk && !(o->fix_flags & VTP_FIX_FLAGS_DIFFERENTIAL)) {
+            *err = "rtk-without-differential"; return -1;
+        }
+    }
     return 0;
 }
 
@@ -96,12 +130,23 @@ int vtp_can_batch_begin(const uint8_t *b, size_t len,
      * reserved content to be ignored, not rejected. A later minor may assign
      * it, and this build must keep working when it does. */
 
+    /* SPEC.md §6.2 -- t_base IS the bus-arrival time of record 0, so a batch
+     * with no record 0 carries a timestamp naming a frame that does not
+     * exist. A quiet bus is reported by sending nothing. */
+    if (h->count == 0) { *err = "empty-batch"; return -1; }
+
     /* Walk the whole batch before yielding anything, so a truncated trailing
      * record rejects the notification instead of half-decoding it. */
     size_t off = VTP_CAN_HEADER_SIZE;
     for (uint8_t i = 0; i < h->count; i++) {
         if (off + VTP_CAN_RECORD_SIZE > len) { *err = "truncated-record"; return -1; }
         size_t plen = b[off + VTP_CAN_RECORD_OFF_LEN];
+        /* SPEC.md §6.1 -- t_base IS record 0's arrival time, so its dt is zero
+         * by definition. A non-zero one means the sender and the receiver
+         * disagree about what t_base is. */
+        if (i == 0 && rd16(b + off + VTP_CAN_RECORD_OFF_DT) != 0) {
+            *err = "first-dt-nonzero"; return -1;
+        }
         {
             /* SPEC.md §6.4 — frames that cannot exist are rejected, not
              * repaired. Truncating an over-long standard identifier would
@@ -176,6 +221,16 @@ int vtp_decode_imu_batch(const uint8_t *b, size_t len,
         *err = "length";
         return -1;
     }
+    /* SPEC.md §7 -- zero says every sample in the batch was taken at the same
+     * instant, which describes no measurement, and a client recovering a rate
+     * from it divides by zero. */
+    if (h->period == 0) { *err = "period-zero"; return -1; }
+    /* SPEC.md §7 -- t_base IS the acquisition time of sample 0, so a batch
+     * with no sample 0 carries a timestamp naming a sample that does not
+     * exist. A device with nothing to report sends nothing. §6's CAN batch
+     * differs deliberately: a CAN t_base describes a bus that was observed
+     * and found quiet, not a sample. */
+    if (h->count == 0) { *err = "empty-batch"; return -1; }
     return 0;
 }
 
@@ -192,9 +247,59 @@ void vtp_imu_sample_at(const uint8_t *b, const vtp_imu_header_t *h,
     o->t_device = h->t_base + (uint64_t)i * h->period;
 }
 
+/* SPEC.md §4.1 -- the capability matrix, checked against the bytes rather than
+ * against the decoded struct so a caller cannot skip it. Both tables are
+ * generated from schema/vtp1.yaml, so this and the specification cannot
+ * disagree about what a bit requires.
+ *
+ * Reserved bits take no part: §2 says to ignore them on receive, and a minor
+ * version this build has never heard of is exactly what they are for. Only the
+ * implications of bits this build knows are enforced. */
+int vtp_capabilities_coherent(uint32_t capabilities,
+                              const uint8_t *info, size_t len,
+                              const char **why) {
+    static const vtp_capability_rule_t rules[] = VTP_CAPABILITY_RULES;
+    static const vtp_capacity_rule_t capacities[] = VTP_CAPACITY_RULES;
+
+    for (size_t i = 0; i < VTP_CAPABILITY_RULE_COUNT; i++) {
+        if (!(capabilities & rules[i].bit)) continue;
+        if ((capabilities & rules[i].requires_) != rules[i].requires_) {
+            if (why) *why = rules[i].name;
+            return 0;
+        }
+    }
+    if (!info) return 1;
+    for (size_t i = 0; i < VTP_CAPACITY_RULE_COUNT; i++) {
+        if (capabilities & capacities[i].bit) continue;
+        if (len < (size_t)capacities[i].offset + capacities[i].size) continue;
+        uint32_t v = 0;
+        for (uint8_t k = 0; k < capacities[i].size; k++)
+            v |= (uint32_t)info[capacities[i].offset + k] << (8 * k);
+        /* A capacity of zero means "none" (§4). A non-zero one behind a
+         * cleared capability bit is a device publishing a role it does not
+         * have, and a client that sizes a buffer from it has been told
+         * something false. */
+        if (v) {
+            if (why) *why = capacities[i].field;
+            return 0;
+        }
+    }
+    return 1;
+}
+
 int vtp_decode_info(const uint8_t *b, size_t len,
                     vtp_info_t *o, const char **err) {
     if (len != VTP_INFO_SIZE) { *err = "length"; return -1; }
+
+    /* SPEC.md §4.1 -- an Info whose capabilities break the matrix is treated
+     * as non-conforming, exactly as a protocol_major mismatch is. Decoding it
+     * and leaving the contradiction to the caller is how a client ends up
+     * subscribing to a CAN stream on a device with no way to install a
+     * subscription. */
+    if (!vtp_capabilities_coherent(rd32(b + VTP_INFO_OFF_CAPABILITIES),
+                                   b, len, err)) {
+        return -1;
+    }
 
     o->protocol_major         = b[VTP_INFO_OFF_PROTOCOL_MAJOR];
     o->protocol_minor         = b[VTP_INFO_OFF_PROTOCOL_MINOR];
@@ -205,7 +310,7 @@ int vtp_decode_info(const uint8_t *b, size_t len,
     o->can_max_frames_per_s   = rd32(b + VTP_INFO_OFF_CAN_MAX_FRAMES_PER_S);
     o->imu_rate_hz            = rd16(b + VTP_INFO_OFF_IMU_RATE_HZ);
     o->imu_max_rate_hz        = rd16(b + VTP_INFO_OFF_IMU_MAX_RATE_HZ);
-    o->can_max_payload        = b[VTP_INFO_OFF_CAN_MAX_PAYLOAD];
+    o->reserved_20            = b[VTP_INFO_OFF_RESERVED_20];
     o->clock_flags            = b[VTP_INFO_OFF_CLOCK_FLAGS];
     o->max_notify_bytes       = rd16(b + VTP_INFO_OFF_MAX_NOTIFY_BYTES);
     return 0;
@@ -268,27 +373,55 @@ int vtp_channel_known(uint16_t c) {
 }
 
 int vtp_decode_monitor_list(const uint8_t *b, size_t len,
-                            vtp_monitor_page_t *p, const char **err) {
-    if (len < VTP_MONITOR_PAGE_SIZE) { *err = "length"; return -1; }
-    p->total    = rd16(b + VTP_MONITOR_PAGE_OFF_TOTAL);
-    p->index    = rd16(b + VTP_MONITOR_PAGE_OFF_INDEX);
-    p->count    = b[VTP_MONITOR_PAGE_OFF_COUNT];
-    p->reserved = b[VTP_MONITOR_PAGE_OFF_RESERVED];
+                            vtp_monitor_declaration_t *p, const char **err) {
+    if (len < VTP_MONITOR_DECLARATION_SIZE) { *err = "length"; return -1; }
+    p->count    = b[VTP_MONITOR_DECLARATION_OFF_COUNT];
+    p->reserved = b[VTP_MONITOR_DECLARATION_OFF_RESERVED];
 
-    const size_t needed = (size_t)VTP_MONITOR_PAGE_SIZE
+    const size_t needed = (size_t)VTP_MONITOR_DECLARATION_SIZE
                         + (size_t)p->count * VTP_MONITOR_CHANNEL_SIZE;
     if (len < needed) { *err = "truncated-record"; return -1; }
     if (len != needed) { *err = "length"; return -1; }
+
+    /* SPEC.md §13.4 -- a declaration too large for one complete client write
+     * has made its own rule unsatisfiable. `count` IS the whole declaration
+     * now, so this is the only number there is to check. */
+    if (p->count > VTP_MONITOR_MAX_CHANNELS) {
+        *err = "too-many-channels"; return -1;
+    }
+    /* SPEC.md §13.3 -- the slot is how a value is addressed, so two entries
+     * claiming one make every later update ambiguous. */
+    for (uint8_t i = 0; i < p->count; i++) {
+        const uint8_t si = b[VTP_MONITOR_DECLARATION_SIZE
+                             + (size_t)i * VTP_MONITOR_CHANNEL_SIZE
+                             + VTP_MONITOR_CHANNEL_OFF_SLOT];
+        for (uint8_t j = (uint8_t)(i + 1); j < p->count; j++) {
+            const uint8_t sj = b[VTP_MONITOR_DECLARATION_SIZE
+                                 + (size_t)j * VTP_MONITOR_CHANNEL_SIZE
+                                 + VTP_MONITOR_CHANNEL_OFF_SLOT];
+            if (si == sj) { *err = "duplicate-slot"; return -1; }
+        }
+    }
+    /* SPEC.md §13.5 -- every declared channel carries a deadline, so a value
+     * a client stops refreshing always stops being shown. Zero used to mean
+     * "no deadline of its own", reconciled by a derived device-wide liveness
+     * bound; one rule per channel replaced both. */
+    for (uint8_t i = 0; i < p->count; i++) {
+        if (b[VTP_MONITOR_DECLARATION_SIZE + (size_t)i * VTP_MONITOR_CHANNEL_SIZE
+              + VTP_MONITOR_CHANNEL_OFF_MAX_AGE] == 0) {
+            *err = "zero-max-age"; return -1;
+        }
+    }
     return 0;
 }
 
 void vtp_monitor_channel_at(const uint8_t *b, uint8_t index,
                             vtp_monitor_channel_t *o) {
-    const uint8_t *e = b + VTP_MONITOR_PAGE_SIZE
+    const uint8_t *e = b + VTP_MONITOR_DECLARATION_SIZE
                      + (size_t)index * VTP_MONITOR_CHANNEL_SIZE;
     o->slot     = e[VTP_MONITOR_CHANNEL_OFF_SLOT];
     o->channel  = rd16(e + VTP_MONITOR_CHANNEL_OFF_CHANNEL);
-    o->reserved = e[VTP_MONITOR_CHANNEL_OFF_RESERVED];
+    o->max_age  = e[VTP_MONITOR_CHANNEL_OFF_MAX_AGE];
 }
 
 int vtp_decode_monitor_update(const uint8_t *b, size_t len,
@@ -302,6 +435,28 @@ int vtp_decode_monitor_update(const uint8_t *b, size_t len,
                         + (size_t)h->count * VTP_MONITOR_VALUE_SIZE;
     if (len < needed) { *err = "truncated-record"; return -1; }
     if (len != needed) { *err = "length"; return -1; }
+
+    /* SPEC.md §13.4 -- a write is a COMPLETE statement of what the client can
+     * supply, and one naming no slots is the one thing a complete statement
+     * cannot be: on a device that asked for channels it names none of them,
+     * leaving every previous value standing. A client with nothing to supply
+     * writes every slot with the present bit clear; a client with nothing to
+     * say does not write at all. */
+    if (h->count == 0) { *err = "empty-update"; return -1; }
+
+    /* SPEC.md §13.4 -- nothing says which of two values for one slot wins, so
+     * a device choosing either is choosing on every client's behalf. */
+    for (uint8_t i = 0; i < h->count; i++) {
+        const uint8_t si = b[VTP_MONITOR_HEADER_SIZE
+                             + (size_t)i * VTP_MONITOR_VALUE_SIZE
+                             + VTP_MONITOR_VALUE_OFF_SLOT];
+        for (uint8_t j = (uint8_t)(i + 1); j < h->count; j++) {
+            const uint8_t sj = b[VTP_MONITOR_HEADER_SIZE
+                                 + (size_t)j * VTP_MONITOR_VALUE_SIZE
+                                 + VTP_MONITOR_VALUE_OFF_SLOT];
+            if (si == sj) { *err = "duplicate-slot"; return -1; }
+        }
+    }
     return 0;
 }
 
@@ -359,6 +514,19 @@ int vtp_decode_control_response(const uint8_t *b, size_t len,
         *err = "detail-on-error"; return -1;
     }
     if (o->detail_len) o->detail = b + VTP_CONTROL_RESPONSE_SIZE;
+    return 0;
+}
+
+int vtp_decode_time_sync(const uint8_t *b, size_t len,
+                         vtp_time_sync_t *o, const char **err) {
+    if (len != VTP_TIME_SYNC_SIZE) { *err = "length"; return -1; }
+
+    o->t_device_rx = rd64(b + VTP_TIME_SYNC_OFF_T_DEVICE_RX);
+    o->t_device_tx = rd64(b + VTP_TIME_SYNC_OFF_T_DEVICE_TX);
+    /* SPEC.md §9.7 -- answering before being asked is not a late clock, it is
+     * a malformed response, and a negative round trip halved into an offset
+     * is a confidently wrong one. */
+    if (o->t_device_tx < o->t_device_rx) { *err = "tx-before-rx"; return -1; }
     return 0;
 }
 

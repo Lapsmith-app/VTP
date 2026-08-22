@@ -83,7 +83,7 @@
       "name": "extended-id",
       "desc": "A 29-bit extended identifier. The extended flag lives in bit 29 of `id`, and the arbitration id is bits 0-28 only.",
       "record": "can_batch",
-      "hex": "03000000c0cf6a000000000001000000050010f1da3802aabb",
+      "hex": "03000000c0cf6a000000000001000000000010f1da3802aabb",
       "expect": {
         "header": {
           "seq": 3,
@@ -95,14 +95,14 @@
         },
         "records": [
           {
-            "dt": 5,
+            "dt": 0,
             "id": 417001744,
             "extended": true,
             "fd": false,
             "rtr": false,
             "len": 2,
             "payload": "aabb",
-            "t_device_us": 7000050
+            "t_device_us": 7000000
           }
         ]
       }
@@ -111,7 +111,7 @@
       "name": "can-fd-64-byte",
       "desc": "A CAN FD frame carrying the maximum 64-byte payload.",
       "record": "can_batch",
-      "hex": "040000004054890000000000010000000100f002004040000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "hex": "040000004054890000000000010000000000f002004040000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
       "expect": {
         "header": {
           "seq": 4,
@@ -123,33 +123,43 @@
         },
         "records": [
           {
-            "dt": 1,
+            "dt": 0,
             "id": 752,
             "extended": false,
             "fd": true,
             "rtr": false,
             "len": 64,
             "payload": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
-            "t_device_us": 9000010
+            "t_device_us": 9000000
           }
         ]
       }
     },
     {
       "name": "t-base-near-wrap",
-      "desc": "t_base within 100 us of the u64 ceiling, so t_base + dt*10 wraps. SPEC.md 8 defines the arithmetic as modulo 2^64; a decoder using arbitrary-precision integers MUST still report the wrapped value.",
+      "desc": "t_base within 100 us of the u64 ceiling. Record 0 sits ON t_base (SPEC.md 6.1), so the wrap is carried by record 1: t_base + 200 us exceeds the ceiling. SPEC.md 8 defines the arithmetic as modulo 2^64; a decoder using arbitrary-precision integers MUST still report the wrapped value.",
       "record": "can_batch",
-      "hex": "0b0000009cffffffffffffff010000001400a00100000100",
+      "hex": "0b0000009cffffffffffffff020000000000a001000001001400a00100000101",
       "expect": {
         "header": {
           "seq": 11,
           "dropped": 0,
           "t_base": 18446744073709551516,
-          "count": 1,
+          "count": 2,
           "flags": 0,
           "reserved": 0
         },
         "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00",
+            "t_device_us": 18446744073709551516
+          },
           {
             "dt": 20,
             "id": 416,
@@ -157,7 +167,7 @@
             "fd": false,
             "rtr": false,
             "len": 1,
-            "payload": "00",
+            "payload": "01",
             "t_device_us": 100
           }
         ]
@@ -194,7 +204,7 @@
     },
     {
       "name": "empty-batch",
-      "desc": "count 0. Legal, and means the bus is quiet \u2014 NOT an error and NOT a disconnect. A decoder MUST accept it.",
+      "desc": "count 0. MUST be rejected: SPEC.md 6.2 defines t_base as the bus-arrival time of record 0, so a batch with no record 0 timestamps a frame that does not exist. A quiet bus is reported by sending nothing, exactly as an idle IMU is (SPEC.md 7). This vector used to assert the opposite, which made CAN and IMU disagree about a field with one definition.",
       "record": "can_batch",
       "hex": "05000000c0d8a7000000000000000000",
       "expect": {
@@ -207,7 +217,8 @@
           "reserved": 0
         },
         "records": []
-      }
+      },
+      "must_reject": "empty-batch"
     },
     {
       "name": "shedding-load",
@@ -326,7 +337,7 @@
       "name": "can-fd-twelve-byte",
       "desc": "A CAN FD frame at the first rung above eight. SPEC.md 6.10 -- twelve is representable, eleven is not, and a decoder that accepts any length up to 64 cannot tell them apart.",
       "record": "can_batch",
-      "hex": "110000004054890000000000010000000200f00200400c000102030405060708090a0b",
+      "hex": "110000004054890000000000010000000000f00200400c000102030405060708090a0b",
       "expect": {
         "header": {
           "seq": 17,
@@ -338,17 +349,24 @@
         },
         "records": [
           {
-            "dt": 2,
+            "dt": 0,
             "id": 752,
             "extended": false,
             "fd": true,
             "rtr": false,
             "len": 12,
             "payload": "000102030405060708090a0b",
-            "t_device_us": 9000020
+            "t_device_us": 9000000
           }
         ]
       }
+    },
+    {
+      "name": "first-record-dt-nonzero",
+      "desc": "A batch whose first record claims a 50 us offset from t_base. MUST be rejected: SPEC.md 6.1 defines t_base AS record 0's arrival time, so a non-zero first dt means the sender and the receiver disagree about what t_base is, and the receiver cannot tell which reading to trust. Four vectors in this corpus carried non-zero first offsets while the specification said they could not, and both decoders accepted them.",
+      "record": "can_batch",
+      "hex": "1700000040420f0000000000010000000500a00100000100",
+      "must_reject": "first-dt-nonzero"
     },
     {
       "name": "classic-length-nine",
@@ -387,20 +405,33 @@
     },
     {
       "name": "reserved-nonzero",
-      "desc": "Header reserved bytes carry a value assigned by a future minor. A decoder MUST ignore them, not reject.",
+      "desc": "Header reserved bytes carry a value assigned by a future minor. A decoder MUST ignore them, not reject -- and an encoder MUST normalise them to zero, because SPEC.md 2 requires reserved fields to be zero ON TRANSMIT. The two halves of that rule pull in opposite directions, which is why this vector is deliberately non-canonical: it is the only one that asserts both at once.",
       "record": "can_batch",
-      "hex": "0800000001000000000000000000efbe",
+      "hex": "0800000001000000000000000100efbe0000a00100000100",
       "expect": {
         "header": {
           "seq": 8,
           "dropped": 0,
           "t_base": 1,
-          "count": 0,
+          "count": 1,
           "flags": 0,
           "reserved": 48879
         },
-        "records": []
-      }
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00",
+            "t_device_us": 1
+          }
+        ]
+      },
+      "canonical": false,
+      "expect_roundtrip_hex": "080000000100000000000000010000000000a00100000100"
     }
   ]
 }

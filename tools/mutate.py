@@ -150,18 +150,34 @@ def op_presence():
 
 
 def op_bound():
-    """Disable a range check, e.g. `if (plen > 64)`.
+    """Disable a range check, e.g. `plen > 8`, or the CAN FD length ladder.
 
     A corpus cannot reach these by construction -- every legal vector is in
     range -- so only a hand-written must-reject vector tests them, and only a
     mutation reveals when there isn't one.
+
+    The comparison is neutralised rather than the whole `if`, because these
+    checks now live inside compound conditions: the original pattern required
+    a bare `if (x > N)` and stopped matching the moment the length rules grew
+    a format guard, at which point this operator generated nothing and said so
+    only in a line of output nobody reads. An operator that matches nothing
+    now fails the run.
     """
     text = (CDIR / DECODER).read_text()
-    for m in reversed(list(re.finditer(r"if \((\w+) > (\d+)\)", text))):
-        mutated = text[:m.start()] + "if (0)" + text[m.end():]
+    for m in reversed(list(re.finditer(r"(\w+) > (\d+)\)", text))):
+        mutated = text[:m.start()] + "0)" + text[m.end():]
         line = text[:m.start()].count("\n") + 1
         yield (f"decoder drops the {m.group(1)} > {m.group(2)} bound "
                f"({DECODER}:{line})", DECODER, mutated)
+
+    # The FD ladder is a lookup, not a comparison, so the pattern above cannot
+    # reach it. Accepting every length is exactly the pre-§6.10 behaviour.
+    if "vtp_fd_len_ok" in text:
+        marker = "static int vtp_fd_len_ok(size_t n) {"
+        start = text.index(marker) + len(marker)
+        yield ("decoder accepts any CAN FD payload length "
+               f"({DECODER}:{text[:start].count(chr(10)) + 1})",
+               DECODER, text[:start] + "\n    return 1;" + text[start:])
 
 
 def op_length():
@@ -208,11 +224,13 @@ def main():
     args = ap.parse_args()
 
     chosen = [args.operator] if args.operator else sorted(OPERATORS)
-    survived, build_failed, caught = [], [], 0
+    survived, build_failed, caught, empty = [], [], 0, []
 
     for name in chosen:
         mutations = list(OPERATORS[name]())
         print(f"\n{name} — {len(mutations)} mutation(s)")
+        if not mutations:
+            empty.append(name)
         if args.list:
             for label, filename, _ in mutations:
                 print(f"    {filename}: {label}")
@@ -235,15 +253,45 @@ def main():
 
     print(f"\n{caught} caught, {len(survived)} survived, "
           f"{len(build_failed)} uncompilable")
+
+    failed = False
     if survived:
+        failed = True
         print("\nA surviving mutation is a hole in the corpus, not a bug in "
               "the decoder:", file=sys.stderr)
         for label in survived:
             print(f"  {label}", file=sys.stderr)
         print("\nAdd a vector that distinguishes the mutated behaviour from "
               "the correct one.", file=sys.stderr)
-        return 1
-    return 0
+
+    # A mutation that does not compile tested nothing, and a run of nothing
+    # but those used to exit 0. Breaking a header made every one of 79
+    # mutations fail to build and this tool still reported success -- turning
+    # the strongest check in the repository into a no-op that CI reads as a
+    # pass. The same failure has now appeared three times in different guises
+    # (a stale build, a missing runner, a stale __pycache__), so it is worth
+    # being blunt: a check that cannot fail is not a check.
+    if build_failed:
+        failed = True
+        print(f"\n{len(build_failed)} mutation(s) did not compile, so they "
+              f"proved nothing:", file=sys.stderr)
+        for label, detail in build_failed:
+            print(f"  {label}: {(detail or ['no output'])[0]}", file=sys.stderr)
+        print("\nFix the build. A mutation sweep that cannot build is not a "
+              "sweep that passed.", file=sys.stderr)
+
+    # An operator whose pattern stops matching contributes zero mutations and
+    # says nothing about it. `bound` became dead exactly this way when the
+    # redundant length check it targeted was removed.
+    if empty:
+        failed = True
+        print(f"\noperator(s) generated no mutations at all: "
+              f"{', '.join(empty)}", file=sys.stderr)
+        print("Either the code they target is gone -- in which case delete "
+              "the operator -- or their pattern has drifted and they are "
+              "silently testing nothing.", file=sys.stderr)
+
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -19,6 +19,120 @@ python3 conformance/run.py --impl "./my-decoder"
 
 `--verbose` lists each case as it passes and notes reject-reason differences.
 
+### Declaring roles
+
+SPEC.md §12 asks an implementation to pass the vectors **for the roles it
+declares**. A decoder that implements GPS and nothing else says so:
+
+```sh
+python3 conformance/run.py --impl "./my-decoder" --roles gps
+```
+
+| Role | Records |
+| --- | --- |
+| `core` | `info` — always included, never optional (§4) |
+| `control` | `control_response`, `link_params`, `time_sync` |
+| `gps` | `gps_fix` |
+| `can` | `can_batch`, `can_list` — implies `control` |
+| `imu` | `imu_batch` |
+| `monitor` | `monitor_list`, `monitor_update` — implies `control` |
+
+Only Info is unconditional. The Control characteristic is a capability
+(`capabilities` bit 4 — §4.1 has the matrix), not a requirement, so a GPS-only
+device is not asked for control responses; `core` used to carry them, which
+left such a device failing conformance for records it had never claimed.
+
+`can` and `monitor` imply `control` because §4.1 makes that implication
+normative: a CAN device is reached through `CAN_SUBSCRIBE` and a Monitor device
+declares its channels through `MONITOR_LIST`, so neither is usable without the
+Control characteristic. This table and that matrix are the same rule stated
+once each; the runner used to imply what the specification did not say.
+
+Omit `--roles` to run everything, which is what a full implementation should
+do. The summary line names the scope either way, because a green run over one
+role must not be mistaken for conformance across all of them.
+
+## The producer direction
+
+Everything above tests **decoding**. The corpus says nothing about what an
+encoder must refuse, because round-tripping a payload that already decoded only
+ever asks whether an encoder reproduces something valid.
+
+`conformance/encoders.json` carries the other direction: structured inputs,
+each marked `must_refuse`. They cannot be byte vectors, because the point is
+that the bytes are never produced.
+
+```sh
+# C reference
+make -C reference/c && python3 conformance/produce.py --impl "reference/c/vtp1_producer"
+
+# Python reference
+python3 conformance/produce.py --impl "python3 reference/python/vtp1_produce.py"
+
+# Your implementation
+python3 conformance/produce.py --impl "./my-encoder" --roles gps,can
+```
+
+It takes `--roles` and `--verbose` exactly as `run.py` does, and reads the same
+role table.
+
+This runner replaced `tools/check_encoders.py`, which imported the Python
+encoder as a module. That made a green producer run a statement about one of
+this repository's two reference encoders: the C encoder had four
+malformed-input crashes and a violation of its own "nothing written on failure"
+contract, and every producer run stayed green throughout, because none of them
+was ever called. **A producer suite that can only test the language it is
+written in is not a conformance suite**, so this one drives a subprocess over a
+text contract like the decode runner does.
+
+### The producer contract
+
+**stdin** — one case per line:
+
+```
+<record>\t<json-object>
+```
+
+`record` names the record being produced. The JSON object is the case's
+`input`: the structured values a caller would hand the encoder, with binary
+fields carried as hex strings (`payload`, `ext_hex`, `detail_hex`).
+
+**stdout** — exactly one JSON object per input line, in the same order:
+
+```jsonc
+{"ok": true,  "hex": "0100..."}                  // the encoder produced these
+{"ok": false, "reason": "id outside the field"}  // the encoder refused
+```
+
+`reason` is informational and is never compared, exactly as decoder reject
+reasons are not.
+
+**A crash is not a refusal.** An implementation that dies partway through has
+answered nothing for the case it died on, and the runner reports every
+unanswered case as a failure rather than assuming a refusal. That distinction
+is the whole reason this file specifies an adapter process rather than a
+library call: an encoder that falls over is not an encoder that declined, and
+an in-process harness catching a broad exception cannot tell the two apart.
+
+A case marked `must_refuse: false` may also carry `expect_hex`, and the encoder
+must produce exactly those bytes. `expect_hex` is generated from the schema's
+own field offsets rather than from either reference encoder, so two
+implementations that agree on it are agreeing with the source of truth rather
+than with each other.
+
+### What the producer suite cannot reach
+
+Every array a JSON case describes exists, so a language whose API takes a count
+and a pointer has two promises no case here can test: that a count with no
+array behind it is refused rather than dereferenced, and that a refused call
+leaves the caller's buffer untouched. Both were broken in the C reference and
+invisible to every check in CI.
+
+Those are API contracts rather than protocol ones, and they are tested where
+they live: `reference/c/encode_selftest.c`, built with ASan and UBSan
+(`make -C reference/c san`). An implementation in a memory-safe language has
+nothing to answer here; one in C does.
+
 ## The runner contract
 
 The runner is deliberately language-agnostic. Any implementation that speaks

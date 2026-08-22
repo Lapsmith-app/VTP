@@ -59,11 +59,21 @@ def decode(characteristic, payload):
 
 
 def run(device, clock, seconds, step_us=5_000):
-    """Advance the injected clock and collect everything the device emits."""
+    """Advance the injected clock and collect everything the device emits.
+
+    Every payload is stamped and committed, which models a transport that
+    delivers all of them. SPEC.md §8.2 makes seq a fact about delivery, so a
+    payload straight out of poll() carries only a placeholder and a device-only
+    harness has to supply the other half. transport_selftest.py exercises the
+    cases where delivery FAILS, which is where the number stops being trivial.
+    """
     out = []
     for _ in range(int(seconds * 1_000_000 // step_us)):
         clock[0] += step_us
-        out.extend(device.poll())
+        for characteristic, payload in device.poll():
+            out.append((characteristic,
+                        device.stamp_seq(characteristic, payload)))
+            device.commit_seq(characteristic)
     return out
 
 
@@ -234,6 +244,7 @@ def main():
     for _ in range(400):
         mclock[0] += 5_000
         for characteristic, payload in masked.poll():
+            masked.commit_seq(characteristic)
             if characteristic == "can":
                 for r in vtp1.decode_can_batch(payload)["records"]:
                     matched.add(r["id"])
@@ -247,26 +258,48 @@ def main():
     # against the transport's queue directly: it holds no Bluetooth state
     # precisely so that this is testable without a radio.
     q = serve.ControlQueue()
-    check(q.depth >= 4,
-          f"SPEC.md 9 requires at least four outstanding requests, not "
+    check(q.depth == serve.CONTROL_OUTSTANDING == 1,
+          f"SPEC.md 9 allows ONE outstanding request; the queue declares "
           f"{q.depth}")
-    for tag in range(q.depth):
-        check(q.admit(tag) == "apply",
-              f"request {tag + 1} of {q.depth} MUST be admitted")
-        q.hold(tag, bytes([0x02, tag, 0]))
-    check(q.admit(200) == "busy",
-          "a request beyond the queue depth MUST be answered busy, not "
-          "silently discarded")
 
-    # SPEC.md §9 — the tag is the only means of correlation, so a second
-    # request bearing an outstanding one cannot be applied.
-    check(q.admit(0) == "duplicate-tag",
-          "a tag that is still outstanding MUST NOT be admitted a second time")
+    check(q.admit(7) == "apply", "the first request MUST be admitted")
+    q.hold(7, bytes([0x02, 7, 0]))
+
+    # A client that pipelines anyway. It gets `busy` -- which is why the status
+    # survived the removal of the queue it used to describe: the alternatives
+    # are silence and applying a request the device cannot answer, and §9.6
+    # forbids both.
+    check(q.admit(8) == "busy",
+          "a second request written before the first was answered MUST be "
+          "answered busy, not silently discarded and not applied")
+
+    # ...and `busy` is a response, so it needs somewhere to sit. A device whose
+    # only slot holds the answer it already owes has nothing left to say busy
+    # with, which is why the queue is one deeper than the rule.
+    q.hold(8, bytes([0x02, 8, 5]))
+    check(len(q) == 2,
+          f"the busy refusal must be queued behind the response it was "
+          f"refused for, not dropped; queue holds {len(q)}")
+
+    # SPEC.md §9 — with one request outstanding, tag ambiguity is not
+    # prevented, it is impossible: a second request written before the first is
+    # answered is refused whatever tag it carries, and one written after cannot
+    # collide with anything. There is no duplicate-tag verdict to test, and a
+    # device needs no tag table.
     q.delivered()
-    check(q.admit(0) == "apply",
-          "a tag MUST become reusable once its response has been delivered")
+    q.delivered()
+    check(q.admit(9) == "apply", "the queue should be empty again")
+    q.hold(9, bytes([0x02, 9, 0]))
+    check(q.admit(9) == "busy",
+          "a request reusing the outstanding tag is refused for the same "
+          "reason any other concurrent request is: the answer is still owed")
+    q.delivered()
+    check(q.admit(9) == "apply",
+          "a tag MUST become reusable once its response has been delivered; "
+          "the rule is `not while outstanding`, not `never twice`")
 
     # Nothing is owed to a client that has gone.
+    q.hold(0, bytes([0x02, 0, 0]))
     q.discard_all()
     check(len(q) == 0 and q.dropped > 0,
           "a dropped link MUST clear the queue and count what never arrived")
@@ -295,6 +328,155 @@ def main():
         check("info" not in protected,
               f"the {name} posture encrypts Info; §10.2 says to leave it "
               f"readable so an unpaired client can still identify the device")
+    # ---- Semantic constraints (SPEC.md §5.4, §7.1, §7.2) -----------------
+    # Every fix this device emits must be somewhere on earth, and every batch
+    # must carry a period a client can divide by.
+    for f in gps:
+        check(abs(f["lat"]) <= 900_000_000 and abs(f["lon"]) <= 1_800_000_000,
+              f"gps: lat/lon outside the earth ({f['lat']}, {f['lon']})")
+        if "head_mot" not in f["absent"]:
+            check(0 <= f["head_mot"] < 36_000_000,
+                  f"gps: head_mot {f['head_mot']} outside 0..360 degrees")
+    for b in imu:
+        check(b["header"]["period"] > 0,
+              "imu: a period of zero says every sample was taken at one "
+              "instant, which describes no measurement")
+        check(b["header"]["saturated"] is False,
+              "imu: this synthetic vehicle stays well inside the sensor range, "
+              "so nothing should be flagged saturated")
+
+    # SPEC.md §7.1 — specific force, not acceleration. A level car at rest
+    # reads +1 g on the axis that points UP. Both signs are in use in the
+    # wild, and a client that assumes the wrong one sees a car braking when it
+    # is accelerating, with every magnitude still looking right.
+    level = [s for b in imu for s in b["samples"]]
+    check(level and all(s["az"] > 0 for s in level),
+          "imu: a level vehicle MUST report a POSITIVE az under the specific-"
+          "force convention; a negative one is the gravity-vector convention "
+          "and means every client reading this device has its signs inverted")
+
+    # SPEC.md §7.2 — the flag is computed, not hardcoded clear.
+    sat = dev.VtpDevice(now_us=lambda: 0, gps_hz=0, imu_hz=100)
+    sat._imu_pending = [dict(ax=32767, ay=0, az=1000, gx=0, gy=0, gz=0)]
+    check(sat._imu_saturation() == dev.IMU_SATURATED,
+          "a sample at the i16 rail MUST raise the saturation flag")
+    sat._imu_pending = [dict(ax=1, ay=2, az=1000, gx=0, gy=0, gz=0)]
+    check(sat._imu_saturation() == 0,
+          "an ordinary sample MUST NOT raise the saturation flag")
+
+    # ---- Monitor values go stale, and say so ----------------------------
+    # SPEC.md §13.5 — silence is the ONLY symptom a device sees when a client
+    # crashes, is backgrounded or wedges: the link stays up and the writes
+    # simply stop. Without an expiry the screen keeps showing a lap time from
+    # minutes ago and the driver reading it cannot tell.
+    mclk = [0]
+    mon = dev.VtpDevice(now_us=lambda: mclk[0], gps_hz=0, imu_hz=0)
+    mon.on_connect()
+    declared = vtp1.decode_monitor_list(
+        mon.handle_control(bytes([dev.MONITOR_LIST, 1]))[3:])
+    by_slot = {e["slot"]: e for e in declared["entries"]}
+    check(declared["declaration"]["count"] <= vtp1.MONITOR_MAX_CHANNELS,
+          f"a device MUST NOT ask for more channels than fit in one complete "
+          f"write: {declared['declaration']['count']} > "
+          f"{vtp1.MONITOR_MAX_CHANNELS}")
+    # SPEC.md §13.5 — every declared channel carries a deadline, and none of
+    # them is zero. There used to be two kinds of channel here, "perishable"
+    # and "durable", plus a derived device-wide liveness bound to expire the
+    # durable ones; one rule per channel replaced all of it.
+    check(all(e["max_age"] for e in declared["entries"]),
+          f"every declared channel MUST carry a non-zero max_age: "
+          f"{[(e['slot'], e['max_age']) for e in declared['entries']]}")
+    deadlines = sorted(declared["entries"], key=lambda e: e["max_age"])
+    check(deadlines[0]["max_age"] != deadlines[-1]["max_age"],
+          "this device should declare channels with DIFFERENT deadlines, or "
+          "the per-channel half of the rule is not exercised")
+
+    # The shortest and the longest, so one expires while the other is still
+    # inside its own deadline. That is the whole of §13.5 now.
+    slot_fast = deadlines[0]["slot"]
+    slot_slow = deadlines[-1]["slot"]
+    # SPEC.md §13.4 — a write is a complete statement, so it carries every
+    # declared slot and not just the two this check is about.
+    all_slots = [e["slot"] for e in declared["entries"]]
+    def value_for(slot):
+        return {slot_fast: 12345, slot_slow: 99999}.get(slot, 7)
+    write = struct.pack("<HBB", 1, len(all_slots), 0) + b"".join(
+        struct.pack("<BBi", s, dev.MONITOR_PRESENT, value_for(s))
+        for s in all_slots)
+    check(mon.handle_monitor_write(write) is None,
+          "a well-formed monitor write was rejected")
+
+    def present_at(t_us):
+        mclk[0] = t_us
+        return {slot: present for slot, _, _, present in mon.monitor_state()}
+
+    deadline = by_slot[slot_fast]["max_age"] * 100_000
+    check(present_at(deadline - 100_000)[slot_fast],
+          "a value inside its max_age MUST still be shown")
+    check(not present_at(deadline + 100_000)[slot_fast],
+          "a value past its max_age MUST be rendered unavailable, not held on "
+          "screen as though it were current")
+    check(present_at(deadline + 100_000)[slot_slow],
+          "a deadline belongs to its own channel: a longer-lived channel MUST "
+          "survive the expiry of a shorter-lived one")
+    # ...and it expires too, on its own deadline. Nothing is immortal, which
+    # is what the liveness bound existed to guarantee and what a per-channel
+    # deadline now guarantees directly.
+    slow_deadline = by_slot[slot_slow]["max_age"] * 100_000
+    check(present_at(slow_deadline - 100_000)[slot_slow],
+          "a value inside its own max_age MUST still be shown")
+    after = present_at(slow_deadline + 100_000)
+    check(not any(after.values()),
+          f"past the LONGEST declared deadline nothing may still be shown; "
+          f"still present: {sorted(s for s, p in after.items() if p)}")
+
+    # SPEC.md §13.4 — a slot twice in one write, and nothing says which wins.
+    twice = (struct.pack("<HBB", 2, len(all_slots) + 1, 0)
+             + struct.pack("<BBi", slot_fast, dev.MONITOR_PRESENT, 1)
+             + b"".join(struct.pack("<BBi", s, dev.MONITOR_PRESENT, value_for(s))
+                        for s in all_slots))
+    check(mon.handle_monitor_write(twice) == "duplicate-slot",
+          "a write naming one slot twice MUST be rejected rather than "
+          "resolved arbitrarily")
+
+    # ---- TIME_SYNC bounds its own error ---------------------------------
+    # SPEC.md §9.7 — two readings, and the earlier one MUST be taken when the
+    # write arrived rather than when the reply is composed. A device reading
+    # its clock once and reporting it twice looks identical on the wire to one
+    # that answered instantly, so the check drives it with a known gap.
+    tclock = [5_000_000]
+    timed = dev.VtpDevice(now_us=lambda: tclock[0], gps_hz=0, imu_hz=0)
+    timed.on_connect()
+    arrived = tclock[0]
+    tclock[0] += 1_500                      # the device spends 1.5 ms answering
+    answer = timed.handle_control(bytes([dev.TIME_SYNC, 1]), t_rx=arrived)
+    check(answer[2] == dev.ST_OK, "TIME_SYNC was refused")
+    sync = vtp1.decode_time_sync(answer[3:])
+    check(sync["t_device_rx"] == arrived,
+          f"t_device_rx is {sync['t_device_rx']}, not the {arrived} at which "
+          f"the write arrived; §9.7 forbids reading the clock later")
+    check(sync["processing_us"] == 1_500,
+          f"the device took 1500 us to answer and reported "
+          f"{sync['processing_us']}; that difference is the whole point of "
+          f"the two-timestamp form")
+    check(sync["t_device_tx"] >= sync["t_device_rx"],
+          "t_device_tx MUST NOT precede t_device_rx")
+
+    # SPEC.md §5.6 — a device that knows the solution epoch says so.
+    epoch_clock = [0]
+    epoch_dev = dev.VtpDevice(now_us=lambda: epoch_clock[0], gps_hz=10, imu_hz=0)
+    epoch_dev.on_connect()
+    stamped = None
+    for _ in range(200):
+        epoch_clock[0] += 5_000
+        for characteristic, payload in epoch_dev.poll():
+            if characteristic == "gps" and stamped is None:
+                stamped = vtp1.decode_gps_fix(payload)
+    check(stamped is not None and
+          stamped["fix_flags"] & dev.FIX_FLAG_SOLUTION_EPOCH,
+          "this device computes its fix at a known instant, so t_device IS "
+          "the solution epoch and fix_flags bit 4 MUST say so")
+
     # ---- Per-connection state -------------------------------------------
     # SPEC.md §8.2 — the FIRST notification after a connection carries seq 0.
     fresh_clock = [0]
@@ -304,6 +486,8 @@ def main():
     for _ in range(200):
         fresh_clock[0] += 5_000
         for characteristic, payload in fresh.poll():
+            payload = fresh.stamp_seq(characteristic, payload)
+            fresh.commit_seq(characteristic)
             if characteristic in firsts:
                 continue
             # Not named `decode`: this function already has one, and
@@ -374,6 +558,47 @@ def main():
     check(dev.MIN_ATT_MTU == 100,
           "SPEC.md §2's minimum ATT MTU should come from the schema")
 
+    # SPEC.md §4.2 — max_notify_bytes is a DEVICE ceiling, so it does not move
+    # when the link does. It used to be the negotiated payload, which a client
+    # cannot ever read at the right moment: Info is read on connect, and this
+    # peripheral does not learn the negotiated maximum until a central
+    # subscribes, which is later.
+    ceiling = vtp1.decode_info(sized.info())["max_notify_bytes"]
+    check(ceiling == 247 - 3,
+          f"max_notify_bytes must be the device ceiling (244), not the "
+          f"negotiated {sized.notify_bytes}; got {ceiling}")
+    sized.set_negotiated_mtu(517)
+    check(vtp1.decode_info(sized.info())["max_notify_bytes"] == ceiling,
+          "a larger negotiated MTU must NOT raise the ceiling Info published; "
+          "a client sized its buffer from that number")
+    check(sized.notify_bytes <= ceiling,
+          f"batches must never exceed the published ceiling: sizing for "
+          f"{sized.notify_bytes} against a ceiling of {ceiling}")
+
+    # ...and nothing negotiated may outlive the link that negotiated it.
+    sized.on_disconnect()
+    after = vtp1.decode_link_params(
+        sized.handle_control(bytes([dev.GET_LINK_PARAMS, 2]))[3:])
+    check("att_mtu" in after["absent"],
+          "after the link dropped, GET_LINK_PARAMS still reported the ATT MTU "
+          "that link negotiated — with the validity bit set, which asserts it "
+          "is a measurement of the link being asked about")
+
+    # SPEC.md §9.1 — a grouped validity bit is set when every field of the
+    # group is KNOWN. `peripheral_latency` of 0 is known, and is the value §2
+    # says a device SHOULD request while streaming; a truthiness test read it
+    # as missing and reported the whole group absent.
+    latent = dev.VtpDevice(now_us=lambda: 0, mtu=247)
+    latent.set_link_params(conn_interval=12, peripheral_latency=0,
+                           supervision_timeout=500)
+    group = vtp1.decode_link_params(
+        latent.handle_control(bytes([dev.GET_LINK_PARAMS, 3]))[3:])
+    check("peripheral_latency" not in group["absent"],
+          "a peripheral_latency of 0 is a value, not an absence")
+    check(group["peripheral_latency"] == 0 and group["conn_interval"] == 12,
+          f"the connection-parameter group must report what it was told: "
+          f"{group}")
+
     try:
         serve.encrypted_characteristics("sometimes")
         check(False, "an unknown posture MUST be rejected, not silently "
@@ -413,10 +638,17 @@ def main():
           "a rate above gps_max_rate_hz MUST be refused with rate_exceeded, "
           "not accepted and silently clamped")
 
-    resp = device.handle_control(bytes([dev.TIME_SYNC, 4])
-                                 + struct.pack("<q", 1_766_000_000_000))
-    check(resp[2] == dev.ST_OK and len(resp) == 11,
-          "TIME_SYNC must answer ok and echo the device clock")
+    resp = device.handle_control(bytes([dev.TIME_SYNC, 4]))
+    check(device.handle_control(bytes([dev.TIME_SYNC, 5])
+                                + struct.pack("<q", 0))[2] == dev.ST_BAD_PARAMS,
+          "SPEC.md §9.7 — TIME_SYNC is parameterless; the host UTC field it "
+          "used to carry could not be used by the equations and was discarded")
+    check(resp[2] == dev.ST_OK
+          and len(resp) == 3 + vtp1.SCHEMA["records"]["time_sync"]["size"],
+          "TIME_SYNC must answer ok with a time_sync record. This had "
+          "asserted 11 bytes, the single-timestamp form SPEC.md §9.7 "
+          "replaced, and the length is taken from the schema now so the "
+          "record cannot change under it again")
 
     resp = device.handle_control(bytes([dev.GET_LINK_PARAMS, 5]))
     check(resp[2] == dev.ST_OK, "GET_LINK_PARAMS was refused")
@@ -538,12 +770,17 @@ def main():
     check(info2["capabilities"] & (1 << 3),
           "a device implementing Monitor MUST declare capability bit 3")
 
-    listing = mon.handle_control(bytes([dev.MONITOR_LIST, 1])
-                                 + struct.pack("<H", 0))
+    listing = mon.handle_control(bytes([dev.MONITOR_LIST, 1]))
     check(listing[2] == dev.ST_OK, "MONITOR_LIST was refused")
     table = vtp1.decode_monitor_list(listing[3:])
-    check(table["page"]["total"] == 6,
-          f"expected 6 requested channels, got {table['page']['total']}")
+    check(table["declaration"]["count"] == 6,
+          f"expected 6 requested channels, got {table['declaration']['count']}")
+
+    # SPEC.md §13.3 — parameterless. A trailing `start` is a malformed request
+    # now, not a page number, and §9 rejects trailing parameters.
+    check(mon.handle_control(bytes([dev.MONITOR_LIST, 2])
+                             + struct.pack("<H", 0))[2] == dev.ST_BAD_PARAMS,
+          "MONITOR_LIST takes no parameters; a trailing start MUST be refused")
     check(all(e["channel_known"] for e in table["entries"]),
           "the device asked for a channel the reference decoder cannot name")
 
@@ -556,11 +793,15 @@ def main():
 
     # Mid first lap: elapsed is known; last lap and delta do not exist yet.
     import vtp1_encode as menc
+    # SPEC.md §13.4 — a write carries every declared slot. Elapsed is known;
+    # everything else does not exist yet and says so with a clear present bit,
+    # which is a different statement from leaving it out.
+    mon_slots = [slot for slot, _ in mon._monitor_channels]
     update = menc.encode_monitor_update(
-        {"seq": 1, "count": 3, "reserved": 0},
-        [{"slot": 0, "validity": dev.MONITOR_PRESENT, "value": 42_318},
-         {"slot": 1, "validity": 0, "value": 0},
-         {"slot": 2, "validity": 0, "value": 0}])
+        {"seq": 1, "count": len(mon_slots), "reserved": 0},
+        [{"slot": s,
+          "validity": dev.MONITOR_PRESENT if s == 0 else 0,
+          "value": 42_318 if s == 0 else 0} for s in mon_slots])
     check(mon.handle_monitor_write(update) is None,
           "a well-formed monitor update was rejected")
     state = {slot: (value, present) for slot, _, value, present
@@ -579,18 +820,36 @@ def main():
 
     # A cleared present bit with a stale value in the bytes: the bit governs.
     stale = menc.encode_monitor_update(
-        {"seq": 2, "count": 1, "reserved": 0},
-        [{"slot": 1, "validity": 0, "value": 87_340}])
-    mon.handle_monitor_write(stale)
+        {"seq": 2, "count": len(mon_slots), "reserved": 0},
+        [{"slot": s,
+          "validity": dev.MONITOR_PRESENT if s == 0 else 0,
+          "value": 87_340 if s == 1 else (42_318 if s == 0 else 0)}
+         for s in mon_slots])
+    check(mon.handle_monitor_write(stale) is None,
+          "the write must be ACCEPTED for this check to mean anything; a "
+          "rejected one leaves the previous display in place and the check "
+          "below then passes without testing the bit at all")
     check(disp.ABSENT in mon.display_lines()[1],
           "a stale value behind a cleared present bit MUST NOT be displayed")
 
     # A slot the device never asked for is ignored, not an error.
+    # §13.1 and §13.4 together: the write still carries every slot the device
+    # asked for, and the one it did not ask for is ignored rather than making
+    # the write an error. A write of the stray slot ALONE would be incomplete,
+    # which is a different fault and correctly a rejection.
     stray = menc.encode_monitor_update(
-        {"seq": 3, "count": 1, "reserved": 0},
-        [{"slot": 200, "validity": dev.MONITOR_PRESENT, "value": 5}])
+        {"seq": 3, "count": len(mon_slots) + 1, "reserved": 0},
+        [{"slot": s, "validity": 0, "value": 0} for s in mon_slots]
+        + [{"slot": 200, "validity": dev.MONITOR_PRESENT, "value": 5}])
     check(mon.handle_monitor_write(stray) is None,
           "a value for an unrequested slot MUST be ignored, not rejected")
+    only_stray = menc.encode_monitor_update(
+        {"seq": 4, "count": 1, "reserved": 0},
+        [{"slot": 200, "validity": dev.MONITOR_PRESENT, "value": 5}])
+    check(mon.handle_monitor_write(only_stray) is not None,
+          "a write carrying ONLY an unrequested slot names none of the slots "
+          "the device asked for, so it is incomplete (§13.4) and MUST be "
+          "rejected")
 
     check(mon.handle_monitor_write(update[:-1]) is not None,
           "a truncated monitor update MUST be rejected, not partly applied")
@@ -612,6 +871,15 @@ def main():
           "a positive delta MUST show its sign, or it reads as a fast lap")
     check(disp.format_value(disp.DELTA_BEST, -1_250, True) == "-1.250",
           "a negative delta should render negative")
+    # The unit is part of the static cell label, so the formatter must never
+    # change units under it. It used to: below 1 km it rendered bare metres
+    # beneath a heading that said "km".
+    check(disp.format_value(disp.SESSION_DISTANCE, 999, True) == "0.999",
+          f"999 m must render as 0.999 km, not as 999 under a km heading; "
+          f"got {disp.format_value(disp.SESSION_DISTANCE, 999, True)!r}")
+    check(disp.format_value(disp.SESSION_DISTANCE, 12_345, True) == "12.345",
+          f"12345 m must render as 12.345 km; got "
+          f"{disp.format_value(disp.SESSION_DISTANCE, 12_345, True)!r}")
     check(disp.format_value(disp.SPEED, 38_000, True) == "136.8",
           "speed is mm/s on the wire and km/h on a dash")
     for channel in (disp.LAP_TIME, disp.DELTA_BEST, disp.SPEED,
@@ -701,6 +969,228 @@ def main():
     check(serve.MAX_NAME_CHARS == 8,
           f"31 - 3 flags - 18 UUID - 2 header leaves 8 characters, not "
           f"{serve.MAX_NAME_CHARS}")
+
+    # ---- The smoke test's own checks, without a radio -------------------
+    # smoketest.py is the only thing here that needs an adapter, which makes it
+    # the only thing here nobody runs before pushing. Its BLE half genuinely
+    # cannot be tested without hardware; its DECODE and INSPECT half can, and
+    # that is where a client author's bugs live. Run it over the software
+    # device's own output, so the script that gets pointed at unfamiliar
+    # hardware is at least known to work against known-good input.
+    import argparse
+    import contextlib
+    import io
+    import smoketest
+
+    def run_smoke(result):
+        """Run smoketest.inspect quietly and return the problems it found.
+
+        Quietly because one of the two runs below is a deliberate failure, and
+        a passing suite that prints FAIL lines is a suite nobody reads."""
+        smoketest.problems.clear()
+        smoketest.notes.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            smoketest.inspect(result, argparse.Namespace(seconds=4))
+        return list(smoketest.problems)
+
+    smoke_clock = [0]
+    smoke_dev = dev.VtpDevice(now_us=lambda: smoke_clock[0], gps_hz=10,
+                              imu_hz=100)
+    smoke_dev.on_connect()
+    smoke_dev.handle_control(
+        bytes([dev.CAN_SUBSCRIBE, 1]) + (0x1A0).to_bytes(4, "little")
+        + bytes([0]) + (0).to_bytes(2, "little"))
+    captured = {"gps": [], "can": [], "imu": []}
+    for _ in range(4000):
+        smoke_clock[0] += 1000
+        for name, payload in smoke_dev.poll():
+            captured[name].append(smoke_dev.stamp_seq(name, payload))
+            smoke_dev.commit_seq(name)
+    found = run_smoke(dict(captured, mtu=247,
+                           info=vtp1.decode_info(smoke_dev.info())))
+    check(not found,
+          f"smoketest.py rejects this repository's own device: {found}")
+    check(all(captured[n] for n in ("gps", "can", "imu")),
+          "the smoke-test fixture produced no notifications, so its checks "
+          "passed by having nothing to look at")
+
+    # ...and it must be able to fail. A notification larger than the ceiling
+    # Info published is exactly what SPEC.md 4.2 forbids, and is the check most
+    # likely to matter on real hardware with an unexpected MTU.
+    overrun = vtp1.decode_info(smoke_dev.info())
+    overrun["max_notify_bytes"] = 8
+    check(run_smoke(dict(captured, mtu=247, info=overrun)),
+          "smoketest.py passed a device whose notifications exceed the "
+          "max_notify_bytes it published (SPEC.md 4.2)")
+
+    # A device that connects, answers Info and then sends nothing is the most
+    # likely way for a first bring-up to fail, and an empty stream used to be
+    # only a note -- so the all-silent device passed.
+    silent = {"gps": [], "can": [], "imu": [], "mtu": 247,
+              "info": vtp1.decode_info(smoke_dev.info())}
+    check(run_smoke(silent),
+          "smoketest.py passed a device that sent nothing at all while Info "
+          "said it was running")
+
+    # ...and the rate-aware half of that: GPS silent while Info promises 10 Hz
+    # is a fault, whatever the other streams did.
+    check(run_smoke(dict(captured, gps=[], mtu=247,
+                         info=vtp1.decode_info(smoke_dev.info()))),
+          "smoketest.py passed a silent GPS stream on a device whose Info "
+          "reports a non-zero gps_rate_hz")
+
+    # The converse must NOT fail: a device that says it is not running GPS and
+    # then does not send any is behaving correctly, and a check that cannot
+    # distinguish those two is a check that will be turned off on real
+    # hardware.
+    quiet_by_design = vtp1.decode_info(smoke_dev.info())
+    quiet_by_design["gps_rate_hz"] = 0
+    check(not run_smoke(dict(captured, gps=[], mtu=247, info=quiet_by_design)),
+          "smoketest.py failed a device that reports gps_rate_hz 0 and sends "
+          "no GPS, which is exactly what such a device should do")
+
+    # ---- The optional CAN capability bits, in the direction nobody runs --
+    # SPEC.md 4.1 gives each of the three a rule for when it is CLEAR, and a
+    # device that declares all three can only ever demonstrate the other half.
+    plain = dev.VtpDevice(
+        now_us=lambda: 0,
+        capabilities=dev.CAP_CAN | dev.CAP_CONTROL)   # no FD, mask or on_change
+
+    masked = plain.handle_control(
+        bytes([dev.CAN_SUBSCRIBE_MASK, 1])
+        + struct.pack("<IIBH", 0x1A0, 0x3FFFFFFF, 0, 0))
+    check(masked[2] == dev.ST_UNSUPPORTED,
+          f"without masked_subscriptions, CAN_SUBSCRIBE_MASK MUST answer "
+          f"unsupported_opcode, got status {masked[2]}")
+
+    # ...while CAN_SUBSCRIBE keeps working: it is a separate opcode that every
+    # CAN device implements, and the capability governs whether a client may
+    # CHOOSE the mask.
+    plainsub = plain.handle_control(
+        bytes([dev.CAN_SUBSCRIBE, 2]) + struct.pack("<IBH", 0x1A0, 0, 0))
+    check(plainsub[2] == dev.ST_OK,
+          f"CAN_SUBSCRIBE is unaffected by masked_subscriptions, got status "
+          f"{plainsub[2]}")
+
+    onchange = plain.handle_control(
+        bytes([dev.CAN_SUBSCRIBE, 3])
+        + struct.pack("<IBH", 0x2B0, dev.SUB_ON_CHANGE, 100))
+    check(onchange[2] == dev.ST_BAD_PARAMS,
+          f"without on_change_subscriptions, an on_change subscription MUST be "
+          f"refused with bad_params rather than silently forwarding every "
+          f"frame; got status {onchange[2]}")
+
+    # SPEC.md 4.2 -- the largest CAN payload is derived from the bits, not
+    # carried in a field. There is nothing left to disagree with, which is the
+    # point: `can_max_payload` could only ever hold 0, 8 or 64 and the bits
+    # already said which, so two rules covered a no-CAN device and gave
+    # different answers.
+    def payload_ceiling(info):
+        caps = info["capabilities"]
+        if not caps & dev.CAP_CAN:
+            return 0
+        return 64 if caps & dev.CAP_CAN_FD else 8
+
+    check(payload_ceiling(vtp1.decode_info(plain.info())) == 8,
+          "a CAN device without can_fd carries at most 8 payload bytes")
+    fd = dev.VtpDevice(now_us=lambda: 0,
+                       capabilities=dev.CAP_CAN | dev.CAP_CONTROL | dev.CAP_CAN_FD)
+    check(payload_ceiling(vtp1.decode_info(fd.info())) == 64,
+          "a CAN FD device carries up to 64")
+    nocan = dev.VtpDevice(now_us=lambda: 0, capabilities=dev.CAP_GPS)
+    check(payload_ceiling(vtp1.decode_info(nocan.info())) == 0,
+          "a device with no CAN carries none")
+    check(vtp1.decode_info(nocan.info())["reserved_20"] == 0,
+          "byte 20 is reserved now and MUST be zero on transmit (SPEC.md 2)")
+
+    # SPEC.md 13.4 -- a device asking for more channels than fit in one
+    # complete write is refused where the mistake is, not at the first
+    # MONITOR_LIST.
+    try:
+        dev.VtpDevice(now_us=lambda: 0,
+                      monitor_channels=[dev.CH_SPEED] * 16)
+        check(False, "16 monitor channels MUST be refused at construction "
+                     "(SPEC.md 13.4 allows 15)")
+    except ValueError:
+        pass
+    check(len(dev.VtpDevice(now_us=lambda: 0,
+                            monitor_channels=[dev.CH_SPEED] * 15)
+              ._monitor_channels) == 15,
+          "15 channels is the cap, and MUST be accepted")
+
+    bare_clock = [0]
+
+    # ---- A device does only what it says it does ------------------------
+    # SPEC.md 4.1 and 9. Every opcode is owned by a capability, and a device
+    # without the bit answers unsupported_opcode BEFORE looking at parameters.
+    # A device declaring only `control` used to emit GPS and IMU notifications
+    # and answer `ok` to CAN_SUBSCRIBE, GPS_SET_RATE, IMU_SET_RATE and
+    # MONITOR_LIST -- the capability set said what a device MAY do and nothing
+    # made it so.
+    bare = dev.VtpDevice(now_us=lambda: bare_clock[0],
+                         capabilities=dev.CAP_CONTROL)
+    bare.on_connect()
+    produced = []
+    for _ in range(400):
+        bare_clock[0] += 5_000
+        produced += [name for name, _ in bare.poll()]
+    check(not produced,
+          f"a device declaring only `control` MUST notify on nothing; it "
+          f"produced {sorted(set(produced))}")
+
+    owned = {
+        "CAN_RESET": bytes([dev.CAN_RESET, 1]),
+        "CAN_SUBSCRIBE": bytes([dev.CAN_SUBSCRIBE, 2])
+                         + struct.pack("<IBH", 0x1A0, 0, 0),
+        "CAN_SUBSCRIBE_MASK": bytes([dev.CAN_SUBSCRIBE_MASK, 3])
+                              + struct.pack("<IIBH", 0x1A0, 0x3FFFFFFF, 0, 0),
+        "CAN_UNSUBSCRIBE": bytes([dev.CAN_UNSUBSCRIBE, 4])
+                           + struct.pack("<H", 1),
+        "CAN_LIST": bytes([dev.CAN_LIST, 5]) + struct.pack("<H", 0),
+        "GPS_SET_RATE": bytes([dev.GPS_SET_RATE, 6]) + struct.pack("<H", 5),
+        "IMU_SET_RATE": bytes([dev.IMU_SET_RATE, 7]) + struct.pack("<H", 50),
+        "MONITOR_LIST": bytes([dev.MONITOR_LIST, 8]),
+    }
+    for name, request in owned.items():
+        got = bare.handle_control(request)
+        check(got[2] == dev.ST_UNSUPPORTED,
+              f"{name} MUST answer unsupported_opcode on a device that has "
+              f"not declared the capability owning it; got status {got[2]}")
+
+    # ...and the two that belong to no role still work, because they are about
+    # the link and the clock, which every device has.
+    for name, request in (("TIME_SYNC", bytes([dev.TIME_SYNC, 9])),
+                          ("GET_LINK_PARAMS", bytes([dev.GET_LINK_PARAMS, 10]))):
+        check(bare.handle_control(request)[2] == dev.ST_OK,
+              f"{name} has no owning capability and MUST still be answered")
+
+    # SPEC.md 9 -- availability is decided BEFORE parameters. A malformed
+    # request for an opcode this device does not have is unsupported_opcode,
+    # not bad_params: the two mean different things to a client, and getting
+    # them the wrong way round either loops it forever or makes it give up on
+    # a device that would have worked.
+    malformed = bare.handle_control(bytes([dev.GPS_SET_RATE, 11]) + b"\x01")
+    check(malformed[2] == dev.ST_UNSUPPORTED,
+          f"a MALFORMED request for an unavailable opcode MUST still answer "
+          f"unsupported_opcode, not bad_params; got status {malformed[2]}")
+
+    # The same order one level down: an unsupported subscription MODE is
+    # bad_params, but only once the opcode itself was available.
+    check(bare.handle_control(
+              bytes([dev.CAN_SUBSCRIBE, 12])
+              + struct.pack("<IBH", 0x1A0, dev.SUB_ON_CHANGE, 100))[2]
+          == dev.ST_UNSUPPORTED,
+          "on a device with no CAN at all, an on_change subscription is "
+          "unsupported_opcode -- the opcode was never available to carry the "
+          "mode (SPEC.md 9)")
+
+    # SPEC.md 4.1 -- monitor_values is inert without the bit.
+    check(bare.handle_monitor_write(
+              struct.pack("<HBB", 0, 1, 0) + struct.pack("<BBi", 0, 1, 5))
+          is not None,
+          "a device without the monitor bit MUST reject a value write; "
+          "accepting it would put values on a display for a role it does not "
+          "have")
 
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)
