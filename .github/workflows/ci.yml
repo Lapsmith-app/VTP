@@ -130,12 +130,21 @@ jobs:
       - name: Transport state machine conforms
         run: python3 reference/peripheral/transport_selftest.py
 
+      # The other direction. run.py only ever round-trips payloads that
+      # already decoded, so it asks whether an encoder reproduces something
+      # valid and never whether it declines something invalid. That gap let an
+      # encoder mask an out-of-range identifier into a valid frame for a
+      # different one, which no decoder could flag.
+      - name: Encoders refuse what they must
+        run: python3 tools/check_encoders.py
+
       # A partial implementation runs the roles it declares (SPEC.md 12). If
       # this stops filtering, a GPS-only decoder is handed CAN vectors and
       # fails conformance for records it never claimed.
       - name: Roles can be declared
         run: |
           python3 conformance/run.py --impl "reference/c/vtp1_cli" --roles gps
+          python3 conformance/run.py --impl "reference/c/vtp1_cli" --roles can,monitor
           if python3 conformance/run.py --impl "reference/c/vtp1_cli" --roles nonsense; then
             echo "::error::an unknown role name was accepted"
             exit 1

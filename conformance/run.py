@@ -26,12 +26,25 @@ VECTORS = ROOT / "conformance" / "vectors"
 # `core` is not optional: Info, the control response envelope and link
 # parameters are what every device answers regardless of which streams it has.
 ROLES = {
-    "core":    {"info", "control_response", "link_params", "time_sync"},
+    # §4 — every device answers Info, whatever else it implements. Nothing
+    # else is unconditional.
+    "core":    {"info"},
+    # §9 — the Control characteristic is a capability (§4 bit 3), not a
+    # requirement. `core` used to carry the control-plane records, so
+    # `--roles gps` demanded a Control characteristic from a GPS-only device
+    # that the specification permits not to have one, leaving it to fail
+    # conformance for records it never claimed or to implement things it does
+    # not support.
+    "control": {"control_response", "link_params", "time_sync"},
     "gps":     {"gps_fix"},
     "can":     {"can_batch", "can_list"},
     "imu":     {"imu_batch"},
     "monitor": {"monitor_list", "monitor_update"},
 }
+
+# A role whose records only exist if another one does. CAN_LIST is a Control
+# response about CAN, so it is reachable only by a device with both.
+IMPLIES = {"can": ("control",), "monitor": ("control",)}
 
 
 def load(roles=None):
@@ -41,6 +54,8 @@ def load(roles=None):
         wanted = set(ROLES["core"])
         for role in roles:
             wanted |= ROLES[role]
+            for implied in IMPLIES.get(role, ()):
+                wanted |= ROLES[implied]
     cases = []
     for path in sorted(VECTORS.glob("*.json")):
         for c in json.loads(path.read_text())["cases"]:

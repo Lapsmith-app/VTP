@@ -11,7 +11,7 @@
  "can-batch/len-above-maximum": "b0b6561e400a84b247d41b8ed1030056463bcd295a4a3e5e3104924c96e8a567",
  "can-batch/remote-frame": "d398b8acf102bd58b4d649069944fa54b5970524fead6a4b0ade6fef28b7d0d8",
  "can-batch/remote-frame-with-payload": "b72313482fe4ec76d034edf310f5b5631d53cda3e42a17da33864e44d031679f",
- "can-batch/reserved-nonzero": "ebb0cd14ad3aa01cb8a373537aae833e05f0b3c9cee5df60e58b95ac5c98bbd4",
+ "can-batch/reserved-nonzero": "f4ea0f97958d33e805ebbbe26318025c79476df8492b1874a3413ea3fe505717",
  "can-batch/seq-wrap-and-saturated-loss": "47110b9581224541ac04df0785e6bec697da707e0f4fa5afbd38c84dc5f0713a",
  "can-batch/shedding-load": "b068ce1af89b8db0a5dd2f74394f8407ea8004b42f4c57cd34be33aa8fb3c3b7",
  "can-batch/short-payload": "809b2ce898c45ecbfff04b8b7280d8b8fef2ba8f2448a2a1b7b7499446cef2dd",

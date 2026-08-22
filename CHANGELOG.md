@@ -8,6 +8,56 @@ conformance vector.
 
 ## [Unreleased]
 
+### Fixed — the producer direction
+Milestone 3 of the second review. Every defect reproduced before it was fixed.
+
+- **An out-of-range CAN identifier was masked, not refused.** `0x3FFFFFFF`
+  became `0x1FFFFFFF` and `-1` became `0x1FFFFFFF` too, so two different
+  mistakes produced one frame the caller never asked for — on the field a
+  client uses to decide what the payload means. Both encoders now refuse. The
+  format is carried by `extended`, not by high bits of `id`.
+
+- **Reserved fields were transmitted rather than zeroed.** SPEC.md §2 requires
+  them to be zero **on transmit**, and both encoders wrote the caller's value
+  through. The reasoning recorded at the time — that a later minor might have
+  been assigned those bytes, and erasing them would be worse — does not hold
+  for a 1.0 encoder: a build that knows what the bytes mean is a build that
+  names them. Until then, writing them through let a caller put arbitrary
+  content into a field every conforming receiver is required to ignore.
+
+  `reserved-nonzero` is now deliberately non-canonical, and is the only vector
+  asserting both halves of the rule at once: a decoder must ignore the bytes,
+  and an encoder must normalise them away.
+
+- **Monitor encoders emitted declarations their own decoders reject** — a
+  repeated slot, and a `total` beyond what fits in one complete write. Both
+  were already decoder rules, so the corpus could see the result and never the
+  cause.
+
+### Added
+- **A producer conformance corpus** (`conformance/encoders.json`,
+  `tools/check_encoders.py`). Everything else here tests decoding, and what it
+  said about encoders came entirely from round-tripping payloads that had
+  already decoded — which asks whether an encoder reproduces something valid
+  and never whether it declines something invalid.
+
+  That gap is where the identifier-masking bug lived, and no byte vector can
+  reach it: the point is that the wrong bytes are never produced. Fourteen
+  cases carry structured input instead, twelve that MUST be refused and two
+  that MUST encode, so a harness that refuses everything cannot pass either.
+  Verified to fail when the identifier check is removed.
+
+- **`control` is a role of its own, and `core` is only Info.** SPEC.md §12 asks
+  an implementation to pass the vectors for the roles it declares, and the
+  Control characteristic is a capability (§4 bit 3) rather than a requirement —
+  but `core` carried the control-plane records, so `--roles gps` demanded a
+  Control characteristic from a GPS-only device the specification permits not
+  to have one. Its only options were to fail conformance for records it had
+  never claimed, or to implement things it does not support.
+
+  A GPS-only device now runs 28 vectors rather than 47. `can` and `monitor`
+  imply `control`, because their tables are reached through it.
+
 ### Fixed — the reference peripheral
 Milestone 2 of the second review. Every defect was reproduced before it was
 touched.

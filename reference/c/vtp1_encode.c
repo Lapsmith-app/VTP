@@ -107,6 +107,13 @@ static int vtp_fd_len_ok(uint8_t n) {
     }
 }
 
+/* SPEC.md §2 -- a reserved field is ZERO on transmit. These used to write the
+ * caller's value through, reasoning that a later minor might have been
+ * assigned the bytes. But this is a 1.0 encoder: a build that knows what those
+ * bytes mean is a build that names them, and until then writing them through
+ * simply let a caller put arbitrary content into a field every conforming
+ * receiver is required to ignore. */
+
 int vtp_encode_can_batch(const vtp_can_header_t *h,
                          const vtp_can_frame_t *frames,
                          uint8_t *out, size_t cap) {
@@ -140,12 +147,17 @@ int vtp_encode_can_batch(const vtp_can_header_t *h,
     /* Reserved bytes are written through rather than forced to zero: a device
      * built against a later minor may have been assigned them, and this
      * encoder must not silently erase a field it does not know about. */
-    wr16(out + VTP_CAN_HEADER_OFF_RESERVED, h->reserved);
+    wr16(out + VTP_CAN_HEADER_OFF_RESERVED, 0);   /* §2 */
 
     size_t off = VTP_CAN_HEADER_SIZE;
     for (uint8_t i = 0; i < h->count; i++) {
         const vtp_can_frame_t *fr = &frames[i];
-        uint32_t raw = fr->id & 0x1FFFFFFFu;
+        /* An identifier outside the arbitration field is not one to be
+         * trimmed to fit: masking made 0x3FFFFFFF into 0x1FFFFFFF, a frame
+         * the caller never asked for, on the field a client uses to decide
+         * what the bytes mean. */
+        if (fr->id > 0x1FFFFFFFu) return -1;
+        uint32_t raw = fr->id;
         if (fr->extended) raw |= (1u << 29);
         if (fr->fd)       raw |= (1u << 30);
         if (fr->rtr)      raw |= (1u << 31);
@@ -177,9 +189,9 @@ int vtp_encode_imu_batch(const vtp_imu_header_t *h,
     wr32(out + VTP_IMU_HEADER_OFF_PERIOD, h->period);
     out[VTP_IMU_HEADER_OFF_COUNT] = h->count;
     out[VTP_IMU_HEADER_OFF_FLAGS] = h->flags;
-    /* Written through, not zeroed, for the same reason as can_header.reserved:
+    /*
      * a later minor may have been assigned these bytes. */
-    wr16(out + VTP_IMU_HEADER_OFF_RESERVED, h->reserved);
+    wr16(out + VTP_IMU_HEADER_OFF_RESERVED, 0);   /* §2 */
 
     const int accel = (h->flags & VTP_IMU_HAS_ACCEL) != 0;
     const int gyro = (h->flags & VTP_IMU_HAS_GYRO) != 0;
@@ -224,13 +236,20 @@ int vtp_encode_monitor_list(const vtp_monitor_page_t *p,
     const size_t needed = (size_t)VTP_MONITOR_PAGE_SIZE
                         + (size_t)p->count * VTP_MONITOR_CHANNEL_SIZE;
     if (cap < needed) return -1;
+    /* SPEC.md §13.3, §13.4 -- both already enforced by the decoder, so
+     * emitting either produced a declaration this repository's own reader
+     * refuses to read. */
+    if (p->total > VTP_MONITOR_MAX_CHANNELS) return -1;
+    for (uint8_t i = 0; i < p->count; i++)
+        for (uint8_t j = (uint8_t)(i + 1); j < p->count; j++)
+            if (entries[i].slot == entries[j].slot) return -1;
     if (p->count && !entries) return -1;
     memset(out, 0, needed);
 
     wr16(out + VTP_MONITOR_PAGE_OFF_TOTAL, p->total);
     wr16(out + VTP_MONITOR_PAGE_OFF_INDEX, p->index);
     out[VTP_MONITOR_PAGE_OFF_COUNT] = p->count;
-    out[VTP_MONITOR_PAGE_OFF_RESERVED] = p->reserved;
+    out[VTP_MONITOR_PAGE_OFF_RESERVED] = 0;   /* §2 */
 
     for (uint8_t i = 0; i < p->count; i++) {
         uint8_t *e = out + VTP_MONITOR_PAGE_SIZE
@@ -248,12 +267,16 @@ int vtp_encode_monitor_update(const vtp_monitor_header_t *h,
     const size_t needed = (size_t)VTP_MONITOR_HEADER_SIZE
                         + (size_t)h->count * VTP_MONITOR_VALUE_SIZE;
     if (cap < needed) return -1;
+    /* SPEC.md §13.4 -- a slot twice, and nothing says which wins. */
+    for (uint8_t i = 0; i < h->count; i++)
+        for (uint8_t j = (uint8_t)(i + 1); j < h->count; j++)
+            if (values[i].slot == values[j].slot) return -1;
     if (h->count && !values) return -1;
     memset(out, 0, needed);
 
     wr16(out + VTP_MONITOR_HEADER_OFF_SEQ, h->seq);
     out[VTP_MONITOR_HEADER_OFF_COUNT] = h->count;
-    out[VTP_MONITOR_HEADER_OFF_RESERVED] = h->reserved;
+    out[VTP_MONITOR_HEADER_OFF_RESERVED] = 0;   /* §2 */
 
     for (uint8_t i = 0; i < h->count; i++) {
         uint8_t *e = out + VTP_MONITOR_HEADER_SIZE
@@ -282,7 +305,7 @@ int vtp_encode_can_list(const vtp_can_list_page_t *p,
     wr16(out + VTP_CAN_LIST_PAGE_OFF_TOTAL, p->total);
     wr16(out + VTP_CAN_LIST_PAGE_OFF_INDEX, p->index);
     out[VTP_CAN_LIST_PAGE_OFF_COUNT] = p->count;
-    out[VTP_CAN_LIST_PAGE_OFF_RESERVED] = p->reserved;
+    out[VTP_CAN_LIST_PAGE_OFF_RESERVED] = 0;   /* §2 */
 
     for (uint8_t i = 0; i < p->count; i++) {
         uint8_t *e = out + VTP_CAN_LIST_PAGE_SIZE

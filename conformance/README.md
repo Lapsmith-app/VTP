@@ -30,11 +30,32 @@ python3 conformance/run.py --impl "./my-decoder" --roles gps
 
 | Role | Records |
 | --- | --- |
-| `core` | `info`, `control_response`, `link_params` — always included, never optional |
+| `core` | `info` — always included, never optional (§4) |
+| `control` | `control_response`, `link_params`, `time_sync` |
 | `gps` | `gps_fix` |
-| `can` | `can_batch`, `can_list` |
+| `can` | `can_batch`, `can_list` — implies `control` |
 | `imu` | `imu_batch` |
-| `monitor` | `monitor_list`, `monitor_update` |
+| `monitor` | `monitor_list`, `monitor_update` — implies `control` |
+
+Only Info is unconditional. The Control characteristic is a capability (§4 bit
+3), not a requirement, so a GPS-only device is not asked for control responses
+— `core` used to carry them, which left such a device failing conformance for
+records it had never claimed. `can` and `monitor` imply `control` because their
+tables are reached through it.
+
+## The producer direction
+
+Everything above tests **decoding**. The corpus says nothing about what an
+encoder must refuse, because round-tripping a payload that already decoded only
+ever asks whether an encoder reproduces something valid.
+
+`conformance/encoders.json` carries the other direction: structured inputs,
+each marked `must_refuse`. They cannot be byte vectors, because the point is
+that the bytes are never produced.
+
+```sh
+python3 tools/check_encoders.py
+```
 
 Omit `--roles` to run everything, which is what a full implementation should
 do. The summary line names the scope either way, because a green run over one
