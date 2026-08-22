@@ -8,6 +8,28 @@ conformance vector.
 
 ## [Unreleased]
 
+### Added — peripheral diagnostics
+- **An accepted Monitor update left no trace, so a silent client and a working
+  one looked identical.** The software peripheral logged a *rejected* write to
+  `monitor_values` and nothing at all for an accepted one, and it collected
+  `monitor_updates` and `monitor_seq` into the panel's telemetry without
+  rendering them anywhere. An empty Monitor panel therefore had two
+  indistinguishable causes — the client had written nothing, or the display was
+  not showing what it had written — and separating them meant inferring from
+  the absence of evidence.
+
+  The first accepted update of each connection is now logged in full, with
+  every slot rendered through the same formatter the panel uses so absence
+  reads as absence. Later updates stay silent: a client may write at its own
+  display rate, and a line per update buries the control conversation. The
+  ten-second status line carries the running count, the sequence number and how
+  many slots are actually supplied, and says so explicitly when a *connected*
+  client has written nothing — which is the case §13.1 exists to explain, the
+  device asking and the client supplying.
+
+  Refused updates are counted rather than only warned about, so the status line
+  distinguishes a client sending nothing from one sending malformed batches.
+
 ### Review of PR #24, third pass
 
 - **CI was red and my own verification hid it.** `encode_selftest.c` still
