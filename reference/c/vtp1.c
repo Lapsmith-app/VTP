@@ -325,6 +325,43 @@ int vtp_phy_known(uint8_t p) {
     }
 }
 
+int vtp_status_known(uint8_t s) {
+    switch (s) {
+        case VTP_STATUS_OK:
+        case VTP_STATUS_UNSUPPORTED_OPCODE:
+        case VTP_STATUS_BAD_PARAMS:
+        case VTP_STATUS_TABLE_FULL:
+        case VTP_STATUS_RATE_EXCEEDED:
+        case VTP_STATUS_BUSY:
+        case VTP_STATUS_NEEDS_ENCRYPTION:
+        case VTP_STATUS_UNKNOWN_HANDLE:
+            return 1;
+        default:
+            return 0;   /* A status a later minor assigned. Stays unknown. */
+    }
+}
+
+int vtp_decode_control_response(const uint8_t *b, size_t len,
+                                vtp_control_response_t *o, const char **err) {
+    if (len < VTP_CONTROL_RESPONSE_SIZE) { *err = "length"; return -1; }
+
+    o->opcode = b[VTP_CONTROL_RESPONSE_OFF_OPCODE];
+    o->tag    = b[VTP_CONTROL_RESPONSE_OFF_TAG];
+    o->status = b[VTP_CONTROL_RESPONSE_OFF_STATUS];
+
+    o->detail     = NULL;
+    o->detail_len = len - VTP_CONTROL_RESPONSE_SIZE;
+    /* SPEC.md §9 -- detail is present if and only if status is ok. A refused
+     * request answered with a detail would hand a client that has already
+     * decided the request succeeded a well-formed value from a request that
+     * failed. */
+    if (o->detail_len && o->status != VTP_STATUS_OK) {
+        *err = "detail-on-error"; return -1;
+    }
+    if (o->detail_len) o->detail = b + VTP_CONTROL_RESPONSE_SIZE;
+    return 0;
+}
+
 int vtp_decode_link_params(const uint8_t *b, size_t len,
                            vtp_link_params_t *o, const char **err) {
     /* Fixed size, no extension mechanism: any other length is malformed. */

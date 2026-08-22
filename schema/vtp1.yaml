@@ -34,11 +34,11 @@ enums:
     members:
       - {value: 0, name: ok,                 desc: "Request accepted"}
       - {value: 1, name: unsupported_opcode, desc: "Opcode not implemented"}
-      - {value: 2, name: bad_params,         desc: "Parameters malformed or out of range"}
+      - {value: 2, name: bad_params,         desc: "Parameters malformed or out of range, or the tag is already outstanding"}
       - {value: 3, name: table_full,         desc: "No free subscription slot"}
       - {value: 4, name: rate_exceeded,      desc: "Would exceed can_max_frames_per_s"}
-      - {value: 5, name: busy,               desc: "Retry later"}
-      - {value: 6, name: needs_encryption,   desc: "Link is not encrypted"}
+      - {value: 5, name: busy,               desc: "No room for another outstanding request; retry (SPEC.md 9)"}
+      - {value: 6, name: needs_encryption,   desc: "Allocated, never sent: encryption is enforced by GATT permission (SPEC.md 10)"}
       - {value: 7, name: unknown_handle,     desc: "No subscription with that handle"}
   sub_mode:
     width: 1
@@ -291,6 +291,16 @@ records:
       - {name: mask,   offset: 6,  size: 4, type: u32, desc: "A set bit is a bit of `id` that must match; bits 0-29 only"}
       - {name: mode,   offset: 10, size: 1, type: u8, enum: sub_mode}
       - {name: arg,    offset: 11, size: 2, type: u16, desc: "Interpretation depends on `mode`"}
+
+  control_response:
+    access: control
+    size: 3          # plus an opaque detail when status is ok
+    variable: detail
+    desc: "The envelope of every Control response. Detail follows only when status is ok."
+    fields:
+      - {name: opcode, offset: 0, size: 1, type: u8, desc: "Echoed from the request"}
+      - {name: tag,    offset: 1, size: 1, type: u8, desc: "Echoed from the request; opaque to the device"}
+      - {name: status, offset: 2, size: 1, type: u8, enum: status}
 
   link_params:
     access: control

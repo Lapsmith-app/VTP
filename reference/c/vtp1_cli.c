@@ -316,6 +316,17 @@ int main(void) {
             put_link_absent(&l);
             finish(enc, vtp_encode_link_params(&l, enc, sizeof enc));
 
+        } else if (!strcmp(record, "control_response")) {
+            vtp_control_response_t r;
+            if (vtp_decode_control_response(buf, len, &r, &err)) { reject(err); continue; }
+            printf("{\"ok\":true,\"opcode\":%u,\"tag\":%u,\"status\":%u,"
+                   "\"status_known\":%s,\"detail_hex\":\"",
+                   r.opcode, r.tag, r.status,
+                   vtp_status_known(r.status) ? "true" : "false");
+            put_hex(r.detail, r.detail_len);
+            printf("\"");
+            finish(enc, vtp_encode_control_response(&r, enc, sizeof enc));
+
         } else {
             reject("unknown-record");
         }

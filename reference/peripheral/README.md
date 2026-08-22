@@ -111,7 +111,16 @@ transceiver. Full layouts are under
 [The synthetic CAN bus](#the-synthetic-can-bus) below.
 
 A client must send `CAN_SUBSCRIBE` for each id before any CAN arrives — the
-table is empty on every connection (SPEC.md §9.2).
+table is empty on every connection (SPEC.md §9.2), and it must **enable
+indications on Control before its first write** (SPEC.md §9.6). A write that
+arrives before then is discarded *unapplied* and logged as such: the response
+would have nowhere to go, and a device that applied it anyway would leave the
+two ends disagreeing about the table.
+
+**By default every characteristic except Info requires an encrypted link**, so
+the first connection raises a pairing prompt. SPEC.md §10 leaves that choice to
+the device and requires every *client* to support all of them, so `--encrypt`
+selects which posture this device presents — see [Pairing](#pairing).
 
 As a worked example, in LapSmith's pasted-channel format:
 
@@ -170,6 +179,54 @@ built and demonstrated against it.
 properties of an MCU and a radio, not of a host operating system's scheduler.
 This makes a client developable. It leaves VTP/1 unproven on hardware, which is
 still the largest gap in this repository.
+
+## Pairing, and the three encryption postures
+
+SPEC.md §10 requires no device to encrypt anything, and requires every client
+to cope with one that does. So the interesting thing to test is not whether a
+*device* encrypts — it is whether a **client** still works against each posture
+a device is allowed to present. This peripheral can present all three:
+
+| `--encrypt` | Protected | What it tests |
+| --- | --- | --- |
+| `all` *(default)* | Everything but Info | The client pairs and then works on every characteristic |
+| `control` | Control only | The common-but-incoherent arrangement §10.2 warns about |
+| `none` | Nothing | The client does not *require* encryption either |
+
+A client that passes all three supports encryption without requiring it, which
+is what §10 asks of it. Info stays readable in every posture (§10.2) so a
+client that cannot pair can still identify the device rather than reporting it
+as broken.
+
+Run each in turn:
+
+```bash
+open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt all
+open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt control
+open "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt none
+```
+
+The log names the posture at startup, and `notify-subscribed:` names the
+characteristics the client actually got onto — which is how you tell "the
+client paired and proceeded" from "the client was stopped at the gate".
+
+If a client cannot pair at all, forget the device on it first. A stale bond
+against a peripheral that has since restarted with a new identity produces
+repeated authentication failures that look exactly like a device fault, and it
+is the single most common cause. `--encrypt none` then establishes whether
+pairing is the problem or something else is.
+
+macOS in the *peripheral* role is a much thinner path than in the central role.
+Just Works pairing initiated against a Mac acting as a peripheral does work —
+verified against LapSmith on iOS, which raised a prompt, paired, and then wrote
+to Control successfully.
+
+## Device Information Service
+
+The peripheral also exposes the standard Device Information Service (`0x180A`)
+with manufacturer, model, firmware revision and serial number, which SPEC.md
+§3.4 recommends. Nothing in VTP/1 reads it — it is there because it is where
+every generic BLE tool already looks when someone asks what a device is.
 
 ## Platform limits
 

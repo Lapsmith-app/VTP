@@ -21,7 +21,7 @@ clock, with no lossy packing.
 | --- | --- |
 | Specification | Complete |
 | UUID allocation | Frozen |
-| Conformance corpus | 86 vectors across 7 record types |
+| Conformance corpus | 95 vectors across 8 record types |
 | Reference decoders | C and Python, both passing |
 | Software peripheral | A synthetic device, verified against the reference decoder |
 | Reference **firmware** | **Not written.** VTP/1 is unproven on real hardware. |

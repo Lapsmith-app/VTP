@@ -241,6 +241,67 @@ def main():
           f"a mask matching three identifiers forwarded {sorted(matched)}; "
           f"every matching identifier keeps its own mode state")
 
+    # ---- The request lifecycle ------------------------------------------
+    # SPEC.md §9.6 — admission is decided before dispatch, so these are the
+    # rules that stop a device applying a request it cannot answer. Exercised
+    # against the transport's queue directly: it holds no Bluetooth state
+    # precisely so that this is testable without a radio.
+    q = serve.ControlQueue()
+    check(q.depth >= 4,
+          f"SPEC.md 9 requires at least four outstanding requests, not "
+          f"{q.depth}")
+    for tag in range(q.depth):
+        check(q.admit(tag) == "apply",
+              f"request {tag + 1} of {q.depth} MUST be admitted")
+        q.hold(tag, bytes([0x02, tag, 0]))
+    check(q.admit(200) == "busy",
+          "a request beyond the queue depth MUST be answered busy, not "
+          "silently discarded")
+
+    # SPEC.md §9 — the tag is the only means of correlation, so a second
+    # request bearing an outstanding one cannot be applied.
+    check(q.admit(0) == "duplicate-tag",
+          "a tag that is still outstanding MUST NOT be admitted a second time")
+    q.delivered()
+    check(q.admit(0) == "apply",
+          "a tag MUST become reusable once its response has been delivered")
+
+    # Nothing is owed to a client that has gone.
+    q.discard_all()
+    check(len(q) == 0 and q.dropped > 0,
+          "a dropped link MUST clear the queue and count what never arrived")
+
+    # ---- Encryption postures --------------------------------------------
+    # SPEC.md §10 — a device MAY require an encrypted link on any
+    # characteristic, all of them, or none; a client MUST support each. The
+    # peripheral can present all three, and the mapping is checked here rather
+    # than only at startup: a posture that leaves something unencrypted took a
+    # different path through the permission arithmetic than one that does not,
+    # and only the encrypt-everything path had been exercised.
+    streams = {"gps", "can", "imu", "monitor_values"}
+    postures = {p: serve.encrypted_characteristics(p)
+                for p in serve.ENCRYPTION_POSTURES}
+    check(postures["none"] == set(),
+          f"the none posture MUST protect nothing, protects {postures['none']}")
+    check(postures["control"] == {"control"},
+          f"the control posture MUST protect Control alone, protects "
+          f"{postures['control']}")
+    check(postures["all"] == streams | {"control"},
+          f"the all posture MUST protect every stream and Control, protects "
+          f"{postures['all']}")
+    for name, protected in postures.items():
+        # SPEC.md §10.2 — Info stays readable in every posture, so a client
+        # that cannot pair can still identify what it found.
+        check("info" not in protected,
+              f"the {name} posture encrypts Info; §10.2 says to leave it "
+              f"readable so an unpaired client can still identify the device")
+    try:
+        serve.encrypted_characteristics("sometimes")
+        check(False, "an unknown posture MUST be rejected, not silently "
+                     "treated as one of the three")
+    except ValueError:
+        pass
+
     # A start past the end is ok with count 0, never an error.
     beyond = vtp1.decode_can_list(
         device.handle_control(bytes([dev.CAN_LIST, 10])

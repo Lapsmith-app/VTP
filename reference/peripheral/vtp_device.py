@@ -55,6 +55,8 @@ CH_SPEED, CH_SESSION_DISTANCE, CH_SESSION_TIME = 7, 8, 9
 
 MONITOR_PRESENT = 0x01
 
+PROTOCOL_MAJOR, PROTOCOL_MINOR = 1, 0
+
 ST_OK, ST_UNSUPPORTED, ST_BAD_PARAMS = 0, 1, 2
 ST_TABLE_FULL, ST_RATE_EXCEEDED = 3, 4
 ST_UNKNOWN_HANDLE = 7
@@ -305,8 +307,8 @@ class VtpDevice:
 
     def info(self):
         return enc.encode_info({
-            "protocol_major": 1,
-            "protocol_minor": 0,
+            "protocol_major": PROTOCOL_MAJOR,
+            "protocol_minor": PROTOCOL_MINOR,
             "capabilities": (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
                              | CAP_MONITOR | CAP_MASKED_SUBS
                              | CAP_ONCHANGE_SUBS),

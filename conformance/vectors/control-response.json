@@ -1,0 +1,111 @@
+{
+  "protocol": "VTP/1",
+  "generated_by": "tools/generate.py",
+  "cases": [
+    {
+      "name": "ok-with-detail",
+      "desc": "A successful CAN_SUBSCRIBE: three envelope bytes and the handle it assigned. SPEC.md 9 -- detail is present because status is ok.",
+      "record": "control_response",
+      "hex": "0201000700",
+      "expect": {
+        "opcode": 2,
+        "tag": 1,
+        "status": 0,
+        "status_known": true,
+        "detail_hex": "0700"
+      }
+    },
+    {
+      "name": "ok-without-detail",
+      "desc": "A successful CAN_RESET. The opcode has no response detail, so an ok response is three bytes and that is not a truncated one.",
+      "record": "control_response",
+      "hex": "010200",
+      "expect": {
+        "opcode": 1,
+        "tag": 2,
+        "status": 0,
+        "status_known": true,
+        "detail_hex": ""
+      }
+    },
+    {
+      "name": "refused-is-three-bytes",
+      "desc": "CAN_SUBSCRIBE refused with bad_params. Exactly three bytes: a client reading the five it would get on success takes a handle from a request that failed.",
+      "record": "control_response",
+      "hex": "020302",
+      "expect": {
+        "opcode": 2,
+        "tag": 3,
+        "status": 2,
+        "status_known": true,
+        "detail_hex": ""
+      }
+    },
+    {
+      "name": "busy-is-not-a-refusal",
+      "desc": "busy says nothing about the request itself. SPEC.md 9 -- a client MUST retry rather than treat it as refused, and the envelope is the same three bytes as any other non-ok status.",
+      "record": "control_response",
+      "hex": "020405",
+      "expect": {
+        "opcode": 2,
+        "tag": 4,
+        "status": 5,
+        "status_known": true,
+        "detail_hex": ""
+      }
+    },
+    {
+      "name": "table-full",
+      "desc": "table_full on a subscription install. SPEC.md 9.2 -- the device is out of slots, which is a property of the device rather than of the request, and carries no detail.",
+      "record": "control_response",
+      "hex": "030503",
+      "expect": {
+        "opcode": 3,
+        "tag": 5,
+        "status": 3,
+        "status_known": true,
+        "detail_hex": ""
+      }
+    },
+    {
+      "name": "unknown-status",
+      "desc": "A status this build does not recognise. SPEC.md 11.4 -- it MUST decode as unknown and MUST NOT be substituted for a default; in particular it is neither ok nor a specific failure.",
+      "record": "control_response",
+      "hex": "0206c8",
+      "expect": {
+        "opcode": 2,
+        "tag": 6,
+        "status": 200,
+        "status_known": false,
+        "detail_hex": ""
+      }
+    },
+    {
+      "name": "unknown-opcode-detail-is-opaque",
+      "desc": "An ok response to an opcode this build does not implement, carrying four bytes of detail. SPEC.md 11.3 lets a minor version add opcodes with any payload, so the envelope decoder MUST carry the detail rather than reject it.",
+      "record": "control_response",
+      "hex": "770700deadbeef",
+      "expect": {
+        "opcode": 119,
+        "tag": 7,
+        "status": 0,
+        "status_known": true,
+        "detail_hex": "deadbeef"
+      }
+    },
+    {
+      "name": "detail-on-error",
+      "desc": "bad_params carrying two bytes of detail. MUST be rejected: detail is present if and only if status is ok, and a client that has already decided the request succeeded would read those bytes as a handle.",
+      "record": "control_response",
+      "hex": "0208020700",
+      "must_reject": "detail-on-error"
+    },
+    {
+      "name": "short-payload",
+      "desc": "Two bytes: an opcode and a tag with no status. MUST be rejected rather than read as a status of whatever follows.",
+      "record": "control_response",
+      "hex": "0209",
+      "must_reject": "length"
+    }
+  ]
+}

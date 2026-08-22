@@ -9,6 +9,119 @@ conformance vector.
 ## [Unreleased]
 
 ### Changed — wire format
+- **§10 no longer requires any device to encrypt anything, and requires every
+  client to support a device that does.** The requirement had been on Control
+  alone, which protects the wrong half: Control carries commands, from which an
+  eavesdropper learns little, while the streams carry the measurement —
+  position included — and were left in the clear. It guarded who may
+  reconfigure a device while leaving what the device reports readable by anyone
+  in range.
+
+  Requiring encryption costs a device author real work: bond storage, a bond
+  table that fills, and a mismatch after reflashing that presents as a broken
+  device. That cost lands hardest on the small implementations this protocol
+  needs, in exchange — under the old split — for protecting the part with
+  nothing to reveal. Supporting encryption costs a client almost nothing, since
+  every major central stack turns `Insufficient Encryption` into a pairing
+  attempt on its own.
+
+  So the obligation moved to the side that can bear it. A device MAY protect
+  any characteristic, all of them, or none; a client MUST cope with each. A
+  device that protects anything SHOULD protect the streams and not only
+  Control, and one on a bus carrying more than powertrain telemetry SHOULD
+  protect everything — but both are now SHOULD, not MUST.
+
+  §10 also states plainly what Just Works pairing buys, which it did not
+  before: protection from a passive listener, and none from an active
+  man-in-the-middle.
+
+- **§10's requirement could not have been implemented as written in any case.**
+  It required both that Control require an encrypted link *and* that a device
+  reject unencrypted writes with status `needs_encryption`. Those are mutually
+  exclusive: a characteristic carrying the GATT encryption permission has its
+  unencrypted writes answered by the ATT layer, so nothing reaches application
+  code to generate a reply from, and a device that can reply has not set the
+  permission.
+
+  §10.1 now requires the GATT permission of any device that chooses to encrypt.
+  Status `needs_encryption` (6) stays allocated and MUST NOT be reused, but a
+  conforming device has no occasion to send it.
+
+- **Info SHOULD be readable on an unencrypted link whatever a device
+  protects (§10.2).** A client that cannot pair, or has not yet, can then still
+  identify what it has found and say so, rather than reporting a device that is
+  present, advertising a VTP service and apparently broken.
+
+- **`detail` is present if and only if `status` is `ok` (§9).** A refused
+  request is three bytes. Nothing had said so, and the peripheral already
+  behaved this way, so a client reading the five bytes a successful
+  `CAN_SUBSCRIBE` returns would have taken a handle from a request that failed.
+  The alternative — a fixed-width response zero-filled on failure — hands that
+  client a well-formed handle 0 instead, which is the plausible-wrong-value
+  failure §1.1 exists to prevent.
+
+### Added
+- **The request lifecycle (§9.6).** Three rules that were previously left to be
+  discovered:
+
+  A client MUST enable indications on Control before its first write. A device
+  MUST NOT apply a request it cannot answer. Every opcode in the specification
+  is safe to retry, and the table saying why is now in the specification rather
+  than in each implementer's head.
+
+  The second is the load-bearing one, and it is the one an implementation is
+  most likely to get wrong, because applying first and answering second is the
+  natural order to write the code in. This exact failure was observed against a
+  real client before it was specified: the device applied a subscription,
+  dropped the refusal it owed for a later one, and the client timed out and
+  dropped the link while the device believed itself correctly configured.
+
+- **A queue depth, and a rule for reusing tags (§9).** A device MUST accept at
+  least four outstanding requests and MUST answer `busy` rather than silently
+  discarding one it has no room for. A client MUST NOT reuse a tag while a
+  request bearing it is outstanding, and a device MUST answer `bad_params` to
+  one that does — correlation is the tag's only job, and two outstanding
+  requests sharing one produce two responses a client cannot tell apart.
+
+  Four is a fixed floor rather than a value advertised in Info: a negotiated
+  depth would cost a field in a record that can never grow again (§11.2) to
+  solve what a constant solves.
+
+- **`control_response` is now a conformance record.** The response envelope was
+  the one wire format in VTP/1 with no coverage at all, which is why the rule
+  above could be stated but not enforced. Both reference implementations decode
+  and re-encode it, and nine vectors cover the conditional detail, an unknown
+  status, an unknown opcode's opaque detail, and both malformed cases. Removing
+  the detail-on-error check now fails a vector.
+
+- **§3.4 — the Device Information Service (`0x180A`) is now a SHOULD**:
+  manufacturer, model and firmware revision at least. Nothing in VTP/1 reads
+  it, which is the point — it is where every generic Bluetooth tool already
+  looks, so it answers "which firmware is on the logger that is misbehaving"
+  without the asker knowing anything about this protocol. The peripheral
+  exposes it.
+
+### Fixed
+- **The peripheral applied control requests it could not answer, and queued
+  responses without bound.** Both halves of §9.6, and the second was a way for
+  a client to make the device allocate without limit. Admission is now decided
+  ahead of dispatch by a queue that holds no Bluetooth state, so the rules are
+  covered by the selftest without a radio.
+
+- **The peripheral can now present each of the three encryption postures §10
+  permits**, because the interesting question is not whether a device encrypts
+  but whether a *client* still works against one that does. `--encrypt all`
+  (the default) protects everything but Info, `control` reproduces the
+  incoherent arrangement §10.2 warns about, and `none` protects nothing. A
+  client that passes all three supports encryption without requiring it, which
+  is what §10 asks of it.
+
+  Verified against LapSmith on iOS at the `control` posture: it raised a
+  pairing prompt, paired, enabled indications on Control and installed three
+  subscriptions. Just Works pairing initiated against a Mac in the peripheral
+  role does work, which was the platform risk worth settling.
+
+### Changed — wire format
 - **A CAN subscription now identifies a frame by its format as well as its
   identifier.** Matching ran over `0x1FFFFFFF`, the twenty-nine arbitration
   bits. Bit 29 — the standard/extended flag — fell outside it, and the

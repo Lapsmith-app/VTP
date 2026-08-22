@@ -127,6 +127,12 @@
 #define VTP_CAN_SUBSCRIPTION_OFF_MODE 10
 #define VTP_CAN_SUBSCRIPTION_OFF_ARG 11
 
+/* The envelope of every Control response. Detail follows only when status is ok. */
+#define VTP_CONTROL_RESPONSE_SIZE 3
+#define VTP_CONTROL_RESPONSE_OFF_OPCODE 0
+#define VTP_CONTROL_RESPONSE_OFF_TAG 1
+#define VTP_CONTROL_RESPONSE_OFF_STATUS 2
+
 /* The device's view of the negotiated link. Reported, never negotiated here. */
 #define VTP_LINK_PARAMS_SIZE 16
 #define VTP_LINK_PARAMS_OFF_VALIDITY 0

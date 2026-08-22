@@ -54,7 +54,7 @@ COMPOSITE = {"can_batch": ("can_header", "can_record"),
              "can_list": ("can_list_page", "can_subscription"),
              "monitor_list": ("monitor_page", "monitor_channel"),
              "monitor_update": ("monitor_header", "monitor_value")}
-STANDALONE = ("gps_fix", "info", "link_params")
+STANDALONE = ("gps_fix", "info", "link_params", "control_response")
 
 
 def cases():
@@ -105,6 +105,12 @@ def exact_length(case, buf):
     name = case["record"]
     if name in STANDALONE:
         base = SCHEMA["records"][name]["size"]
+        if name == "control_response":
+            # SPEC.md §9 -- an ok response carries a detail whose shape the
+            # opcode decides, so its length is genuinely open-ended. Every
+            # other status is exactly the envelope.
+            status = read_field(buf, "control_response", "status")
+            return base if status not in (None, 0) else None
         if name != "gps_fix":
             return base
         # SPEC.md §5.5 -- extensions are [type][len][value], so the declared
