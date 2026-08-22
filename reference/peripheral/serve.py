@@ -183,16 +183,17 @@ class ControlQueue:
         Only `apply` permits the request to take effect. `duplicate-tag` and
         `busy` are answered but not applied; `full` cannot even be answered.
         """
-        if self.outstanding(tag):
-            return "duplicate-tag"
-        if len(self._out) < self.depth:
-            return "apply"
+        # Capacity first. A duplicate-tag refusal is still a response and
+        # still needs somewhere to sit, so testing the tag before the depth let
+        # a client hold a thousand responses against a declared depth of four
+        # simply by reusing one tag.
+        if len(self._out) > self.depth:
+            return "full"
         if len(self._out) == self.depth:
             return "busy"
-        # The client was told `busy` and wrote again anyway. There is no room
-        # left to refuse it with, so the request is discarded unapplied --
-        # which is the correct half of §9.6 when the other half is impossible.
-        return "full"
+        if self.outstanding(tag):
+            return "duplicate-tag"
+        return "apply"
 
     def hold(self, tag, response):
         self._out.append((tag, response))
@@ -516,11 +517,37 @@ class Peripheral:
                         "requires; this link does not meet the specification",
                         att_mtu, dev.MIN_ATT_MTU)
 
+    def _reset_transport_state(self):
+        """Everything this transport holds on behalf of ONE link.
+
+        Both edges call it. A connect that cleared only the device's state left
+        payloads queued for the previous central sitting in `_pending`, and
+        `_observed_mtu` describing a link that had gone; a disconnect that
+        cleared only the control queue left the same payloads to be delivered
+        to whoever connected next. Returning the count lets the disconnect path
+        report what was owed and never arrived.
+        """
+        undelivered = self._control.discard_all()
+        self._pending.clear()
+        self._observed_mtu = None
+        self._ready = True
+        self._blocked_since = None
+        return undelivered
+
     def _deliver(self, characteristic, payload, sent, refused):
-        """One attempt. Returns True when the stack took it."""
+        """One attempt. Returns True when the stack took it.
+
+        SPEC.md §8.2 — the sequence number is written here and committed only
+        if the stack accepts the notification, because seq counts notifications
+        *sent*. A refusal therefore consumes nothing and the same number goes
+        out on the next attempt, which is what makes the count a count of
+        deliveries rather than of encodings.
+        """
         uuid = self._notify[characteristic]
-        self.server.get_characteristic(uuid).value = payload
+        stamped = self.device.stamp_seq(characteristic, payload)
+        self.server.get_characteristic(uuid).value = stamped
         if self.server.update_value(SERVICE, uuid):
+            self.device.commit_seq(characteristic)
             sent[characteristic] += 1
             return True
         self._ready = False
@@ -628,7 +655,15 @@ class Peripheral:
         log.info("Service Data (SPEC.md 3.3) is not advertised: the host "
                  "peripheral API does not expose it on every platform")
 
-    async def run(self, poll_hz=200, screen_hz=10):
+    async def run(self, poll_hz=200, screen_hz=10, max_ticks=None):
+        """The pump. `max_ticks` bounds it so the loop can be driven by a test.
+
+        Nothing else about the loop changes under test: transport_selftest.py
+        runs THIS function against a fake GATT link rather than a
+        reimplementation of it, because a second copy of a state machine is a
+        second state machine and the bugs it was written to catch all lived in
+        the ordering of this one.
+        """
         interval = 1.0 / poll_hz
         ticks = 0
         every = max(1, poll_hz // screen_hz)
@@ -639,6 +674,33 @@ class Peripheral:
         next_rate = time.monotonic() + 1.0
         last_counts = dict(sent)
         while True:
+            # SPEC.md §8.2, §9.2 — the connection edge is handled BEFORE
+            # anything is sent this tick. It used to run after the control
+            # drain and the telemetry pump, so a notification built for the
+            # previous central could be handed to a new one in the same tick
+            # that reset the device: data from a link that no longer exists,
+            # delivered under sequence numbers about to restart.
+            event = self._link.update(await self.server.is_connected())
+            if event == "connected":
+                # A connection starts from a known state. Without this the
+                # device carries the previous client's subscriptions and
+                # sequence numbers into the next connection, which §9.2 forbids.
+                self.device.on_connect()
+                self._reset_transport_state()
+                log.info("CLIENT CONNECTED — sequence numbers restarted, "
+                         "subscription table cleared")
+            elif event == "disconnected":
+                # §9.2 clears the table when the LINK DROPS, not when the next
+                # one starts. Clearing only on connect left a disconnected
+                # device reporting three installed ids with nobody subscribed,
+                # which reads as a client fault.
+                self.device.on_disconnect()
+                undelivered = self._reset_transport_state()
+                if undelivered:
+                    log.warning("%d control response(s) undelivered when the "
+                                "link dropped", undelivered)
+                log.info("CLIENT DISCONNECTED — subscription table cleared")
+
             subscribed = self._subscribed()
 
             # Control responses first, and retried until they land. They are
@@ -703,36 +765,6 @@ class Peripheral:
                 last_counts = dict(sent)
                 next_rate = now_wall + span
 
-            # Every tick, not once per screen refresh. This had been inside
-            # the `ticks % every` block, so the link edge was detected at the
-            # DISPLAY rate -- 10 Hz, up to 100 ms late, and tied to a setting
-            # that has nothing to do with it. In that window the device went on
-            # numbering notifications from the previous connection and then
-            # reset, so a client saw seq run 1500, 1501, 0: not a gap, which
-            # §8.2 defines, but a jump backwards, which it does not.
-            event = self._link.update(await self.server.is_connected())
-            if event == "connected":
-                # SPEC.md §8.2 and §9.2: a connection starts from a known
-                # state. Without this the device carries the previous client's
-                # subscriptions and sequence numbers into the next connection,
-                # which is exactly what §9.2 forbids.
-                self.device.on_connect()
-                log.info("CLIENT CONNECTED — sequence numbers restarted, "
-                         "subscription table cleared")
-            elif event == "disconnected":
-                # SPEC.md §9.2 clears the table when the LINK DROPS, not when
-                # the next one starts. Clearing only on connect left a
-                # disconnected device reporting three installed ids with
-                # nobody subscribed, which reads as a client fault.
-                self.device.on_disconnect()
-                self._observed_mtu = None
-                # The client is gone; nothing is owed to it any more.
-                undelivered = self._control.discard_all()
-                if undelivered:
-                    log.warning("%d control response(s) undelivered when the "
-                                "link dropped", undelivered)
-                log.info("CLIENT DISCONNECTED — subscription table cleared")
-
             now = self.device.now_us() / 1e6
             if now >= next_report:
                 next_report = now + 10.0
@@ -795,6 +827,8 @@ class Peripheral:
                 if not alive:
                     log.info("display closed; stopping")
                     return
+            if max_ticks is not None and ticks >= max_ticks:
+                return
             await asyncio.sleep(interval)
 
     def telemetry(self, subscribed):
