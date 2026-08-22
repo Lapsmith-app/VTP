@@ -75,6 +75,23 @@ def _gate(name, values):
     return gated
 
 
+def _zero_reserved(name, values):
+    """SPEC.md §2 — a reserved field is zero on transmit.
+
+    This encoder used to write the caller's value through, reasoning that a
+    later minor might have assigned those bytes and that erasing them would be
+    worse. But this is a 1.0 encoder: a build that knows what the bytes mean is
+    a build that names them, and until then "MUST be zero on transmit" is the
+    rule. Writing them through let a caller put arbitrary content into a field
+    every conforming receiver is required to ignore.
+    """
+    rec = _record(name)
+    reserved = [f["name"] for f in rec["fields"] if f.get("reserved")]
+    if not reserved:
+        return values
+    return dict(values, **{f: 0 for f in reserved})
+
+
 def _pack(name, values):
     rec = _record(name)
     buf = bytearray(rec["size"])
@@ -153,14 +170,11 @@ def encode_can_batch(header, records):
         raise EncodeError(
             f"can_header.count is {header.get('count', 0)} but "
             f"{len(records)} record(s) were supplied")
-    # `reserved` is written through rather than forced to zero: a device built
-    # against a later minor may have been assigned those bytes, and an encoder
-    # must not silently erase a field it does not know about.
     if records and records[0].get("dt", 0) != 0:
         raise EncodeError(
             f"can_record[0].dt is {records[0]['dt']}; t_base is record 0's "
             f"arrival time, so its offset from t_base is zero (SPEC.md §6.1)")
-    out = bytearray(_pack("can_header", header))
+    out = bytearray(_pack("can_header", _zero_reserved("can_header", header)))
     for r in records:
         # An encoder must not emit a frame its own decoder rejects. SPEC.md
         # §6.4 and §6.10.
@@ -179,8 +193,19 @@ def encode_can_batch(header, records):
             raise EncodeError(
                 f"can_record.len is {r['len']}, which no CAN FD DLC can "
                 f"express; the ladder is {sorted(FD_LENGTHS)}")
+        # An identifier outside the arbitration field is not an identifier to
+        # be trimmed to fit. Masking turned 0x3FFFFFFF into 0x1FFFFFFF and -1
+        # into 0x1FFFFFFF as well -- two different requests silently becoming
+        # one frame the caller never asked for, on the field a client uses to
+        # decide what the bytes mean.
+        if isinstance(r["id"], bool) or not isinstance(r["id"], int):
+            raise EncodeError(f"can_record.id must be an integer, got {r['id']!r}")
+        if not 0 <= r["id"] <= CAN_ID_MASK:
+            raise EncodeError(
+                f"can_record.id is {r['id']}, outside the 29-bit arbitration "
+                f"field; the format is carried by `extended`, not by high bits")
         payload = _payload_bytes(r)
-        raw = r["id"] & CAN_ID_MASK
+        raw = r["id"]
         if r.get("extended"):
             raw |= CAN_EXTENDED
         if r.get("fd"):
@@ -207,7 +232,7 @@ def encode_imu_batch(header, samples):
     accel = bool(flags & IMU_HAS_ACCEL)
     gyro = bool(flags & IMU_HAS_GYRO)
 
-    out = bytearray(_pack("imu_header", header))
+    out = bytearray(_pack("imu_header", _zero_reserved("imu_header", header)))
     for s in samples:
         # A cleared presence flag means the sensor is absent, so its triple is
         # zero on the wire whatever the caller supplied.
@@ -231,10 +256,16 @@ def encode_can_list(page, entries):
         raise EncodeError(
             f"can_list_page.count is {page.get('count', 0)} but "
             f"{len(entries)} entr(ies) were supplied")
-    out = bytearray(_pack("can_list_page", page))
+    out = bytearray(_pack("can_list_page", _zero_reserved("can_list_page", page)))
     for e in entries:
         out += _pack("can_subscription", e)
     return bytes(out)
+
+
+MONITOR_MAX_CHANNELS = (
+    (SCHEMA["protocol"]["min_att_mtu"] - 3
+     - SCHEMA["records"]["monitor_header"]["size"])
+    // SCHEMA["records"]["monitor_value"]["size"])
 
 
 def encode_monitor_list(page, entries):
@@ -243,9 +274,21 @@ def encode_monitor_list(page, entries):
         raise EncodeError(
             f"monitor_page.count is {page.get('count', 0)} but "
             f"{len(entries)} entr(ies) were supplied")
-    out = bytearray(_pack("monitor_page", page))
+    # SPEC.md §13.3, §13.4 — both already enforced by the decoder, so emitting
+    # either produced a declaration this repository's own reader refuses.
+    slots = [e["slot"] for e in entries]
+    if len(set(slots)) != len(slots):
+        raise EncodeError(
+            "monitor_list: a slot appears twice, so every later update naming "
+            "it would be ambiguous")
+    if page.get("total", 0) > MONITOR_MAX_CHANNELS:
+        raise EncodeError(
+            f"monitor_page.total is {page.get('total')}, more than the "
+            f"{MONITOR_MAX_CHANNELS} that fit in one complete write at the "
+            f"minimum ATT MTU")
+    out = bytearray(_pack("monitor_page", _zero_reserved("monitor_page", page)))
     for e in entries:
-        out += _pack("monitor_channel", e)
+        out += _pack("monitor_channel", _zero_reserved("monitor_channel", e))
     return bytes(out)
 
 
@@ -255,7 +298,11 @@ def encode_monitor_update(header, values):
         raise EncodeError(
             f"monitor_header.count is {header.get('count', 0)} but "
             f"{len(values)} value(s) were supplied")
-    out = bytearray(_pack("monitor_header", header))
+    slots = [v["slot"] for v in values]
+    if len(set(slots)) != len(slots):
+        raise EncodeError(
+            "monitor_update: a slot appears twice and nothing says which wins")
+    out = bytearray(_pack("monitor_header", _zero_reserved("monitor_header", header)))
     for v in values:
         out += _pack("monitor_value", _gate("monitor_value", v))
     return bytes(out)

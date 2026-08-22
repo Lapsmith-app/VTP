@@ -1,0 +1,308 @@
+{
+  "protocol": "VTP/1",
+  "generated_by": "tools/generate.py",
+  "cases": [
+    {
+      "name": "can-id-above-arbitration-field",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "An identifier of 0x3FFFFFFF. MUST be refused, not masked: masking silently produced 0x1FFFFFFF, a frame the caller never asked for, on the field a client uses to decide what the payload means. The format is carried by `extended`, not by high bits of `id`.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 1073741823,
+            "extended": true,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00"
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-id-negative",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "An identifier of -1. Masking turned it into 0x1FFFFFFF -- the same frame an over-large identifier became, so two different mistakes produced one wrong answer.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": -1,
+            "extended": true,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00"
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-first-record-dt-nonzero",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 6.1 -- t_base IS record 0's arrival time.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 5,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00"
+          }
+        ]
+      }
+    },
+    {
+      "name": "can-classic-nine-bytes",
+      "record": "can_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 6.10 -- a Classic frame carries 0..8.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 416,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 9,
+            "payload": "000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "name": "gps-latitude-beyond-the-pole",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position bit set so the range rule applies.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 4,
+          "lat": 910000000,
+          "lon": 0,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-ext-count-disagrees",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "desc": "SPEC.md 5.5 -- three extensions declared, none supplied.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 0,
+          "ext_count": 3
+        },
+        "ext_hex": ""
+      }
+    },
+    {
+      "name": "imu-period-zero",
+      "record": "imu_batch",
+      "must_refuse": true,
+      "desc": "SPEC.md 7 -- zero says every sample was taken at one instant.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "period": 0,
+          "count": 1,
+          "flags": 3
+        },
+        "samples": [
+          {
+            "ax": 1,
+            "ay": 2,
+            "az": 3,
+            "gx": 4,
+            "gy": 5,
+            "gz": 6
+          }
+        ]
+      }
+    },
+    {
+      "name": "monitor-declaration-repeats-a-slot",
+      "record": "monitor_list",
+      "must_refuse": true,
+      "desc": "SPEC.md 13.3 -- the decoder already rejected this, so an encoder emitting it produced a declaration its own reader refuses.",
+      "input": {
+        "page": {
+          "total": 2,
+          "index": 0,
+          "count": 2
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 0,
+            "channel": 7,
+            "max_age": 10
+          }
+        ]
+      }
+    },
+    {
+      "name": "monitor-asks-for-more-than-fits",
+      "record": "monitor_list",
+      "must_refuse": true,
+      "desc": "SPEC.md 13.4 -- more channels than fit in one complete write.",
+      "input": {
+        "page": {
+          "total": 99,
+          "index": 0,
+          "count": 1
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 10
+          }
+        ]
+      }
+    },
+    {
+      "name": "monitor-update-repeats-a-slot",
+      "record": "monitor_update",
+      "must_refuse": true,
+      "desc": "SPEC.md 13.4 -- nothing says which of the two wins.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "count": 2,
+          "reserved": 0
+        },
+        "values": [
+          {
+            "slot": 3,
+            "validity": 1,
+            "value": 1
+          },
+          {
+            "slot": 3,
+            "validity": 1,
+            "value": 2
+          }
+        ]
+      }
+    },
+    {
+      "name": "control-detail-on-a-refusal",
+      "record": "control_response",
+      "must_refuse": true,
+      "desc": "SPEC.md 9 -- detail is present if and only if status is ok.",
+      "input": {
+        "opcode": 2,
+        "tag": 1,
+        "status": 2,
+        "detail_hex": "0700"
+      }
+    },
+    {
+      "name": "time-sync-answered-before-asked",
+      "record": "time_sync",
+      "must_refuse": true,
+      "desc": "SPEC.md 9.7 -- a negative round trip halved into an offset is a confidently wrong clock.",
+      "input": {
+        "t_device_rx": 9000000,
+        "t_device_tx": 8999000
+      }
+    },
+    {
+      "name": "can-ordinary-batch",
+      "record": "can_batch",
+      "must_refuse": false,
+      "desc": "A frame at the top of the arbitration field, which is legal.",
+      "input": {
+        "header": {
+          "seq": 0,
+          "dropped": 0,
+          "t_base": 0,
+          "count": 1,
+          "flags": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 536870911,
+            "extended": true,
+            "fd": false,
+            "rtr": false,
+            "len": 1,
+            "payload": "00"
+          }
+        ]
+      }
+    },
+    {
+      "name": "monitor-well-formed-declaration",
+      "record": "monitor_list",
+      "must_refuse": false,
+      "desc": "Distinct slots, inside the channel cap.",
+      "input": {
+        "page": {
+          "total": 2,
+          "index": 0,
+          "count": 2
+        },
+        "entries": [
+          {
+            "slot": 0,
+            "channel": 1,
+            "max_age": 10
+          },
+          {
+            "slot": 1,
+            "channel": 3,
+            "max_age": 0
+          }
+        ]
+      }
+    }
+  ]
+}

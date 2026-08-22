@@ -404,7 +404,7 @@
     },
     {
       "name": "reserved-nonzero",
-      "desc": "Header reserved bytes carry a value assigned by a future minor. A decoder MUST ignore them, not reject.",
+      "desc": "Header reserved bytes carry a value assigned by a future minor. A decoder MUST ignore them, not reject -- and an encoder MUST normalise them to zero, because SPEC.md 2 requires reserved fields to be zero ON TRANSMIT. The two halves of that rule pull in opposite directions, which is why this vector is deliberately non-canonical: it is the only one that asserts both at once.",
       "record": "can_batch",
       "hex": "0800000001000000000000000000efbe",
       "expect": {
@@ -417,7 +417,9 @@
           "reserved": 48879
         },
         "records": []
-      }
+      },
+      "canonical": false,
+      "expect_roundtrip_hex": "08000000010000000000000000000000"
     }
   ]
 }

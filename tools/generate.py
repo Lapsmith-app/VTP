@@ -829,12 +829,20 @@ def vectors(schema):
          "must_reject": "truncated-record"},
         {"name": "reserved-nonzero",
          "desc": "Header reserved bytes carry a value assigned by a future minor. "
-                 "A decoder MUST ignore them, not reject.",
+                 "A decoder MUST ignore them, not reject -- and an encoder MUST "
+                 "normalise them to zero, because SPEC.md 2 requires reserved "
+                 "fields to be zero ON TRANSMIT. The two halves of that rule "
+                 "pull in opposite directions, which is why this vector is "
+                 "deliberately non-canonical: it is the only one that asserts "
+                 "both at once.",
          "record": "can_batch",
          "hex": (encode(schema, "can_header",
                         dict(seq=8, dropped=0, t_base=1, count=0, flags=0, reserved=0xBEEF)).hex()),
          "expect": {"header": {"seq": 8, "dropped": 0, "t_base": 1, "count": 0,
-                               "flags": 0, "reserved": 0xBEEF}, "records": []}},
+                               "flags": 0, "reserved": 0xBEEF}, "records": []},
+         "canonical": False,
+         "expect_roundtrip_hex": (encode(schema, "can_header",
+                        dict(seq=8, dropped=0, t_base=1, count=0, flags=0, reserved=0)).hex())},
     ]
 
     # ---- IMU -------------------------------------------------------------
@@ -1493,6 +1501,103 @@ def vectors(schema):
     files["time-sync.json"][-2]["hex"] = struct.pack("<Q", 1).hex()
     files["time-sync.json"][-1]["hex"] = (struct.pack("<QQ", 1, 2) + b"\x00").hex()
 
+    # ---- Producer contract ------------------------------------------------
+    # Everything above tests DECODING. These test the other direction: inputs a
+    # conforming encoder must refuse rather than reshape. They cannot be
+    # expressed as byte vectors, because the whole point is that the bytes are
+    # never produced -- an encoder given an out-of-range identifier used to
+    # emit a perfectly valid frame for a DIFFERENT one, and no decode input
+    # reaches that.
+    files["encoders.json"] = [
+        {"name": "can-id-above-arbitration-field",
+         "record": "can_batch", "must_refuse": True,
+         "desc": "An identifier of 0x3FFFFFFF. MUST be refused, not masked: "
+                 "masking silently produced 0x1FFFFFFF, a frame the caller "
+                 "never asked for, on the field a client uses to decide what "
+                 "the payload means. The format is carried by `extended`, not "
+                 "by high bits of `id`.",
+         "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
+                   "records": [dict(dt=0, id=0x3FFFFFFF, extended=True, fd=False,
+                                    rtr=False, len=1, payload="00")]}},
+        {"name": "can-id-negative",
+         "record": "can_batch", "must_refuse": True,
+         "desc": "An identifier of -1. Masking turned it into 0x1FFFFFFF -- the "
+                 "same frame an over-large identifier became, so two different "
+                 "mistakes produced one wrong answer.",
+         "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
+                   "records": [dict(dt=0, id=-1, extended=True, fd=False,
+                                    rtr=False, len=1, payload="00")]}},
+        {"name": "can-first-record-dt-nonzero",
+         "record": "can_batch", "must_refuse": True,
+         "desc": "SPEC.md 6.1 -- t_base IS record 0's arrival time.",
+         "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
+                   "records": [dict(dt=5, id=0x1A0, extended=False, fd=False,
+                                    rtr=False, len=1, payload="00")]}},
+        {"name": "can-classic-nine-bytes",
+         "record": "can_batch", "must_refuse": True,
+         "desc": "SPEC.md 6.10 -- a Classic frame carries 0..8.",
+         "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
+                   "records": [dict(dt=0, id=0x1A0, extended=False, fd=False,
+                                    rtr=False, len=9, payload="00" * 9)]}},
+        {"name": "gps-latitude-beyond-the-pole",
+         "record": "gps_fix", "must_refuse": True,
+         "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position "
+                 "bit set so the range rule applies.",
+         "input": {"fix": dict(seq=0, validity=V["position"], lat=910_000_000,
+                               lon=0, ext_count=0)}},
+        {"name": "gps-ext-count-disagrees",
+         "record": "gps_fix", "must_refuse": True,
+         "desc": "SPEC.md 5.5 -- three extensions declared, none supplied.",
+         "input": {"fix": dict(seq=0, validity=0, ext_count=3), "ext_hex": ""}},
+        {"name": "imu-period-zero",
+         "record": "imu_batch", "must_refuse": True,
+         "desc": "SPEC.md 7 -- zero says every sample was taken at one instant.",
+         "input": {"header": dict(seq=0, dropped=0, t_base=0, period=0, count=1,
+                                  flags=0b011),
+                   "samples": [dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6)]}},
+        {"name": "monitor-declaration-repeats-a-slot",
+         "record": "monitor_list", "must_refuse": True,
+         "desc": "SPEC.md 13.3 -- the decoder already rejected this, so an "
+                 "encoder emitting it produced a declaration its own reader "
+                 "refuses.",
+         "input": {"page": dict(total=2, index=0, count=2),
+                   "entries": [dict(slot=0, channel=1, max_age=10),
+                               dict(slot=0, channel=7, max_age=10)]}},
+        {"name": "monitor-asks-for-more-than-fits",
+         "record": "monitor_list", "must_refuse": True,
+         "desc": "SPEC.md 13.4 -- more channels than fit in one complete write.",
+         "input": {"page": dict(total=99, index=0, count=1),
+                   "entries": [dict(slot=0, channel=1, max_age=10)]}},
+        {"name": "monitor-update-repeats-a-slot",
+         "record": "monitor_update", "must_refuse": True,
+         "desc": "SPEC.md 13.4 -- nothing says which of the two wins.",
+         "input": {"header": dict(seq=0, count=2, reserved=0),
+                   "values": [dict(slot=3, validity=PRESENT, value=1),
+                              dict(slot=3, validity=PRESENT, value=2)]}},
+        {"name": "control-detail-on-a-refusal",
+         "record": "control_response", "must_refuse": True,
+         "desc": "SPEC.md 9 -- detail is present if and only if status is ok.",
+         "input": {"opcode": 0x02, "tag": 1, "status": 2, "detail_hex": "0700"}},
+        {"name": "time-sync-answered-before-asked",
+         "record": "time_sync", "must_refuse": True,
+         "desc": "SPEC.md 9.7 -- a negative round trip halved into an offset is "
+                 "a confidently wrong clock.",
+         "input": {"t_device_rx": 9_000_000, "t_device_tx": 8_999_000}},
+        # Two that MUST encode, so a harness refusing everything cannot pass.
+        {"name": "can-ordinary-batch",
+         "record": "can_batch", "must_refuse": False,
+         "desc": "A frame at the top of the arbitration field, which is legal.",
+         "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
+                   "records": [dict(dt=0, id=0x1FFFFFFF, extended=True, fd=False,
+                                    rtr=False, len=1, payload="00")]}},
+        {"name": "monitor-well-formed-declaration",
+         "record": "monitor_list", "must_refuse": False,
+         "desc": "Distinct slots, inside the channel cap.",
+         "input": {"page": dict(total=2, index=0, count=2),
+                   "entries": [dict(slot=0, channel=1, max_age=10),
+                               dict(slot=1, channel=3, max_age=0)]}},
+    ]
+
     return files
 
 
@@ -1514,7 +1619,12 @@ def main():
     # truth rather than a second copy that drifts.
     emit(ROOT / "schema" / "vtp1.json", json.dumps(schema, indent=2, sort_keys=False) + "\n")
     for fname, cases in vectors(schema).items():
-        emit(ROOT / "conformance" / "vectors" / fname,
+        # The producer corpus is not a decode corpus and must not sit in
+        # vectors/: its cases carry structured input rather than bytes, and
+        # every tool that walks vectors/*.json expects `hex`.
+        where = (ROOT / "conformance" if fname == "encoders.json"
+                 else ROOT / "conformance" / "vectors")
+        emit(where / fname,
              json.dumps({"protocol": "VTP/1", "generated_by": "tools/generate.py",
                          "cases": cases}, indent=2) + "\n")
 
