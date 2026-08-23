@@ -411,6 +411,7 @@ int vtp_encode_aid_begin_result(const vtp_aid_begin_result_t *b, uint8_t *out, s
     if (b->chunk_bytes == 0) return -1;
     memset(out, 0, VTP_AID_BEGIN_RESULT_SIZE);
 
+    out[VTP_AID_BEGIN_RESULT_OFF_TOKEN] = b->token;
     wr16(out + VTP_AID_BEGIN_RESULT_OFF_CHUNK_BYTES, b->chunk_bytes);
     return VTP_AID_BEGIN_RESULT_SIZE;
 }

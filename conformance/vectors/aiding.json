@@ -109,47 +109,50 @@
       "name": "begin-at-full-mtu",
       "desc": "A transfer opened at a 247-byte ATT MTU: 247 - 3 bytes of Write Command header - 3 bytes of chunk header (SPEC.md 14.3).",
       "record": "aid_begin_result",
-      "hex": "f1000000",
+      "hex": "07f10000",
       "expect": {
+        "token": 7,
         "chunk_bytes": 241,
-        "reserved_2": 0
+        "reserved_3": 0
       },
-      "note": "chunk_bytes is fixed for the transfer because index-to-offset must be arithmetic; SPEC.md 14.3 gives the reason."
+      "note": "chunk_bytes is fixed for the transfer because index-to-offset must be arithmetic, and the token names the transfer so a stale chunk on another EATT bearer cannot land in it; SPEC.md 14.3 has both arguments."
     },
     {
       "name": "begin-at-minimum-mtu",
       "desc": "The same transfer at the 100-byte minimum ATT MTU this protocol requires. A device MUST NOT return a chunk_bytes a client cannot write.",
       "record": "aid_begin_result",
-      "hex": "5e000000",
+      "hex": "015e0000",
       "expect": {
+        "token": 1,
         "chunk_bytes": 94,
-        "reserved_2": 0
+        "reserved_3": 0
       }
     },
     {
       "name": "begin-reserved-byte-set",
       "desc": "The same for aid_begin_result.reserved_3: read, reported, and normalised away by a VTP/1.0 encoder on transmit.",
       "record": "aid_begin_result",
-      "hex": "f1000000",
+      "hex": "07f100a5",
       "expect": {
+        "token": 7,
         "chunk_bytes": 241,
-        "reserved_2": 0
+        "reserved_3": 165
       },
       "canonical": false,
-      "expect_roundtrip_hex": "f1000000"
+      "expect_roundtrip_hex": "07f10000"
     },
     {
       "name": "begin-short-payload",
       "desc": "3 bytes. A truncated begin result MUST be rejected whole.",
       "record": "aid_begin_result",
-      "hex": "f10000",
+      "hex": "07f100",
       "must_reject": "length"
     },
     {
       "name": "begin-long-payload",
       "desc": "5 bytes. aid_begin_result is fixed-size, so trailing bytes MUST be rejected.",
       "record": "aid_begin_result",
-      "hex": "f100000000",
+      "hex": "07f1000000",
       "must_reject": "length"
     },
     {
@@ -227,6 +230,49 @@
       "note": "The only coverage the aid_commit_result encoder gate gets.",
       "canonical": false,
       "expect_roundtrip_hex": "00010000"
+    },
+    {
+      "name": "begin-zero-chunk-bytes",
+      "desc": "A chunk size of zero: a device-side violation of SPEC.md 14.3. The record is well-formed, so a receiver MUST decode it -- and SHOULD report it as a device defect, since no chunk of such a transfer can carry a byte.",
+      "record": "aid_begin_result",
+      "hex": "03000000",
+      "expect": {
+        "token": 3,
+        "chunk_bytes": 0,
+        "reserved_3": 0
+      },
+      "note": "No round-trip: a conforming encoder refuses a zero chunk_bytes, which is the device-side half of the rule.",
+      "no_roundtrip": true
+    },
+    {
+      "name": "commit-index-beside-applied",
+      "desc": "first_missing named beside `applied`: a device-side violation of SPEC.md 14.4's if-and-only-if rule. The record decodes; a client MUST NOT tell a user chunk 7 was lost from a transfer that succeeded, and SHOULD flag the contradiction.",
+      "record": "aid_commit_result",
+      "hex": "01010700",
+      "expect": {
+        "validity": 1,
+        "result": 1,
+        "first_missing": 7,
+        "result_known": true
+      },
+      "expect_absent": [],
+      "no_roundtrip": true
+    },
+    {
+      "name": "commit-incomplete-without-index",
+      "desc": "`incomplete` with the first_missing bit clear: the device says something is missing and refuses to say what. The record decodes -- first_missing reads absent -- and a client has no index to resend from, so it SHOULD flag the defect rather than guess one (SPEC.md 14.4).",
+      "record": "aid_commit_result",
+      "hex": "00020000",
+      "expect": {
+        "validity": 0,
+        "result": 2,
+        "first_missing": 0,
+        "result_known": true
+      },
+      "expect_absent": [
+        "first_missing"
+      ],
+      "no_roundtrip": true
     },
     {
       "name": "commit-unknown-result",

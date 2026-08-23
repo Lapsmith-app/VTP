@@ -76,9 +76,9 @@ COMMIT_V_FIRST_MISSING = 0x01    # commit_validity bit 0
 # before a single chunk is written. Sized for an AssistNow Offline product.
 AID_MAX_BYTES = 131_072
 
-# SPEC.md §14.3 — three bytes of ATT Write Command header and two of chunk
+# SPEC.md §14.3 — three bytes of ATT Write Command header and three of chunk
 # header come off the negotiated MTU before any payload fits.
-AID_CHUNK_OVERHEAD = 5
+AID_CHUNK_OVERHEAD = 6
 
 # SPEC.md §14.3 — `index` and `first_missing` are u16, so this is the most a
 # transfer may need. Derived from the field rather than written as a number
@@ -332,6 +332,7 @@ class VtpDevice:
         # SPEC.md §14.3 — at most one transfer open, so this is one slot and
         # not a table. None when nothing is in flight.
         self._aid = None
+        self._aid_last_token = None
         # What this device is holding, as GNSS_AID_INFO reports it. None means
         # it holds nothing, which is the cleared validity bit rather than a
         # zero -- "valid until the Unix epoch" is a different claim.
@@ -990,16 +991,19 @@ class VtpDevice:
                 return reply(ST_BAD_PARAMS)
 
             # SPEC.md §14.3 -- one transfer open, and a BEGIN over an open one
-            # discards it. Nothing else is needed to keep the two apart: ATT
-            # delivers this client's writes in order, so every chunk of the
-            # old transfer arrived before the BEGIN that discarded it.
+            # discards it. The fresh token is what keeps them apart: with
+            # EATT a chunk of the discarded transfer can still be queued on
+            # another bearer, and it MUST fail the token check below rather
+            # than land in the new transfer.
+            token = self._allocate_aid_token()
             self._aid = {
+                "token": token,
                 "total_bytes": total,
                 "chunk_bytes": chunk_bytes,
                 "chunks": {},
             }
             return reply(ST_OK, enc.encode_aid_begin_result(
-                {"chunk_bytes": chunk_bytes}))
+                {"token": token, "chunk_bytes": chunk_bytes}))
 
         if opcode == GNSS_AID_COMMIT:
             if len(params) != 4:
@@ -1037,6 +1041,19 @@ class VtpDevice:
              for s, c in self._monitor_channels])
 
     # -- aiding (SPEC.md §14) ---------------------------------------------
+
+    def _allocate_aid_token(self):
+        """A token that is not the one just discarded.
+
+        SPEC.md §14.3. Reusing it would let a chunk still queued on another
+        ATT bearer for the abandoned transfer be accepted into the new one,
+        at whatever offset its index names -- silent corruption of a payload
+        whose CRC is computed by somebody else.
+        """
+        previous = self._aid["token"] if self._aid else self._aid_last_token
+        token = 1 if previous is None else (previous % 255) + 1
+        self._aid_last_token = token
+        return token
 
     def _aid_caps(self):
         """SPEC.md §14.2 — what this device accepts, and what it already holds."""
@@ -1082,17 +1099,19 @@ class VtpDevice:
         """
         if not self.capabilities & CAP_GNSS_AIDING:
             return "aiding-not-supported"
-        if len(payload) < 2:
+        if len(payload) < 3:
             return "length"
-        (index,) = struct.unpack_from("<H", payload, 0)
-        body = payload[2:]
+        token, index = struct.unpack_from("<BH", payload, 0)
+        body = payload[3:]
 
-        # A chunk with no transfer open belongs to one this device discarded:
-        # ATT delivers a client's writes in order, so a chunk for the CURRENT
-        # transfer cannot arrive before the BEGIN that opened it answered.
         if not self._aid:
             return "no-open-transfer"
         t = self._aid
+        # SPEC.md §14.3 -- a stale chunk for a discarded transfer. EATT means
+        # it can arrive after the BEGIN that discarded its transfer, so this
+        # check is what keeps it out of the new one.
+        if token != t["token"]:
+            return "wrong-token"
 
         expected = self._aid_expected_chunks(t)
         if index >= expected:

@@ -893,20 +893,29 @@ none of it.
 ### 10.6 What earlier drafts carried, and this one does not
 
 Aiding went through the same review as the rest of the protocol
-(CHANGELOG.md), and four pieces of its first draft did not survive it. They
+(CHANGELOG.md), and three pieces of its first draft did not survive it. They
 are recorded here because each is the kind of thing a reviewer will propose
-adding back.
+adding back — and so is the one thing the review tried to remove and could
+not, because that failed attempt is the best illustration of where the
+review's own method breaks.
 
-**A session number.** Every chunk and the commit echoed a byte from
-`GNSS_AID_BEGIN`, so that a chunk still in flight for a discarded transfer
-could not land in the one that superseded it. But there is no such chunk. ATT
-runs every write a client makes down one ordered L2CAP bearer: whatever the
-client wrote before the new BEGIN arrives before it, and a chunk of the new
-transfer cannot be written before the BEGIN's response reports `chunk_bytes`.
-The session number distinguished transfers the transport already keeps apart —
-state on both sides, echoed in every packet, guarding a race that cannot
-occur. It was the subscription-handle mistake (§8.7) wearing a new name, and
-it went the same way.
+**The transfer token stayed, and a draft of the review removed it.** Every
+chunk echoes a byte from `GNSS_AID_BEGIN`, so that a chunk still in flight
+for a discarded transfer cannot land in the one that superseded it. The
+draft argued no such chunk can exist: ATT runs a client's writes down one
+ordered L2CAP bearer, so everything written before the new BEGIN arrives
+before it — the token distinguished transfers the transport already keeps
+apart, the subscription-handle mistake (§8.7) wearing a new name. That
+argument is true of a bearer and false of a client. EATT (Bluetooth 5.2)
+lets a client open several ATT bearers to the same server, each its own
+L2CAP channel with its own MTU, ordered only within itself — so a chunk
+queued on one bearer genuinely can arrive after a superseding BEGIN sent on
+another, and without the token it lands at whatever offset its index names.
+The CRC would catch the corruption, but a valid transfer would fail, and
+"redundant with transport ordering" was simply not true of the transport as
+specified. One byte per chunk is what the guarantee costs; SPEC §14.3 now
+also says which bearer's MTU governs `chunk_bytes`, which the one-bearer
+draft never had to ask.
 
 **An abort opcode.** `GNSS_AID_ABORT` discarded an open transfer. So does
 opening the next transfer, and so does disconnecting — and a client abandoning
@@ -932,10 +941,11 @@ it also required a paragraph about commits whose count contradicts the
 transfer, a `bad_params` rule for it, and a proof that the exchange still
 terminates. Four bytes of parameter bought a page of failure modes.
 
-What survived is the part that does the work: one transfer open at a time, a
-fixed `chunk_bytes` so index-to-offset is arithmetic, `first_missing` so loss
-is a number, and a CRC-32 stated exactly. The transfer protocol is the
-minimum that makes write-without-response recoverable, and nothing else.
+What survived is the part that does the work: one transfer open at a time,
+named by a token, a fixed `chunk_bytes` so index-to-offset is arithmetic,
+`first_missing` so loss is a number, and a CRC-32 stated exactly. The
+transfer protocol is the minimum that makes write-without-response
+recoverable on the transport Bluetooth actually provides, and nothing else.
 
 ---
 
@@ -997,9 +1007,11 @@ a list format, a paging scheme and a second thing to keep in step with Info.
 
 **Both RTK bits could be set at once.** The natural client reading of the pair
 is "fixed wins", which upgrades a device's accuracy claim on the strength of a
-bug. SPEC.md §5.3 makes them exclusive and makes either imply `differential`, and a
-receiver rejects a fix that breaks either rule — the flags and the position came
-out of the same bytes, so the rest of the record is not trustworthy either.
+bug. SPEC.md §5.3 makes them exclusive and makes either imply `differential`.
+The rule is the device's: the fix is well-formed, so a receiver decodes it,
+MUST NOT read the pair as either solution, and SHOULD flag the contradiction —
+the review pass in §8.3 is where the receiver-side reject this paragraph once
+described was downgraded, with the rest of the content rules.
 
 **An IMU batch could carry no samples**, though `t_base` is defined as the
 acquisition time of sample 0. The same reasoning was then applied to CAN:

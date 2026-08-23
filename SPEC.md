@@ -98,7 +98,7 @@ between notifications:
 | `imu` | device → client, notify | A 20-byte batch header, then `count` fixed-size samples | §7 |
 | `control` | client → device, write; answered by indication | One request, or its response | §9 |
 | `monitor_values` | client → device, write | A 4-byte header, then `count` values | §13 |
-| `aiding` | client → device, write without response | A 2-byte chunk header, then the chunk's payload | §14 |
+| `aiding` | client → device, write without response | A 3-byte chunk header, then the chunk's payload | §14 |
 
 A fix is never batched; a CAN frame never travels without a batch header, even
 alone. The asymmetry follows the data rates (RATIONALE §2.4). The IMU is
@@ -1824,12 +1824,18 @@ Total: **4 bytes**. All fields little-endian.
 
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `chunk_bytes` | `bytes`; Payload bytes in every chunk but the last; byte offset is index x chunk_bytes (SPEC.md 14.3) |
-| 2 | 2 | `u16` | `reserved_2` | Was the session number; transfer metadata; **reserved — MUST be zero** |
+| 0 | 1 | `u8` | `token` | Names this transfer; echoed in every chunk. MUST differ from the previous transfer's (SPEC.md 14.3) |
+| 1 | 2 | `u16` | `chunk_bytes` | `bytes`; Payload bytes in every chunk but the last; byte offset is index x chunk_bytes (SPEC.md 14.3) |
+| 3 | 1 | `u8` | `reserved_3` | Transfer metadata; **reserved — MUST be zero** |
 <!-- END GENERATED: aid_begin_result -->
 
-`chunk_bytes` MUST NOT be zero and MUST NOT exceed `ATT_MTU - 5` — three bytes
-of ATT Write Command header and the two-byte chunk header below.
+`chunk_bytes` MUST NOT be zero and MUST NOT exceed `ATT_MTU - 6` — three
+bytes of ATT Write Command header and the three-byte chunk header below — for
+**every ATT bearer the client may write chunks on**. Unenhanced ATT has
+exactly one bearer, so a client there reads this as the negotiated MTU; EATT
+lets a client hold several bearers with MTUs of their own, and a device
+cannot see which one a chunk will take, so a device that has granted more
+than one SHOULD size `chunk_bytes` against the smallest of them.
 
 **A transfer MUST NOT require more than 65535 chunks.** A chunk's `index` and
 §14.4's `first_missing` are both `u16`, so a transfer needing more has chunks
@@ -1841,22 +1847,25 @@ chunks than that at the `chunk_bytes` it would have chosen.
 **A device holds at most one transfer open, and `GNSS_AID_BEGIN` is what
 closes the previous one.** A BEGIN arriving while a transfer is open MUST
 discard the open transfer whole — its chunks with it — and start the new one.
-No identifier is needed to keep the two apart: ATT delivers a client's writes
-on one ordered bearer, so every chunk of the old transfer arrived before the
-BEGIN that discarded it, and a chunk of the new one cannot arrive before the
-BEGIN's response. A device MUST also discard an open transfer on disconnect —
-the client that would have committed it is gone.
+The new transfer's `token` MUST differ from the discarded one's. The token is
+what keeps the two apart: ATT orders writes only **within one bearer**, and
+EATT allows a client several, so a chunk of the discarded transfer still
+queued on one bearer can arrive after a `GNSS_AID_BEGIN` sent on another —
+carrying the old token, it is ignored instead of landing at whatever offset
+its index names in the new transfer. A device MUST also discard an open
+transfer on disconnect — the client that would have committed it is gone.
 
 Chunks are written to the `aiding` characteristic:
 
 <!-- BEGIN GENERATED: aid_chunk -->
 *One chunk of an aiding transfer, written without a response.*
 
-Total: **2 bytes + `payload`**. All fields little-endian.
+Total: **3 bytes + `payload`**. All fields little-endian.
 
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `index` | 0-based; the payload belongs at index x chunk_bytes |
+| 0 | 1 | `u8` | `token` | Echoed from the GNSS_AID_BEGIN that opened this transfer |
+| 1 | 2 | `u16` | `index` | 0-based; the payload belongs at index x chunk_bytes |
 <!-- END GENERATED: aid_chunk -->
 
 A chunk's payload belongs at byte offset `index × chunk_bytes`. **Every chunk
@@ -1870,11 +1879,16 @@ have nothing to offer.
 A device MUST ignore, without any response, a chunk that:
 
 - arrives with no transfer open,
+- carries a `token` other than the open transfer's,
 - carries an `index` at or beyond `⌈total_bytes ÷ chunk_bytes⌉`, or
 - carries a payload of the wrong length for its index.
 
 A client MAY write chunks in any order and MAY write the same chunk more than
-once; a device MUST accept a repeat and MUST NOT treat it as an error.
+once; a device MUST accept a repeat and MUST NOT treat it as an error. A
+client holding more than one ATT bearer SHOULD write a transfer's chunks and
+its `GNSS_AID_COMMIT` on the same bearer: a commit that overtakes its own
+chunks is answered `incomplete` and costs a round trip, though never a
+transfer.
 
 **A device MUST NOT hand any part of a transfer to its receiver before
 `GNSS_AID_COMMIT`.** A transfer is applied whole or not at all, which is what
@@ -2014,7 +2028,7 @@ record tables above.
 | `monitor_header.reserved` | 1 byte | Update metadata |
 | `power_state.reserved` | 1 byte | Power metadata |
 | `gnss_aid_caps.reserved_2` | 2 bytes | Was aid_flags; aiding metadata |
-| `aid_begin_result.reserved_2` | 2 bytes | Was the session number; transfer metadata |
+| `aid_begin_result.reserved_3` | 1 byte | Transfer metadata |
 | Extension types | `0x80`–`0xFF` | Vendor-private; this specification MUST NOT assign them (§5.5) |
 <!-- END GENERATED: reserved_space -->
 

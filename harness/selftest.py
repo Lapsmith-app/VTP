@@ -52,6 +52,8 @@ CAUGHT_BY = {
     "aid_reports_first_chunk_missing": "aiding.reports_missing_chunk",
     "aid_ignores_crc": "aiding.detects_corruption",
     "aid_begin_keeps_transfer": "aiding.begin_supersedes",
+    "aid_token_reused": "aiding.begin_supersedes",
+    "aid_token_ignored": "aiding.begin_supersedes",
     "rate_not_applied": "control.rate_readback",
     "info_reserved_nonzero": "info.reserved_fields",
     "seq_starts_at_one": "seq.first_is_zero",
@@ -63,6 +65,12 @@ CAUGHT_BY = {
     "monitor_accepts_duplicate_slot": "monitor.rejects_duplicate_slot",
     "subs_survive_reconnect": "reconnect.subscriptions_cleared",
     "unknown_subscription_ok": "can.unknown_subscription",
+    "duplicate_consumes_slot": "can.table_full",
+    "duplicate_double_entry": "can.subscribe_idempotent",
+    "table_full_early": "can.table_full",
+    "overlap_wrong_governor": "can.most_specific_governs",
+    "tie_break_latest": "can.earliest_installed_governs",
+    "can_duplicate_across_batches": "can.forwarded_once",
     "stream_before_subscribe": "can.silent_until_asked",
     "caps_reserved_bits": "info.reserved_capabilities",
     "absent_field_nonzero": "gps.absent_fields_zero",
@@ -122,19 +130,9 @@ NOT_SEEDED = {
     "can.subscribe_ok":
         "a subscribe that is refused is a device that cannot subscribe, "
         "which fails every CAN check at once rather than this one",
-    "can.subscribe_idempotent":
-        "seeding a device that consumes a slot per re-install breaks the "
-        "table for the rest of the run, so the fault would be caught by an "
-        "accident of ordering",
-    "can.table_full":
-        "the table's size is the device model's, and a device that never "
-        "answers table_full is one with an unbounded table",
     "can.matches_subscription":
         "the harness subscribes with a mask that matches everything, so a "
         "device forwarding too much cannot be told from one obeying it",
-    "can.forwarded_once":
-        "duplicate forwarding needs the pump to send the same frame twice, "
-        "which the device model's batching makes unreachable",
     "control.applies_only_if_answerable":
         "§9.4 is about a request applied with the indication disabled; the "
         "loopback returns before dispatch, so seeding it means removing the "

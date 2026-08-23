@@ -212,10 +212,13 @@ static inline int vtp_aid_valid(const vtp_gnss_aid_caps_t *c, uint8_t bit) {
 
 /* SPEC.md §14.3 -- the detail of GNSS_AID_BEGIN. `chunk_bytes` is fixed for
  * the whole transfer so that index-to-offset is arithmetic; without that a
- * device could not place a resent chunk. */
+ * device could not place a resent chunk. `token` names the transfer: EATT
+ * lets a client hold several ATT bearers, ordered only within each, so the
+ * token is what keeps a stale chunk out of the transfer that superseded it. */
 typedef struct {
+    uint8_t  token;
     uint16_t chunk_bytes;
-    uint16_t reserved_2;   /* Appendix A holds it; MUST be ignored on receive */
+    uint8_t  reserved_3;   /* Appendix A holds it; MUST be ignored on receive */
 } vtp_aid_begin_result_t;
 
 /* SPEC.md §14.4 -- the detail of GNSS_AID_COMMIT. `first_missing` is gated:

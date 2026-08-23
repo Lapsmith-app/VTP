@@ -303,8 +303,9 @@ int main(void) {
         } else if (!strcmp(record, "aid_begin_result")) {
             vtp_aid_begin_result_t b;
             if (vtp_decode_aid_begin_result(buf, len, &b, &err)) { reject(err); continue; }
-            printf("{\"ok\":true,\"chunk_bytes\":%u,\"reserved_2\":%u",
-                   b.chunk_bytes, b.reserved_2);
+            printf("{\"ok\":true,\"token\":%u,\"chunk_bytes\":%u,"
+                   "\"reserved_3\":%u",
+                   b.token, b.chunk_bytes, b.reserved_3);
             finish(enc, vtp_encode_aid_begin_result(&b, enc, sizeof enc));
 
         } else if (!strcmp(record, "aid_commit_result")) {

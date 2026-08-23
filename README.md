@@ -99,7 +99,7 @@ framing.
 | --- | --- |
 | Specification | Believed internally consistent; §4.1 fixes the profile |
 | UUID allocation | Frozen |
-| Conformance corpus | 138 vectors across 9 record types, and 41 producer cases |
+| Conformance corpus | 141 vectors across 9 record types, and 45 producer cases |
 | Reference decoders | C and Python, both passing every vector |
 | Reference encoders | C and Python, both passing every producer case |
 | Software peripheral | A synthetic device, verified against the reference decoder |
@@ -241,7 +241,7 @@ and the reference header cannot disagree.
 
 1. Read [SPEC.md](SPEC.md). Appendix B there is the one-page path for the
    smallest conforming device — a GPS-only build is a service declaration,
-   four inert attributes and one notify stream, and every other role is a
+   five inert attributes and one notify stream, and every other role is a
    capability bit it leaves clear until you add it.
 2. Use the UUIDs in `schema/uuids.json` unchanged.
 3. Decode your own output with a reference decoder before testing against an

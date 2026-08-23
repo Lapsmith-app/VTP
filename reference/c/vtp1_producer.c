@@ -504,6 +504,7 @@ static void do_gnss_aid_caps(const jctx *c, const jv *in) {
 static void do_aid_begin_result(const jctx *c, const jv *in) {
     vtp_aid_begin_result_t b;
     memset(&b, 0, sizeof b);
+    b.token       = (uint8_t) jint(c, in, "token");
     b.chunk_bytes = (uint16_t)jint(c, in, "chunk_bytes");
     encoded(vtp_encode_aid_begin_result(&b, out, sizeof out), out);
 }

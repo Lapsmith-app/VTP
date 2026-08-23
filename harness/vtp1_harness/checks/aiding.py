@@ -19,9 +19,9 @@ _RESULT = refdec.enum_values("aid_result")
 _RESULT_VALUE = {name: value for value, name in _RESULT.items()}
 _FORMATS = refdec.enum_values("aid_format")
 
-# SPEC.md §14.3 -- three bytes of ATT Write Command header and two of chunk
+# SPEC.md §14.3 -- three bytes of ATT Write Command header and three of chunk
 # header, both off the negotiated MTU.
-_CHUNK_OVERHEAD = 5
+_CHUNK_OVERHEAD = 6
 
 
 def _control(s):
@@ -67,9 +67,9 @@ async def _begin(s, total, fmt=None):
                            struct.pack("<BI", fmt, total))
 
 
-async def _write_chunk(s, index, body):
+async def _write_chunk(s, token, index, body):
     """A chunk, written without a response. Nothing comes back by design."""
-    payload = struct.pack("<H", index) + body
+    payload = struct.pack("<BH", token, index) + body
     try:
         await s.transport.write(refdec.CHAR["aiding"], payload, response=False)
     except DeviceRefused as exc:
@@ -85,7 +85,7 @@ async def _commit(s, blob):
 
 
 async def _open_transfer(s, want=None):
-    """Open a transfer sized to this device, returning (blob, chunks).
+    """Open a transfer sized to this device: (token, blob, chunks).
 
     Deliberately not a round number of chunks: the last chunk carries the
     remainder, and a transfer that divided exactly would never exercise
@@ -106,7 +106,7 @@ async def _open_transfer(s, want=None):
                    f"{response.status_name}", response=response.raw.hex())
     result = _detail(response, "aid_begin_result")
     blob = _payload(total)
-    return blob, _split(blob, result["chunk_bytes"])
+    return result["token"], blob, _split(blob, result["chunk_bytes"])
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +176,8 @@ async def aiding_chunk_size(s):
         raise Fail(f"GNSS_AID_BEGIN was answered {response.status_name}",
                    response=response.raw.hex())
     result = _detail(response, "aid_begin_result")
-    if result["reserved_2"] != 0:
-        raise Fail("aid_begin_result.reserved_2 is not zero; Appendix A holds "
+    if result["reserved_3"] != 0:
+        raise Fail("aid_begin_result.reserved_3 is not zero; Appendix A holds "
                    "it for transfer metadata", detail=response.detail.hex())
     chunk_bytes = result["chunk_bytes"]
     ceiling = s.mtu - _CHUNK_OVERHEAD
@@ -186,7 +186,7 @@ async def aiding_chunk_size(s):
     if chunk_bytes > ceiling:
         raise Fail(f"chunk_bytes is {chunk_bytes}, above the {ceiling} a Write "
                    f"Command can carry at the negotiated ATT MTU of {s.mtu} "
-                   f"(three bytes of ATT header, two of chunk header). A "
+                   f"(three bytes of ATT header, three of chunk header). A "
                    f"client cannot write a chunk this size")
     s.state["aiding_begin"] = result
     # The transfer is left open on purpose: the next GNSS_AID_BEGIN discards
@@ -247,9 +247,9 @@ async def aiding_rejects_oversized(s):
        requires=("gnss_aiding",),
        title="A complete transfer commits as applied")
 async def aiding_transfer(s):
-    blob, chunks = await _open_transfer(s)
+    token, blob, chunks = await _open_transfer(s)
     for index, body in enumerate(chunks):
-        await _write_chunk(s, index, body)
+        await _write_chunk(s, token, index, body)
     response = await _commit(s, blob)
     if not response.ok:
         raise Fail(f"GNSS_AID_COMMIT on an open transfer with well-formed "
@@ -288,7 +288,7 @@ async def aiding_transfer(s):
        severity="MUST", requires=("gnss_aiding",), adversarial=True,
        title="A gap is reported by index, and the transfer stays open")
 async def aiding_reports_missing_chunk(s):
-    blob, chunks = await _open_transfer(s)
+    token, blob, chunks = await _open_transfer(s)
     if len(chunks) < 2:
         raise Skip("this device's chunk size makes the transfer a single "
                    "chunk, so there is no gap to leave")
@@ -297,7 +297,7 @@ async def aiding_reports_missing_chunk(s):
     hole = 1
     for index, body in enumerate(chunks):
         if index != hole:
-            await _write_chunk(s, index, body)
+            await _write_chunk(s, token, index, body)
 
     response = await _commit(s, blob)
     if not response.ok:
@@ -325,7 +325,7 @@ async def aiding_reports_missing_chunk(s):
 
     # SPEC.md §14.4 -- incomplete leaves the transfer OPEN. Filling the gap and
     # committing again is the entire point of reporting an index.
-    await _write_chunk(s, hole, chunks[hole])
+    await _write_chunk(s, token, hole, chunks[hole])
     response = await _commit(s, blob)
     if not response.ok:
         raise Fail(f"the second commit was answered {response.status_name}. "
@@ -343,9 +343,9 @@ async def aiding_reports_missing_chunk(s):
        severity="MUST", requires=("gnss_aiding",), adversarial=True,
        title="A transfer whose CRC does not match is refused bad_crc")
 async def aiding_detects_corruption(s):
-    blob, chunks = await _open_transfer(s)
+    token, blob, chunks = await _open_transfer(s)
     for index, body in enumerate(chunks):
-        await _write_chunk(s, index, body)
+        await _write_chunk(s, token, index, body)
     # Every chunk arrived; the client's CRC says the bytes are not the ones it
     # meant to send. Without this check a device could apply anything.
     response = await _control(s).request(
@@ -371,7 +371,7 @@ async def aiding_detects_corruption(s):
 
 @check(id="aiding.begin_supersedes", section="14.3", phase="aiding",
        severity="MUST", requires=("gnss_aiding",), adversarial=True,
-       title="A new BEGIN discards the open transfer whole")
+       title="A new BEGIN discards the open transfer and takes a fresh token")
 async def aiding_begin_supersedes(s):
     begin = s.state.get("aiding_begin")
     if begin is None:
@@ -389,7 +389,8 @@ async def aiding_begin_supersedes(s):
     if not response.ok:
         raise Fail(f"GNSS_AID_BEGIN was answered {response.status_name}",
                    response=response.raw.hex())
-    await _write_chunk(s, 0, _payload(min(first, chunk_bytes)))
+    old = _detail(response, "aid_begin_result")
+    await _write_chunk(s, old["token"], 0, _payload(min(first, chunk_bytes)))
 
     second = min(caps["max_bytes"], chunk_bytes + max(1, chunk_bytes // 2))
     response = await _begin(s, second)
@@ -399,10 +400,27 @@ async def aiding_begin_supersedes(s):
                    f"the open transfer and start the new one",
                    response=response.raw.hex())
     result = _detail(response, "aid_begin_result")
+    # SPEC.md §14.3 -- the fresh token MUST differ. With EATT a chunk of the
+    # discarded transfer can still be queued on another bearer; a reused
+    # token lets it into the new transfer at whatever offset its index names.
+    if result["token"] == old["token"]:
+        raise Fail(f"the superseding BEGIN reused token {old['token']}. A "
+                   f"chunk of the discarded transfer still in flight on "
+                   f"another ATT bearer would be accepted into this one "
+                   f"(SPEC.md §14.3)", detail=response.detail.hex())
     blob = _payload(second)
     chunks = _split(blob, result["chunk_bytes"])
     for index, body in enumerate(chunks):
-        await _write_chunk(s, index, body)
+        await _write_chunk(s, result["token"], index, body)
+
+    # The stale-chunk arrival EATT makes possible, replayed deliberately: a
+    # chunk carrying the OLD token arriving after the new transfer opened.
+    # Its bytes are the complement of the real chunk 0, so a device that
+    # wrongly accepts it corrupts the transfer and the CRC below catches it;
+    # a device that ignores it, as SPEC.md §14.3 requires, commits clean.
+    stale = bytes(b ^ 0xFF for b in chunks[0])
+    await _write_chunk(s, old["token"], 0, stale)
+
     response = await _commit(s, blob)
     if not response.ok:
         raise Fail(f"the commit of the superseding transfer was answered "
@@ -416,6 +434,6 @@ async def aiding_begin_supersedes(s):
                    detail=response.detail.hex())
     if result["result"] == _RESULT_VALUE["bad_crc"]:
         raise Fail("the CRC of the new transfer did not match, so bytes from "
-                   "the discarded transfer leaked into the one that "
-                   "superseded it (SPEC.md §14.3)",
-                   detail=response.detail.hex())
+                   "the discarded transfer -- or a stale chunk carrying its "
+                   "token -- leaked into the one that superseded it "
+                   "(SPEC.md §14.3)", detail=response.detail.hex())

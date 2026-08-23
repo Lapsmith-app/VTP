@@ -516,8 +516,9 @@ int vtp_decode_aid_begin_result(const uint8_t *b, size_t len,
                                 vtp_aid_begin_result_t *o, const char **err) {
     if (len != VTP_AID_BEGIN_RESULT_SIZE) { *err = "length"; return -1; }
 
+    o->token       = b[VTP_AID_BEGIN_RESULT_OFF_TOKEN];
     o->chunk_bytes = rd16(b + VTP_AID_BEGIN_RESULT_OFF_CHUNK_BYTES);
-    o->reserved_2  = rd16(b + VTP_AID_BEGIN_RESULT_OFF_RESERVED_2);
+    o->reserved_3  = b[VTP_AID_BEGIN_RESULT_OFF_RESERVED_3];
     return 0;
 }
 

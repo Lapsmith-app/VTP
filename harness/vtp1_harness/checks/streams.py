@@ -509,12 +509,16 @@ async def can_forwarded_once(s):
     await asyncio.sleep(2.0)
 
     duplicates = []
+    # ONE set for the whole window, not one per notification: a frame
+    # forwarded twice keeps its bus-arrival timestamp, and nothing obliges
+    # the second copy to share a batch with the first. A per-notification
+    # set passed a device that split the copies across two batches.
+    seen = set()
     for item in s.streams["can"].items[mark:]:
         try:
             batch = refdec.decode("can_batch", item.payload)
         except refdec.Reject:
             continue
-        seen = set()
         for record in batch["records"]:
             key = (record["id"], record["t_device_us"])
             if key in seen:
@@ -530,3 +534,138 @@ async def can_forwarded_once(s):
             f"subscriptions matching it. A frame MUST be forwarded at most "
             f"once, governed by the most specific mask and then the earliest "
             f"installed", payload=item.payload.hex())
+
+
+# ---------------------------------------------------------------------------
+# SPEC.md §9.2 -- which subscription governs
+# ---------------------------------------------------------------------------
+
+async def _count_frames(s, target, seconds):
+    """Frames carrying `target` arriving in the next `seconds`."""
+    mark = len(s.streams["can"])
+    await asyncio.sleep(seconds)
+    count = 0
+    for item in s.streams["can"].items[mark:]:
+        try:
+            batch = refdec.decode("can_batch", item.payload)
+        except refdec.Reject:
+            continue
+        count += sum(1 for r in batch["records"] if r["id"] == target)
+    return count
+
+
+async def _restore_observation_table(s):
+    """Put the table back the way can.subscribe_for_observation left it.
+
+    These checks reprogram the table wholesale, and the reconnect phase
+    probes for exactly what `installed` says this connection holds -- so the
+    device and that record must agree again before this check ends.
+    """
+    c = s.control
+    await c.request(refdec.OPCODE["CAN_RESET"])
+    for can_id, mask in (s.state.get("installed") or {}).items():
+        if mask == refdec.MASK_EXACT:
+            await c.subscribe_can(can_id)
+        else:
+            await c.subscribe_can(can_id, mask=mask)
+
+
+def _busiest_id(s):
+    good, _ = _decoded(s, "can")
+    counts = {}
+    for _, batch in good:
+        for r in batch["records"]:
+            counts[r["id"]] = counts.get(r["id"], 0) + 1
+    if not counts:
+        raise Skip("no CAN frame was observed, so there is no identifier to "
+                   "test governing against")
+    return max(counts, key=counts.get)
+
+
+@check(id="can.most_specific_governs", section="9.2", phase="streams",
+       severity="MUST", requires=("control", "can", "masked_subscriptions"),
+       title="Of two overlapping subscriptions, the most specific mask governs")
+async def can_most_specific_governs(s):
+    c = s.control
+    if c is None:
+        raise Skip("no control plane")
+    target = _busiest_id(s)
+    try:
+        # Baseline: the target alone, exact mask, every_frame.
+        await c.request(refdec.OPCODE["CAN_RESET"])
+        base_install = await c.subscribe_can(target)
+        if not base_install.ok:
+            raise Skip(f"could not install a baseline subscription: "
+                       f"{base_install.status_name}")
+        baseline = await _count_frames(s, target, 1.0)
+        if baseline < 4:
+            raise Skip(f"identifier 0x{target:x} produced only {baseline} "
+                       f"frame(s) in a second; too little traffic to tell "
+                       f"one forwarding mode from another")
+        # The condition §9.2 decides: the same frame matched by an exact
+        # every_frame subscription and a broader periodic one. The mode
+        # difference is what makes the wrong answer VISIBLE -- with both
+        # subscriptions in the same mode, a device forwarding under the
+        # wrong governor produces the same stream as one that is right.
+        broad = await c.subscribe_can(target, mask=refdec.MASK_EXACT & ~0x1,
+                                      mode=1, arg=60_000)
+        if not broad.ok:
+            raise Skip(f"could not install the broad periodic subscription: "
+                       f"{broad.status_name}")
+        governed = await _count_frames(s, target, 1.0)
+        if governed < max(2, baseline // 3):
+            raise Fail(
+                f"0x{target:x} arrived {governed} time(s) in a window that "
+                f"carried {baseline} under the exact subscription alone. The "
+                f"broad periodic subscription is governing the frame; §9.2 "
+                f"gives it to the most specific mask, which is the exact "
+                f"every-frame one")
+    finally:
+        await _restore_observation_table(s)
+    s.state["can_rate_baseline"] = baseline
+
+
+@check(id="can.earliest_installed_governs", section="9.2", phase="streams",
+       severity="MUST", requires=("control", "can", "masked_subscriptions"),
+       title="Equally specific overlapping subscriptions tie-break to the earliest")
+async def can_earliest_installed_governs(s):
+    c = s.control
+    if c is None:
+        raise Skip("no control plane")
+    target = _busiest_id(s)
+    baseline = s.state.get("can_rate_baseline")
+    if baseline is None:
+        raise Skip("no traffic baseline to compare against")
+    # Two masks of EQUAL specificity -- 29 bits each, differing only in which
+    # arbitration bit they ignore -- both matching the target. Only install
+    # order separates them, and the modes differ so the answer is visible.
+    mask_a = refdec.MASK_EXACT & ~0x1
+    mask_b = refdec.MASK_EXACT & ~0x2
+    try:
+        await c.request(refdec.OPCODE["CAN_RESET"])
+        await c.subscribe_can(target, mask=mask_a)                    # earliest
+        await c.subscribe_can(target, mask=mask_b, mode=1, arg=60_000)
+        forwarded = await _count_frames(s, target, 1.0)
+        if forwarded < max(2, baseline // 3):
+            raise Fail(
+                f"0x{target:x} arrived {forwarded} time(s) against a baseline "
+                f"of {baseline}: the periodic subscription installed SECOND "
+                f"is governing a frame two equally specific masks match. "
+                f"§9.2 tie-breaks to the earliest installed")
+        # The same pair, installed in the other order, so a device that got
+        # the first half right by accident -- insertion order, say -- has to
+        # get this half right on purpose.
+        await c.request(refdec.OPCODE["CAN_RESET"])
+        await c.subscribe_can(target, mask=mask_b, mode=1, arg=60_000)  # earliest
+        await c.subscribe_can(target, mask=mask_a)
+        forwarded = await _count_frames(s, target, 1.0)
+        ceiling = max(2, baseline // 8)
+        if forwarded > ceiling:
+            raise Fail(
+                f"0x{target:x} arrived {forwarded} time(s) where the periodic "
+                f"subscription installed FIRST allows at most ~{ceiling}: the "
+                f"every-frame subscription installed second is governing. "
+                f"§9.2 tie-breaks equally specific masks to the earliest "
+                f"installed, whichever mode each carries")
+    finally:
+        await _restore_observation_table(s)

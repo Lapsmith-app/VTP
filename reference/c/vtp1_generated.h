@@ -139,12 +139,14 @@
 
 /* The detail of a GNSS_AID_BEGIN response. Opens a transfer and fixes its chunking. */
 #define VTP_AID_BEGIN_RESULT_SIZE 4
-#define VTP_AID_BEGIN_RESULT_OFF_CHUNK_BYTES 0
-#define VTP_AID_BEGIN_RESULT_OFF_RESERVED_2 2
+#define VTP_AID_BEGIN_RESULT_OFF_TOKEN 0
+#define VTP_AID_BEGIN_RESULT_OFF_CHUNK_BYTES 1
+#define VTP_AID_BEGIN_RESULT_OFF_RESERVED_3 3
 
 /* One chunk of an aiding transfer, written without a response. */
-#define VTP_AID_CHUNK_SIZE 2
-#define VTP_AID_CHUNK_OFF_INDEX 0
+#define VTP_AID_CHUNK_SIZE 3
+#define VTP_AID_CHUNK_OFF_TOKEN 0
+#define VTP_AID_CHUNK_OFF_INDEX 1
 
 /* The detail of a GNSS_AID_COMMIT response. What became of the transfer. */
 #define VTP_AID_COMMIT_RESULT_SIZE 4

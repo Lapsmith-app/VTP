@@ -300,6 +300,33 @@ async def can_subscribe_idempotent(s):
                    f"{response.status_name}; the same id and mask MUST update "
                    f"in place rather than consume a slot",
                    response=response.raw.hex())
+    # `ok` alone cannot tell an update-in-place from a device that quietly
+    # created a second entry -- both answer ok. The table can: remove the
+    # subscription once, and a device that updated in place has nothing left
+    # under that name, so a second removal MUST find nothing. (Whether the
+    # duplicate consumed a physical SLOT is can.table_full's arithmetic.)
+    first = await c.unsubscribe_can(PROBE_ID)
+    if not first.ok:
+        raise Fail(f"removing the twice-installed subscription was answered "
+                   f"{first.status_name}", response=first.raw.hex())
+    second = await c.unsubscribe_can(PROBE_ID)
+    if second.ok:
+        s.state.pop("probe_installed", None)
+        s.state.get("installed", {}).pop(PROBE_ID, None)
+        raise Fail(
+            "the subscription came out of the table twice, so installing the "
+            "same id and mask twice created two entries. §9.1 makes "
+            "(id, mask) the subscription's identity: the second install MUST "
+            "update the first in place",
+            response=second.raw.hex())
+    # Put the table back the way can.subscribe_ok left it, for the checks
+    # that rely on the probe being installed.
+    redo = await c.subscribe_can(PROBE_ID)
+    if not redo.ok:
+        s.state.pop("probe_installed", None)
+        s.state.get("installed", {}).pop(PROBE_ID, None)
+        raise Skip(f"could not re-install the probe subscription afterwards: "
+                   f"{redo.status_name}")
 
 
 @check(id="can.unknown_subscription", section="9.1", phase="control",
@@ -361,6 +388,21 @@ async def can_table_full(s):
             raise Fail(f"the {len(installed) + 1}th subscription against "
                        f"{slots} slot(s) was answered {first.status_name}, not "
                        f"table_full", response=first.raw.hex())
+        # EXACTLY at capacity, not merely eventually. Every distinct (id,
+        # mask) this connection installed is accounted for here, so a refusal
+        # with fewer than `slots` of them accepted means a slot went to
+        # something the client never asked to keep -- a duplicate install
+        # that consumed a second entry, or a ceiling one short of Info's
+        # declaration. Either way Info and the table disagree, and the table
+        # full arriving "eventually" is what let both hide.
+        if len(installed) != slots:
+            raise Fail(
+                f"table_full arrived with {len(installed)} distinct "
+                f"subscription(s) accepted against a declared {slots}. Info "
+                f"promises {slots} slots and §9.1 gives every one a distinct "
+                f"(id, mask); {slots - len(installed)} slot(s) are held by "
+                f"something this client never installed",
+                response=first.raw.hex())
     finally:
         # Leave the table as this phase found it, so the stream checks are not
         # reading a bus the harness saturated.

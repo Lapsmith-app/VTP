@@ -270,6 +270,12 @@ FAULTS = {
     "monitor_accepts_partial": "SPEC.md §13.4 — an incomplete write is accepted",
     "monitor_accepts_duplicate_slot": "SPEC.md §13.4 — a slot twice in one write is accepted",
     "subs_survive_reconnect": "SPEC.md §9.1 — the subscription table is not cleared",
+    "duplicate_consumes_slot": "SPEC.md §9.1 — re-installing the same id and mask silently takes a second slot",
+    "duplicate_double_entry": "SPEC.md §9.1 — re-installing the same id and mask creates a second removable entry",
+    "table_full_early": "SPEC.md §9.1 — table_full arrives one subscription before the capacity Info declares",
+    "overlap_wrong_governor": "SPEC.md §9.2 — the least specific matching mask governs the frame",
+    "tie_break_latest": "SPEC.md §9.2 — equally specific masks tie-break to the latest installed",
+    "can_duplicate_across_batches": "SPEC.md §9.2 — a forwarded frame is repeated in a later batch",
     "unknown_subscription_ok": "SPEC.md §9.1 — an unknown id and mask is answered ok",
     "stream_before_subscribe": "SPEC.md §9.1 — CAN frames arrive with no subscription installed",
     "caps_reserved_bits": "SPEC.md §4 — a reserved capability bit is set",
@@ -325,6 +331,8 @@ FAULTS = {
     "aid_reports_first_chunk_missing": "SPEC.md §14.4 — the gap is always reported as chunk 0",
     "aid_ignores_crc": "SPEC.md §14.4 — a transfer whose CRC does not match is applied anyway",
     "aid_begin_keeps_transfer": "SPEC.md §14.3 — a BEGIN over an open transfer is answered ok and the old transfer kept",
+    "aid_token_reused": "SPEC.md §14.3 — a superseding BEGIN reuses the discarded transfer's token",
+    "aid_token_ignored": "SPEC.md §14.3 — a chunk naming the wrong token is accepted instead of ignored",
 }
 
 
@@ -361,6 +369,9 @@ class LoopbackTransport(Transport):
         self._connected = False
         self._stale_subs = {}
         self._seen_a_connection = False
+        self._dup_entries = {}
+        self._dup_shunt = 0
+        self._pending_dup_unsub = None
 
     # -- lifecycle --------------------------------------------------------
 
@@ -428,6 +439,54 @@ class LoopbackTransport(Transport):
             # matching every identifier, installed by the device itself.
             self.device._subscriptions[(0, 0)] = {
                 "mode": 0, "arg": 0, "order": 0, "per_id": {}}
+        if "overlap_wrong_governor" in self.faults:
+            # SPEC.md §9.2 -- the LEAST specific matching mask governs. The
+            # frames themselves stay well-formed; only which subscription's
+            # mode shapes them changes, which is exactly why the check needs
+            # the two subscriptions to differ in mode to see it.
+            dev = self.device
+            def least_specific(cid, _dev=dev):
+                matches = [(k, sub) for k, sub in _dev._subscriptions.items()
+                           if (cid & k[1]) == (k[0] & k[1])]
+                if not matches:
+                    return None
+                return min(matches,
+                           key=lambda ks: (bin(ks[0][1]).count("1"),
+                                           ks[1]["order"]))[1]
+            dev._governing = least_specific
+        if "tie_break_latest" in self.faults:
+            # SPEC.md §9.2 -- specificity still wins, but ties go to the
+            # LATEST installed subscription instead of the earliest.
+            dev = self.device
+            def latest_wins(cid, _dev=dev):
+                matches = [(k, sub) for k, sub in _dev._subscriptions.items()
+                           if (cid & k[1]) == (k[0] & k[1])]
+                if not matches:
+                    return None
+                return min(matches,
+                           key=lambda ks: (-bin(ks[0][1]).count("1"),
+                                           -ks[1]["order"]))[1]
+            dev._governing = latest_wins
+        if "can_duplicate_across_batches" in self.faults:
+            # SPEC.md §9.2 -- a forwarded frame is emitted again in a LATER
+            # batch, bus-arrival timestamp and all. The held frame is only
+            # replayed once a flush has closed its own batch, so the copy is
+            # guaranteed cross-batch -- the shape a per-notification dedup
+            # set cannot see, and passed for exactly that reason. Replayed
+            # while the new batch is still empty, so it becomes that batch's
+            # t_base and keeps its original timestamp on the wire.
+            dev = self.device
+            orig_frames = dev._due_can_frames
+            state = {"held": None}
+            def duplicating(now, _dev=dev, _orig=orig_frames, _st=state):
+                if _st["held"] is not None and _dev._can_batch_t0 is None:
+                    yield _st["held"]
+                    _st["held"] = None
+                frames = list(_orig(now))
+                yield from frames
+                if frames and _st["held"] is None:
+                    _st["held"] = dict(frames[-1])
+            dev._due_can_frames = duplicating
         self._connected = True
         self._owed = False
         self._pump = asyncio.create_task(self._run())
@@ -538,6 +597,12 @@ class LoopbackTransport(Transport):
         if uuid == refdec.CHAR["monitor_values"]:
             return self._monitor_write(data)
         if uuid == refdec.CHAR["aiding"]:
+            # SPEC.md §14.3 -- a chunk whose token the device never reads: it
+            # is rewritten to whatever transfer is open, so a stale chunk
+            # from a superseded transfer lands instead of being ignored.
+            if "aid_token_ignored" in self.faults and len(data) >= 1 and \
+                    getattr(self.device, "_aid", None):
+                data = bytes([self.device._aid["token"]]) + bytes(data[1:])
             # SPEC.md §14.3 -- a Write Command. Nothing comes back, including
             # when the device discards it, so the reason is dropped here
             # exactly as a real peripheral drops it.
@@ -612,10 +677,66 @@ class LoopbackTransport(Transport):
                 self.device._aid.get("chunks"):
             import vtp1_encode as _enc
             detail = _enc.encode_aid_begin_result(
-                {"chunk_bytes": self.device._aid["chunk_bytes"]})
+                {"token": self.device._aid["token"],
+                 "chunk_bytes": self.device._aid["chunk_bytes"]})
             self._deliver_control(bytes([request[0], request[1],
                                          refdec.STATUS_VALUE["ok"]]) + detail)
             return
+
+        # SPEC.md §14.3 -- the superseding BEGIN takes the SAME token the
+        # discarded transfer had, so a stale chunk still queued on another
+        # EATT bearer is accepted into the new transfer. Gated on the old
+        # transfer holding a chunk, like the fault above, so only the check
+        # that stages that situation meets it. The device state is rewritten
+        # after dispatch, below, so the reuse is real and not cosmetic.
+        if "aid_token_reused" in self.faults and len(request) >= 2 and \
+                request[0] == refdec.OPCODE["GNSS_AID_BEGIN"] and \
+                getattr(self.device, "_aid", None) and \
+                self.device._aid.get("chunks"):
+            self._aid_reuse_token = self.device._aid["token"]
+        else:
+            self._aid_reuse_token = None
+
+        # SPEC.md §9.1 -- the duplicate-install family. Each takes effect only
+        # on a well-formed subscribe naming an (id, mask) the table already
+        # holds, so the checks that stage that situation are the only ones
+        # that meet them.
+        sub_key = self._parse_subscribe(request)
+        if sub_key is not None and sub_key in getattr(
+                self.device, "_subscriptions", {}):
+            if "duplicate_consumes_slot" in self.faults:
+                # The old entry is shunted to a name nothing matches and
+                # nothing can remove, so the re-install lands in a fresh
+                # entry: one slot silently gone, visible only to arithmetic
+                # against Info's declared capacity.
+                sub = self.device._subscriptions.pop(sub_key)
+                self._dup_shunt += 1
+                tomb = (0x3FF00000 + self._dup_shunt, refdec.MASK_EXACT)
+                self.device._subscriptions[tomb] = sub
+            if "duplicate_double_entry" in self.faults:
+                # The re-install will create a second REMOVABLE entry: the
+                # device updates in place, but this transport then honours
+                # one extra removal, which is what such a table looks like
+                # from outside.
+                self._dup_entries[sub_key] = self._dup_entries.get(sub_key, 0) + 1
+        if "table_full_early" in self.faults and sub_key is not None and \
+                sub_key not in getattr(self.device, "_subscriptions", {}):
+            slots = getattr(self.device, "CAN_SUBSCRIPTION_SLOTS", None) or \
+                _load_peripheral().CAN_SUBSCRIPTION_SLOTS
+            if len(self.device._subscriptions) == slots - 1:
+                # Refused one short of the capacity Info declares: the
+                # classic off-by-one, and exactly the answer a device with a
+                # leaked slot gives.
+                self._deliver_control(bytes(
+                    [request[0], request[1],
+                     refdec.STATUS_VALUE["table_full"]]))
+                return
+        if "duplicate_double_entry" in self.faults and len(request) >= 10 and \
+                request[0] == refdec.OPCODE["CAN_UNSUBSCRIBE"]:
+            cid, mask = struct.unpack_from("<II", request, 2)
+            self._pending_dup_unsub = (cid, mask)
+        else:
+            self._pending_dup_unsub = None
 
         # SPEC.md §9 -- a client has at most ONE request outstanding, and a
         # device meeting one that pipelines anyway answers `busy` and MUST NOT
@@ -663,6 +784,20 @@ class LoopbackTransport(Transport):
         cb = self._subs.get(refdec.CHAR["control"])
         if cb is not None:
             cb(response, asyncio.get_running_loop().time())
+
+    def _parse_subscribe(self, request):
+        """(id, mask) of a well-formed subscribe request, else None."""
+        if len(request) < 2:
+            return None
+        if request[0] == refdec.OPCODE["CAN_SUBSCRIBE"] and \
+                len(request) == 2 + refdec.OPCODE_PARAM_SIZE["CAN_SUBSCRIBE"]:
+            (cid,) = struct.unpack_from("<I", request, 2)
+            return (cid, refdec.MASK_EXACT)
+        if request[0] == refdec.OPCODE["CAN_SUBSCRIBE_MASK"] and \
+                len(request) == 2 + refdec.OPCODE_PARAM_SIZE["CAN_SUBSCRIBE_MASK"]:
+            cid, mask = struct.unpack_from("<II", request, 2)
+            return (cid, mask)
+        return None
 
     def _parse_leniently(self, request):
         """SPEC.md §9 — the device that takes what it was given and copes.
@@ -767,6 +902,16 @@ class LoopbackTransport(Transport):
             # missing rather than at the number that was wrong.
             base = 3 + refdec.offset("aid_begin_result", "chunk_bytes")
             struct.pack_into("<H", response, base, self.mtu + 1)
+        if getattr(self, "_aid_reuse_token", None) is not None and \
+                status == 0 and opcode == refdec.OPCODE["GNSS_AID_BEGIN"]:
+            # The second half of aid_token_reused: the response carries the
+            # discarded transfer's token, and the device's own state is set
+            # to match, so a stale chunk with that token genuinely lands.
+            response[3 + refdec.offset("aid_begin_result", "token")] = \
+                self._aid_reuse_token
+            if getattr(self.device, "_aid", None):
+                self.device._aid["token"] = self._aid_reuse_token
+            self._aid_reuse_token = None
         if opcode == refdec.OPCODE["GNSS_AID_COMMIT"] and status == 0 and \
                 len(response) >= 3 + refdec.size("aid_commit_result"):
             base = 3
@@ -800,6 +945,16 @@ class LoopbackTransport(Transport):
             response[1] = (response[1] + 1) & 0xFF
         if "detail_on_error" in self.faults and status != 0:
             response += b"\x00\x00"
+        if "duplicate_double_entry" in self.faults and \
+                self._pending_dup_unsub is not None and \
+                opcode == refdec.OPCODE["CAN_UNSUBSCRIBE"] and \
+                status == refdec.STATUS_VALUE["unknown_subscription"] and \
+                self._dup_entries.get(self._pending_dup_unsub, 0) > 0:
+            # The second entry the duplicate install created, coming out of
+            # the table: the device already removed the first, and this
+            # removal finds the copy.
+            self._dup_entries[self._pending_dup_unsub] -= 1
+            response[2] = refdec.STATUS_VALUE["ok"]
         if "unknown_subscription_ok" in self.faults and \
                 opcode == refdec.OPCODE["CAN_UNSUBSCRIBE"] and \
                 status == refdec.STATUS_VALUE["unknown_subscription"]:
