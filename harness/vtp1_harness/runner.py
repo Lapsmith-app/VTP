@@ -94,13 +94,24 @@ class Runner:
         # table on connect, so nothing should arrive in it.
         await asyncio.sleep(1.0)
 
-        for phase in ("discovery", "gatt", "info", "control", "monitor", "observe"):
+        # Sliced from PHASES rather than listed again. The list used to be
+        # written out here as well, so a phase added to PHASES was registered,
+        # ordered, reported on -- and never run, which surfaces as checks that
+        # silently do not exist rather than as an error.
+        #
+        # "observe" ends the interrogation and "reconnect" is driven separately
+        # below, so those two names are the only structure this needs.
+        interrogate = PHASES[:PHASES.index("observe") + 1]
+        after_collection = PHASES[PHASES.index("observe") + 1:
+                                  PHASES.index("reconnect")]
+
+        for phase in interrogate:
             await self._phase(session, report, phase)
 
         self.on_phase("collect", f"listening for {self.observe_s:.0f}s")
         await asyncio.sleep(self.observe_s)
 
-        for phase in ("streams", "transport"):
+        for phase in after_collection:
             await self._phase(session, report, phase)
 
         if self.reconnect:

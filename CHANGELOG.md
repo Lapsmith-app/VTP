@@ -8,6 +8,81 @@ conformance vector.
 
 ## [Unreleased]
 
+### GNSS aiding: the client can shorten the device's time to first fix
+
+A receiver with no current orbit data reads it from the satellites at 50 bit/s
+and takes tens of seconds, or in a paddock never finishes. The client has a
+network connection and the same data. Nothing in VTP/1 could carry it.
+
+New capability bit 8 (`gnss_aiding`, requiring `gps` and `control`), a seventh
+characteristic, and four control opcodes. SPEC.md §14 is the normative text and
+RATIONALE §7 is the argument.
+
+- **A seventh characteristic, `aiding`, written without a response.** The
+  transfer is tens of kilobytes; §9 allows one outstanding control request; so
+  carrying it as opcodes alone is ~164 round trips and a control plane that can
+  answer nothing else for several seconds. This is a change to the fixed
+  attribute table of §4.1 and is therefore a pre-1.0 change or none at all.
+- **`GNSS_AID_INFO` first.** The device declares the one format it accepts —
+  enumerated, never a vendor string — plus its size ceiling, whether aiding
+  survives a power cycle, and the validity window it already holds, so a client
+  does not push 40 kB the device is still sitting on.
+- **`GNSS_AID_BEGIN` fixes the chunking, not just the session.** `chunk_bytes`
+  is constant for the transfer so that index-to-offset is arithmetic. Without
+  that a device cannot place a resent chunk, and the missing-chunk report below
+  has nothing to offer.
+- **`GNSS_AID_COMMIT` reports what became of it**, including the lowest chunk
+  index that never arrived — §8.3's rule that loss is a number, applied to a
+  path with no per-write acknowledgement. `incomplete` leaves the transfer
+  open; the client resends the gap and commits again, and terminates because
+  that index strictly advances.
+- **A refused transfer is not a refused request.** Commit answers `ok` and puts
+  the outcome in the detail, because §9 carries no detail on a non-ok status
+  and an `incomplete` with no index to resend from is useless.
+- **A device MUST NOT report aiding as measurement.** It may seed a receiver's
+  search; it MUST NOT reach a `gps_fix`. The sharpest case of §1.1 in the
+  document — a plausible position from something that is not a sensor.
+- **Nothing reserved for RTCM3.** Corrections are named out of scope in §14.6
+  rather than given a slot: §11.4 allows a new `aid_format` member at any time,
+  so an allocated value buys nothing, and the lifecycle work it implies —
+  continuous rather than one-shot, with an inbound rate ceiling and airtime
+  rules against CAN — is what a future minor version would actually have to do.
+
+Also in this change:
+
+- **`OPCODE_PARAM_SIZE` in the harness is derived from the schema.** It was ten
+  hand-written entries with no way to acquire an eleventh, and an opcode added
+  to the schema surfaced as a `KeyError` inside a check about capabilities.
+  §11.3 makes new opcodes the extension point, so this table was always going
+  to be asked for one it did not hold. The ten derived values are identical.
+- **`control.opcode_capability` is no longer an expected skip.** The reference
+  peripheral does not declare `gnss_aiding`, so the check now has an unowned
+  opcode to try and runs for the first time.
+- **The reference peripheral implements the role**, and the harness checks it.
+  Nine checks in a new `aiding` phase cover the declaration, the chunk size
+  against the negotiated MTU, both pre-transfer refusals, a complete transfer,
+  a deliberately withheld chunk and the resend that follows it, a CRC
+  mismatch, and an aborted session. Eight new seeded faults hold them to
+  account; the harness selftest now proves 53 defects are caught rather
+  than 45.
+- **The conformance corpus can say nothing about any of this.** It decodes
+  bytes a device sends, and every §14 rule is about bytes a device receives.
+  The harness is the only mechanical coverage the role has, which is the same
+  position Monitor is in and worth stating rather than discovering.
+
+Three places where a list had been written out twice, each found by adding the
+seventh characteristic rather than by review:
+
+- **`Runner._run` listed its own phase order**, so a phase added to
+  `checks.PHASES` was registered, ordered and reported on — and never run. Nine
+  checks existed and did not execute. Sliced from `PHASES` now.
+- **`OPCODE_PARAM_SIZE`** — see above.
+- **The peripheral selftest's encrypt-everything posture** was a written-out
+  set of six characteristic names, so a seventh was conforming, served and
+  documented while being left unprotected by a constant nobody revisits. It is
+  derived from the profile now.
+
+
 ### A busy radio was being reported as a device losing data
 
 Reported from the field: the peripheral shedding at `every_frame` and a client

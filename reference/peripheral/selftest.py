@@ -311,7 +311,13 @@ def main():
     # than only at startup: a posture that leaves something unencrypted took a
     # different path through the permission arithmetic than one that does not,
     # and only the encrypt-everything path had been exercised.
-    streams = {"gps", "can", "imu", "monitor_values"}
+    # Derived from the profile rather than listed again. This was a written-out
+    # set of six names, so a seventh characteristic was conforming, served,
+    # documented -- and left out of the encrypt-everything posture by a
+    # constant nobody thinks to revisit. SPEC.md §10 protects what a device
+    # exposes, and the schema is what says what that is.
+    protectable = {c["name"] for c in dev.enc.SCHEMA["profile"]["characteristics"]
+                   if c["name"] != "info"}
     postures = {p: serve.encrypted_characteristics(p)
                 for p in serve.ENCRYPTION_POSTURES}
     check(postures["none"] == set(),
@@ -319,9 +325,9 @@ def main():
     check(postures["control"] == {"control"},
           f"the control posture MUST protect Control alone, protects "
           f"{postures['control']}")
-    check(postures["all"] == streams | {"control"},
-          f"the all posture MUST protect every stream and Control, protects "
-          f"{postures['all']}")
+    check(postures["all"] == protectable,
+          f"the all posture MUST protect every characteristic but Info, "
+          f"protects {postures['all']} and the profile declares {protectable}")
     for name, protected in postures.items():
         # SPEC.md §10.2 — Info stays readable in every posture, so a client
         # that cannot pair can still identify what it found.

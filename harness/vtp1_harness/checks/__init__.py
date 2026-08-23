@@ -70,8 +70,8 @@ class Observe(Exception):
 #: which its bookkeeping is most likely to slip. "observe" is where the harness
 #: asks for the traffic it will then judge; the runner holds the link open for
 #: the collection window between that phase and "streams".
-PHASES = ("discovery", "gatt", "info", "control", "monitor", "observe",
-          "streams", "transport", "reconnect")
+PHASES = ("discovery", "gatt", "info", "control", "monitor", "aiding",
+          "observe", "streams", "transport", "reconnect")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -119,6 +119,6 @@ def check(*, id, section, title, severity="MUST", requires=(), phase="streams",
 
 def load_all():
     """Import every check module, populating the registry."""
-    from . import (discovery, info, control, monitor, streams,  # noqa: F401
-                   transport, reconnect)
+    from . import (discovery, info, control, monitor, aiding,  # noqa: F401
+                   streams, transport, reconnect)
     return REGISTRY

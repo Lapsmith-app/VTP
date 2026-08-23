@@ -462,6 +462,36 @@ def decode_link_params(buf):
     return lp
 
 
+def _decode_fixed(record):
+    """A fixed-size control-detail record, decoded straight from the schema.
+
+    SPEC.md §14's three records differ only in their fields, and every rule
+    that applies to them -- exact length, absence from the validity mask, an
+    unknown enum value staying unknown -- is already expressed there. Writing
+    them out by hand would be three chances to forget one.
+    """
+    def decode(buf):
+        rec = SCHEMA["records"][record]
+        if len(buf) != _size(record):
+            raise Reject("length")
+        out = _unpack(record, buf)
+
+        mask = rec.get("validity")
+        if mask:
+            bit_of = {b["name"]: b["bit"] for b in SCHEMA["bitmasks"][mask]["bits"]}
+            out["absent"] = sorted(
+                f["name"] for f in rec["fields"]
+                if f.get("valid_bit") is not None
+                and not (out["validity"] & (1 << bit_of[f["valid_bit"]])))
+
+        for f in rec["fields"]:
+            if f.get("enum"):
+                known = {m["value"] for m in SCHEMA["enums"][f["enum"]]["members"]}
+                out[f["name"] + "_known"] = out[f["name"]] in known
+        return out
+    return decode
+
+
 DECODERS = {
     "gps_fix": decode_gps_fix,
     "can_batch": decode_can_batch,
@@ -473,6 +503,9 @@ DECODERS = {
     "monitor_update": decode_monitor_update,
     "control_response": decode_control_response,
     "time_sync": decode_time_sync,
+    "gnss_aid_caps": _decode_fixed("gnss_aid_caps"),
+    "aid_begin_result": _decode_fixed("aid_begin_result"),
+    "aid_commit_result": _decode_fixed("aid_commit_result"),
 }
 
 

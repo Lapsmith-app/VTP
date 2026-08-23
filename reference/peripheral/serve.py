@@ -306,7 +306,7 @@ def encrypted_characteristics(posture):
     apparently broken.
     """
     if posture == "all":
-        return {"gps", "can", "imu", "control", "monitor_values"}
+        return {"gps", "can", "imu", "control", "monitor_values", "aiding"}
     if posture == "control":
         return {"control"}
     if posture == "none":
@@ -386,6 +386,7 @@ class Peripheral:
         # device itself, because whether an update was applied is device truth;
         # only the refusal is observed out here.
         self._monitor_rejected = 0
+        self._aiding_discarded = 0
         self.control_log = collections.deque(maxlen=8)
         self.started = time.monotonic()
         self._turn = 0
@@ -434,6 +435,17 @@ class Peripheral:
         # has already applied.
         self._observe_link_up()
         uuid = characteristic.uuid.lower()
+        if uuid == CHAR["aiding"].lower():
+            # SPEC.md §14.3 — a chunk, written without a response. There is no
+            # error to return by construction: this is a Write Command, so ATT
+            # carries nothing back, and every refusal a client acts on arrives
+            # at GNSS_AID_COMMIT instead. A reason is logged and discarded.
+            problem = self.device.handle_aiding_write(bytes(value))
+            if problem:
+                self._aiding_discarded += 1
+                log.warning("discarded an aiding chunk: %s", problem)
+            return
+
         if uuid == CHAR["monitor_values"].lower():
             # SPEC.md §13.4 — the one direction that runs client-to-device.
             problem = self.device.handle_monitor_write(bytes(value))
@@ -673,6 +685,7 @@ class Peripheral:
         # and clearing on disconnect would drop the count before the final
         # status line could report it.
         self._monitor_rejected = 0
+        self._aiding_discarded = 0
         self._reset_transport_state()
         log.info("CLIENT CONNECTED — sequence numbers restarted, "
                  "subscription table cleared")
@@ -765,6 +778,7 @@ class Peripheral:
         props, perms = GATTCharacteristicProperties, GATTAttributePermissions
         read, notify = props.read, props.notify
         write, indicate = props.write, props.indicate
+        write_no_response = props.write_without_response
         readable, writeable = perms.readable, perms.writeable
 
         # CoreBluetooth: "Characteristics with cached values must be
@@ -806,6 +820,9 @@ class Peripheral:
         # The client writes values here; the device only ever reads them.
         await add("monitor_values", write, None,
                   readable | writeable | guard("monitor_values"))
+        # SPEC.md §14 — bulk client-to-device, written without a response.
+        await add("aiding", write_no_response, None,
+                  readable | writeable | guard("aiding"))
 
         # SPEC.md §3.4 SHOULD.
         log.info("creating service %s (Device Information)", DIS_SERVICE)

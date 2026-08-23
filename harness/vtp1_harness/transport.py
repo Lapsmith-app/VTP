@@ -312,6 +312,18 @@ FAULTS = {
     "rate_ceiling_ignored": "SPEC.md §9.4 — a rate above the declared maximum is accepted, not refused rate_exceeded",
     "info_rate_above_ceiling": "SPEC.md §4 — Info publishes a current rate above its own maximum",
     "inert_control_accepts_writes": "SPEC.md §4.1 — a device that has not declared Control answers writes to it",
+    # SPEC.md §14. Every one of these is a defect that costs a client its
+    # transfer without ever refusing a request, which is what makes the role
+    # worth checking at all: the bulk path carries no errors by construction,
+    # so a device that gets these wrong looks exactly like one that works.
+    "aid_stale_held_until": "SPEC.md §14.2 — held_until carries a value behind a cleared validity bit",
+    "aid_chunk_exceeds_mtu": "SPEC.md §14.3 — chunk_bytes is larger than one Write Command can carry",
+    "aid_accepts_undeclared_format": "SPEC.md §14.1 — a transfer opens in a format the device never declared",
+    "aid_accepts_oversized": "SPEC.md §14.2 — a transfer above the declared ceiling is accepted",
+    "aid_applied_with_missing_index": "SPEC.md §14.4 — an applied transfer still reports a missing chunk",
+    "aid_reports_first_chunk_missing": "SPEC.md §14.4 — the gap is always reported as chunk 0",
+    "aid_ignores_crc": "SPEC.md §14.4 — a transfer whose CRC does not match is applied anyway",
+    "aid_abort_keeps_session": "SPEC.md §14.4 — an aborted transfer is still committable",
 }
 
 
@@ -528,6 +540,12 @@ class LoopbackTransport(Transport):
             return await self._control_write(data)
         if uuid == refdec.CHAR["monitor_values"]:
             return self._monitor_write(data)
+        if uuid == refdec.CHAR["aiding"]:
+            # SPEC.md §14.3 -- a Write Command. Nothing comes back, including
+            # when the device discards it, so the reason is dropped here
+            # exactly as a real peripheral drops it.
+            self.device.handle_aiding_write(data)
+            return
         raise DeviceRefused(f"not writable: {uuid}")
 
     def _monitor_write(self, data):
@@ -581,6 +599,16 @@ class LoopbackTransport(Transport):
         self._rates_before = (self.device.gps_hz, self.device.imu_hz)
         if "params_ignored" in self.faults:
             request = self._parse_leniently(request)
+        request = self._indulge_aiding(request)
+
+        # SPEC.md §14.4 -- the abort is answered ok and the transfer is kept.
+        # Seeded ahead of dispatch because the defect is that the device never
+        # acts on it, which is not something a corrupted RESPONSE can model.
+        if "aid_abort_keeps_session" in self.faults and len(request) >= 2 and \
+                request[0] == refdec.OPCODE["GNSS_AID_ABORT"]:
+            self._deliver_control(bytes([request[0], request[1],
+                                         refdec.STATUS_VALUE["ok"]]))
+            return
 
         # SPEC.md §9 -- a client has at most ONE request outstanding, and a
         # device meeting one that pipelines anyway answers `busy` and MUST NOT
@@ -649,6 +677,31 @@ class LoopbackTransport(Transport):
         params = request[2:2 + wanted].ljust(wanted, b"\x00")
         return bytes(request[:2]) + params
 
+    def _indulge_aiding(self, request):
+        """SPEC.md §14 — a device that takes a GNSS_AID_BEGIN it should refuse.
+
+        Seeded on the REQUEST rather than the response, because both defects
+        are the device agreeing to something: a response-side rewrite would
+        report `ok` while the device held no session, and the checks would then
+        pass or fail on the follow-up rather than on the refusal.
+        """
+        if len(request) != 2 + refdec.OPCODE_PARAM_SIZE["GNSS_AID_BEGIN"]:
+            return request
+        if request[0] != refdec.OPCODE["GNSS_AID_BEGIN"]:
+            return request
+        fmt, total = struct.unpack_from("<BI", request, 2)
+        declared = getattr(self.device, "AID_FORMAT", 1)
+        if "aid_accepts_undeclared_format" in self.faults and fmt != declared:
+            # The wrong AssistNow product, taken without complaint. The device
+            # then writes it to a receiver that discards it, and the only
+            # symptom is a time to first fix that never improves.
+            fmt = declared
+        if "aid_accepts_oversized" in self.faults:
+            ceiling = getattr(self.device, "AID_MAX_BYTES_DECLARED", None)
+            if ceiling is not None and total > ceiling:
+                total = ceiling
+        return bytes(request[:2]) + struct.pack("<BI", fmt, total)
+
     def _corrupt_response(self, response, request):
         opcode, status = response[0], response[2]
         if "timesync_unsupported" in self.faults and \
@@ -693,6 +746,54 @@ class LoopbackTransport(Transport):
             # client cannot then tell a device that implements a later minor's
             # command from one that ignored it.
             response[2] = refdec.STATUS_VALUE["ok"]
+        if "aid_stale_held_until" in self.faults and status == 0 and \
+                opcode == refdec.OPCODE["GNSS_AID_INFO"]:
+            # SPEC.md §1.1 applied to the one field that decides whether a
+            # client sends anything: a device holding nothing, with yesterday's
+            # window still in the bytes behind a cleared bit. The client reads
+            # a valid window and sends no aiding at all.
+            base = 3
+            v = refdec.offset("gnss_aid_caps", "validity")
+            response[base + v] &= ~(1 << refdec.bit("aid_validity", "held_until")) & 0xFF
+            struct.pack_into("<q", response,
+                             base + refdec.offset("gnss_aid_caps", "held_until"),
+                             1_766_000_000_000)
+        if "aid_chunk_exceeds_mtu" in self.faults and status == 0 and \
+                opcode == refdec.OPCODE["GNSS_AID_BEGIN"]:
+            # A chunk size no client can write. Every chunk is refused by the
+            # host stack, and the transfer fails at commit with everything
+            # missing rather than at the number that was wrong.
+            base = 3 + refdec.offset("aid_begin_result", "chunk_bytes")
+            struct.pack_into("<H", response, base, self.mtu + 1)
+        if opcode == refdec.OPCODE["GNSS_AID_COMMIT"] and status == 0 and \
+                len(response) >= 3 + refdec.size("aid_commit_result"):
+            base = 3
+            v_off = base + refdec.offset("aid_commit_result", "validity")
+            r_off = base + refdec.offset("aid_commit_result", "result")
+            m_off = base + refdec.offset("aid_commit_result", "first_missing")
+            missing_bit = 1 << refdec.bit("commit_validity", "first_missing")
+            applied = refdec.AID_RESULT_VALUE["applied"]
+            incomplete = refdec.AID_RESULT_VALUE["incomplete"]
+            bad_crc = refdec.AID_RESULT_VALUE["bad_crc"]
+            if "aid_applied_with_missing_index" in self.faults and \
+                    response[r_off] == applied:
+                # Chunk 0 is a real index, so this tells a client a chunk was
+                # lost from a transfer that succeeded.
+                response[v_off] |= missing_bit
+                struct.pack_into("<H", response, m_off, 0)
+            if "aid_reports_first_chunk_missing" in self.faults and \
+                    response[r_off] == incomplete:
+                # The device knows something is missing and not what. A client
+                # resends from 0 every time, so a single lost chunk costs the
+                # whole transfer -- which is the cost §14.4 exists to avoid.
+                struct.pack_into("<H", response, m_off, 0)
+            if "aid_ignores_crc" in self.faults and response[r_off] == bad_crc:
+                # The bytes reach the receiver corrupted. Nothing downstream
+                # can find this: the receiver either refuses them or takes them
+                # and computes from them.
+                response[r_off] = applied
+                response[v_off] &= ~missing_bit & 0xFF
+                struct.pack_into("<H", response, m_off, 0)
         if "no_tag_echo" in self.faults:
             response[1] = (response[1] + 1) & 0xFF
         if "detail_on_error" in self.faults and status != 0:

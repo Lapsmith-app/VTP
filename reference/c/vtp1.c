@@ -530,6 +530,59 @@ int vtp_decode_time_sync(const uint8_t *b, size_t len,
     return 0;
 }
 
+int vtp_aid_format_known(uint8_t f) {
+    switch (f) {
+        case VTP_AID_FORMAT_UBX_MGA:
+            return 1;
+        default:
+            return 0;   /* A format a later minor assigned. Stays unknown. */
+    }
+}
+
+int vtp_aid_result_known(uint8_t r) {
+    switch (r) {
+        case VTP_AID_RESULT_APPLIED:
+        case VTP_AID_RESULT_INCOMPLETE:
+        case VTP_AID_RESULT_BAD_CRC:
+        case VTP_AID_RESULT_REJECTED:
+            return 1;
+        default:
+            return 0;   /* An outcome a later minor assigned. Stays unknown. */
+    }
+}
+
+int vtp_decode_gnss_aid_caps(const uint8_t *b, size_t len,
+                             vtp_gnss_aid_caps_t *o, const char **err) {
+    /* Fixed size, no extension mechanism: any other length is malformed. */
+    if (len != VTP_GNSS_AID_CAPS_SIZE) { *err = "length"; return -1; }
+
+    o->validity   = b[VTP_GNSS_AID_CAPS_OFF_VALIDITY];
+    o->format     = b[VTP_GNSS_AID_CAPS_OFF_FORMAT];
+    o->flags      = b[VTP_GNSS_AID_CAPS_OFF_FLAGS];
+    o->max_bytes  = rd32(b + VTP_GNSS_AID_CAPS_OFF_MAX_BYTES);
+    o->held_until = (int64_t)rd64(b + VTP_GNSS_AID_CAPS_OFF_HELD_UNTIL);
+    return 0;
+}
+
+int vtp_decode_aid_begin_result(const uint8_t *b, size_t len,
+                                vtp_aid_begin_result_t *o, const char **err) {
+    if (len != VTP_AID_BEGIN_RESULT_SIZE) { *err = "length"; return -1; }
+
+    o->session     = b[VTP_AID_BEGIN_RESULT_OFF_SESSION];
+    o->chunk_bytes = rd16(b + VTP_AID_BEGIN_RESULT_OFF_CHUNK_BYTES);
+    return 0;
+}
+
+int vtp_decode_aid_commit_result(const uint8_t *b, size_t len,
+                                 vtp_aid_commit_result_t *o, const char **err) {
+    if (len != VTP_AID_COMMIT_RESULT_SIZE) { *err = "length"; return -1; }
+
+    o->validity      = b[VTP_AID_COMMIT_RESULT_OFF_VALIDITY];
+    o->result        = b[VTP_AID_COMMIT_RESULT_OFF_RESULT];
+    o->first_missing = rd16(b + VTP_AID_COMMIT_RESULT_OFF_FIRST_MISSING);
+    return 0;
+}
+
 int vtp_decode_link_params(const uint8_t *b, size_t len,
                            vtp_link_params_t *o, const char **err) {
     /* Fixed size, no extension mechanism: any other length is malformed. */

@@ -451,6 +451,21 @@ def encode_link_params(link_params):
     return _pack("link_params", _gate("link_params", link_params))
 
 
+def encode_gnss_aid_caps(caps):
+    """SPEC.md §14.2. The detail of a GNSS_AID_INFO response."""
+    return _pack("gnss_aid_caps", _gate("gnss_aid_caps", caps))
+
+
+def encode_aid_begin_result(begin):
+    """SPEC.md §14.3. The detail of a GNSS_AID_BEGIN response."""
+    return _pack("aid_begin_result", begin)
+
+
+def encode_aid_commit_result(commit):
+    """SPEC.md §14.4. The detail of a GNSS_AID_COMMIT response."""
+    return _pack("aid_commit_result", _gate("aid_commit_result", commit))
+
+
 # Keyed by the runner-contract record name, so a harness can round-trip a
 # decode without knowing which record it holds.
 ENCODERS = {
@@ -464,4 +479,7 @@ ENCODERS = {
     "monitor_update": lambda d: encode_monitor_update(d["header"], d["values"]),
     "control_response": encode_control_response,
     "time_sync": encode_time_sync,
+    "gnss_aid_caps": encode_gnss_aid_caps,
+    "aid_begin_result": encode_aid_begin_result,
+    "aid_commit_result": encode_aid_commit_result,
 }

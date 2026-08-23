@@ -606,16 +606,16 @@
       "name": "reserved-bits-info-capabilities",
       "record": "info",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- info.capabilities bits 8-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "desc": "SPEC.md 2 -- info.capabilities bits 9-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
         "protocol_major": 1,
         "protocol_minor": 0,
-        "capabilities": 2147483903,
+        "capabilities": 2147484159,
         "gps_rate_hz": 10,
         "gps_max_rate_hz": 10,
         "max_notify_bytes": 244
       },
-      "expect_hex": "0100ff0000000a000a00000000000000000000000000f400"
+      "expect_hex": "0100ff0100000a000a00000000000000000000000000f400"
     },
     {
       "name": "reserved-bits-info-clock-flags",
@@ -748,6 +748,44 @@
         "validity": 32783
       },
       "expect_hex": "0f000000000000000000000000000000"
+    },
+    {
+      "name": "reserved-bits-gnss-aid-caps-validity",
+      "record": "gnss_aid_caps",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- gnss_aid_caps.validity bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "format": 1,
+        "max_bytes": 65536,
+        "held_until": 0,
+        "validity": 129
+      },
+      "expect_hex": "01010000000001000000000000000000"
+    },
+    {
+      "name": "reserved-bits-gnss-aid-caps-flags",
+      "record": "gnss_aid_caps",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- gnss_aid_caps.flags bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "format": 1,
+        "max_bytes": 65536,
+        "held_until": 0,
+        "flags": 129
+      },
+      "expect_hex": "00010100000001000000000000000000"
+    },
+    {
+      "name": "reserved-bits-aid-commit-result-validity",
+      "record": "aid_commit_result",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- aid_commit_result.validity bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "result": 1,
+        "first_missing": 0,
+        "validity": 129
+      },
+      "expect_hex": "01010000"
     },
     {
       "name": "control-detail-on-ok",

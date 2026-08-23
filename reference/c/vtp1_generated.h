@@ -13,6 +13,7 @@
 #define VTP_CHAR_IMU_UUID "56544304-5f05-5b56-af87-dcab2baf2522"
 #define VTP_CHAR_CONTROL_UUID "56544305-5f05-5b56-af87-dcab2baf2522"
 #define VTP_CHAR_MONITOR_VALUES_UUID "56544306-5f05-5b56-af87-dcab2baf2522"
+#define VTP_CHAR_AIDING_UUID "56544307-5f05-5b56-af87-dcab2baf2522"
 
 /* Device self-description. Read once per connection; never cached across connections. */
 #define VTP_INFO_SIZE 24
@@ -148,6 +149,32 @@
 #define VTP_LINK_PARAMS_OFF_PHY_TX 14
 #define VTP_LINK_PARAMS_OFF_PHY_RX 15
 
+/* What aiding this device accepts, and what it already holds. */
+#define VTP_GNSS_AID_CAPS_SIZE 16
+#define VTP_GNSS_AID_CAPS_OFF_VALIDITY 0
+#define VTP_GNSS_AID_CAPS_OFF_FORMAT 1
+#define VTP_GNSS_AID_CAPS_OFF_FLAGS 2
+#define VTP_GNSS_AID_CAPS_OFF_RESERVED_3 3
+#define VTP_GNSS_AID_CAPS_OFF_MAX_BYTES 4
+#define VTP_GNSS_AID_CAPS_OFF_HELD_UNTIL 8
+
+/* The detail of a GNSS_AID_BEGIN response. Opens a transfer and fixes its chunking. */
+#define VTP_AID_BEGIN_RESULT_SIZE 4
+#define VTP_AID_BEGIN_RESULT_OFF_SESSION 0
+#define VTP_AID_BEGIN_RESULT_OFF_CHUNK_BYTES 1
+#define VTP_AID_BEGIN_RESULT_OFF_RESERVED_3 3
+
+/* One chunk of an aiding transfer, written without a response. */
+#define VTP_AID_CHUNK_SIZE 3
+#define VTP_AID_CHUNK_OFF_SESSION 0
+#define VTP_AID_CHUNK_OFF_INDEX 1
+
+/* The detail of a GNSS_AID_COMMIT response. What became of the transfer. */
+#define VTP_AID_COMMIT_RESULT_SIZE 4
+#define VTP_AID_COMMIT_RESULT_OFF_VALIDITY 0
+#define VTP_AID_COMMIT_RESULT_OFF_RESULT 1
+#define VTP_AID_COMMIT_RESULT_OFF_FIRST_MISSING 2
+
 typedef enum {
     VTP_FIX_TYPE_NONE = 0,
     VTP_FIX_TYPE_DEAD_RECKON = 1,
@@ -193,6 +220,17 @@ typedef enum {
     VTP_PHY_LE_CODED = 3,
 } vtp_phy_t;
 
+typedef enum {
+    VTP_AID_FORMAT_UBX_MGA = 1,
+} vtp_aid_format_t;
+
+typedef enum {
+    VTP_AID_RESULT_APPLIED = 1,
+    VTP_AID_RESULT_INCOMPLETE = 2,
+    VTP_AID_RESULT_BAD_CRC = 3,
+    VTP_AID_RESULT_REJECTED = 4,
+} vtp_aid_result_t;
+
 #define VTP_GPS_VALIDITY_T_UTC (1u << 0)
 #define VTP_GPS_VALIDITY_T_UTC_RESOLVED (1u << 1)
 #define VTP_GPS_VALIDITY_POSITION (1u << 2)
@@ -224,7 +262,8 @@ typedef enum {
 #define VTP_CAPABILITIES_CAN_FD (1u << 5)
 #define VTP_CAPABILITIES_MASKED_SUBSCRIPTIONS (1u << 6)
 #define VTP_CAPABILITIES_ON_CHANGE_SUBSCRIPTIONS (1u << 7)
-#define VTP_CAPABILITIES_RESERVED 0xFFFFFF00u
+#define VTP_CAPABILITIES_GNSS_AIDING (1u << 8)
+#define VTP_CAPABILITIES_RESERVED 0xFFFFFE00u
 #define VTP_CAPABILITIES_KNOWN (~(uint32_t)VTP_CAPABILITIES_RESERVED)
 
 #define VTP_CAN_FLAGS_SHEDDING (1u << 0)
@@ -253,6 +292,18 @@ typedef enum {
 #define VTP_LINK_VALIDITY_RESERVED 0xFFF0u
 #define VTP_LINK_VALIDITY_KNOWN (~(uint32_t)VTP_LINK_VALIDITY_RESERVED)
 
+#define VTP_AID_FLAGS_PERSISTS (1u << 0)
+#define VTP_AID_FLAGS_RESERVED 0xFEu
+#define VTP_AID_FLAGS_KNOWN (~(uint32_t)VTP_AID_FLAGS_RESERVED)
+
+#define VTP_AID_VALIDITY_HELD_UNTIL (1u << 0)
+#define VTP_AID_VALIDITY_RESERVED 0xFEu
+#define VTP_AID_VALIDITY_KNOWN (~(uint32_t)VTP_AID_VALIDITY_RESERVED)
+
+#define VTP_COMMIT_VALIDITY_FIRST_MISSING (1u << 0)
+#define VTP_COMMIT_VALIDITY_RESERVED 0xFEu
+#define VTP_COMMIT_VALIDITY_KNOWN (~(uint32_t)VTP_COMMIT_VALIDITY_RESERVED)
+
 /* SPEC.md 4.1 -- a capability bit and every bit it requires. */
 typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rule_t;
 #define VTP_CAPABILITY_RULES { \
@@ -264,8 +315,9 @@ typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rul
     { (1u << 5), 0x00000002u, "can_fd" }, \
     { (1u << 6), 0x00000002u, "masked_subscriptions" }, \
     { (1u << 7), 0x00000002u, "on_change_subscriptions" }, \
+    { (1u << 8), 0x00000011u, "gnss_aiding" }, \
 }
-#define VTP_CAPABILITY_RULE_COUNT 8
+#define VTP_CAPABILITY_RULE_COUNT 9
 
 /* SPEC.md 4.1 -- info fields that MUST be zero when their
  * capability bit is clear. Offset and size, so one loop covers all. */

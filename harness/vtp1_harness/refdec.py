@@ -127,16 +127,34 @@ OPCODE_NAME = {v: k for k, v in OPCODE.items()}
 #: clock, which every device has.
 OPCODE_CAPABILITY = {op["name"]: op.get("capability")
                      for op in SCHEMA["control"]["opcodes"]}
-OPCODE_PARAM_SIZE = {
-    "CAN_RESET": 0, "CAN_SUBSCRIBE": 7, "CAN_SUBSCRIBE_MASK": 11,
-    "CAN_UNSUBSCRIBE": 2, "CAN_LIST": 2, "GPS_SET_RATE": 2,
-    "IMU_SET_RATE": 2, "TIME_SYNC": 0, "GET_LINK_PARAMS": 0,
-    "MONITOR_LIST": 0,
-}
+#: Derived from each opcode's `params`, not listed by hand. The hand-written
+#: version reproduced these ten values correctly and had no way to acquire an
+#: eleventh: an opcode added to the schema raised KeyError here, in a check
+#: about capabilities, some distance from the omission. SPEC.md 11.3 makes new
+#: opcodes the protocol's general-purpose extension point, so this table was
+#: always going to be asked for one it did not hold.
+_TYPE_BYTES = {"u8": 1, "i8": 1, "u16": 2, "i16": 2,
+               "u32": 4, "i32": 4, "u64": 8, "i64": 8}
+
+
+def _param_size(params):
+    total = 0
+    for part in (p.strip() for p in params.split(",")):
+        if not part:
+            continue
+        total += _TYPE_BYTES[part.split(":")[1].strip()]
+    return total
+
+
+OPCODE_PARAM_SIZE = {op["name"]: _param_size(op.get("params") or "")
+                     for op in SCHEMA["control"]["opcodes"]}
 STATUS = enum_values("status")
 STATUS_VALUE = {name: value for value, name in STATUS.items()}
 CAPABILITIES = bits("capabilities")
 CHANNELS = enum_values("channel")
+AID_FORMATS = enum_values("aid_format")
+AID_RESULT = enum_values("aid_result")
+AID_RESULT_VALUE = {name: value for value, name in AID_RESULT.items()}
 
 # SPEC.md §9.2 — CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK with this mask.
 MASK_EXACT = 0x3FFFFFFF

@@ -415,6 +415,44 @@ int vtp_encode_can_list(const vtp_can_list_page_t *p,
     return (int)needed;
 }
 
+int vtp_encode_gnss_aid_caps(const vtp_gnss_aid_caps_t *c, uint8_t *out, size_t cap) {
+    if (cap < VTP_GNSS_AID_CAPS_SIZE) return -1;
+    memset(out, 0, VTP_GNSS_AID_CAPS_SIZE);
+
+    const uint32_t v = KNOWN_BITS(c->validity, VTP_AID_VALIDITY_KNOWN);
+
+    out[VTP_GNSS_AID_CAPS_OFF_VALIDITY] = (uint8_t)v;
+    out[VTP_GNSS_AID_CAPS_OFF_FORMAT]   = c->format;
+    out[VTP_GNSS_AID_CAPS_OFF_FLAGS] =
+        (uint8_t)KNOWN_BITS(c->flags, VTP_AID_FLAGS_KNOWN);
+    wr32(out + VTP_GNSS_AID_CAPS_OFF_MAX_BYTES, c->max_bytes);
+    wr64(out + VTP_GNSS_AID_CAPS_OFF_HELD_UNTIL,
+         (uint64_t)gate64((uint64_t)c->held_until, v, VTP_AID_VALIDITY_HELD_UNTIL));
+    return VTP_GNSS_AID_CAPS_SIZE;
+}
+
+int vtp_encode_aid_begin_result(const vtp_aid_begin_result_t *b, uint8_t *out, size_t cap) {
+    if (cap < VTP_AID_BEGIN_RESULT_SIZE) return -1;
+    memset(out, 0, VTP_AID_BEGIN_RESULT_SIZE);
+
+    out[VTP_AID_BEGIN_RESULT_OFF_SESSION] = b->session;
+    wr16(out + VTP_AID_BEGIN_RESULT_OFF_CHUNK_BYTES, b->chunk_bytes);
+    return VTP_AID_BEGIN_RESULT_SIZE;
+}
+
+int vtp_encode_aid_commit_result(const vtp_aid_commit_result_t *c, uint8_t *out, size_t cap) {
+    if (cap < VTP_AID_COMMIT_RESULT_SIZE) return -1;
+    memset(out, 0, VTP_AID_COMMIT_RESULT_SIZE);
+
+    const uint32_t v = KNOWN_BITS(c->validity, VTP_COMMIT_VALIDITY_KNOWN);
+
+    out[VTP_AID_COMMIT_RESULT_OFF_VALIDITY] = (uint8_t)v;
+    out[VTP_AID_COMMIT_RESULT_OFF_RESULT]   = c->result;
+    wr16(out + VTP_AID_COMMIT_RESULT_OFF_FIRST_MISSING,
+         (uint16_t)gate32(c->first_missing, v, VTP_COMMIT_VALIDITY_FIRST_MISSING));
+    return VTP_AID_COMMIT_RESULT_SIZE;
+}
+
 int vtp_encode_link_params(const vtp_link_params_t *l, uint8_t *out, size_t cap) {
     if (cap < VTP_LINK_PARAMS_SIZE) return -1;
     memset(out, 0, VTP_LINK_PARAMS_SIZE);
