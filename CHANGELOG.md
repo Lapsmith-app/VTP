@@ -8,15 +8,84 @@ conformance vector.
 
 ## [Unreleased]
 
+### Added — a device can report its own supply (SPEC.md §9.9)
+
+A logger runs off something, and until now the protocol had no way to say what
+or how much is left. `GET_POWER` (opcode `0x50`, owned by `capabilities` bit 8,
+`power`) answers with a four-byte `power_state` record: a source enum and a
+percentage, each behind its own validity bit.
+
+Two fields rather than one, and rather than the three the first draft had. The
+draft carried a supply voltage in millivolts on the grounds that a percentage is
+a guess on hand-built hardware — which was wrong about the client, since volts
+are not actionable without the cell chemistry and the load, and wrong about the
+device, since a builder with a divider will map it to a percentage anyway and
+the board is where that conversion belongs.
+
+What is left is not about accuracy. A logger wired to the car's ignition feed
+has no charge to report, and in a percentage-only encoding it has to answer 100
+forever: a reserved value meaning "not applicable" in the one field a client
+draws as a gauge, which is the same shape as latitude `0x7FFFFFFF` decoding to
+214.7°. One byte of `source` closes that, and a client that does not care reads
+`percent` and ignores the rest. RATIONALE.md §8 has the argument, including why
+the reading is polled rather than pushed and why the standard Battery Service is
+something a device MAY also expose rather than the thing this specification
+points at.
+
+Three rules came with it:
+
+- **`percent` is 0..100, and a receiver rejects a larger value rather than
+  clamping it.** The byte came out of the same four as the source, so a record
+  wrong about one is not trustworthy about the other, and a client that clamps
+  shows a full battery on a device that has lost track of its pack.
+- **A field whose validity bit is clear MUST be zero**, as everywhere else. The
+  corpus carries a non-canonical vector with a stale 63% behind a cleared bit,
+  which is the only coverage the encoder's gating rule for this record gets.
+- **A device MUST NOT declare `power` and then report nothing valid.** With
+  every bit clear it has said what a device without the capability says by not
+  declaring it. The empty record still decodes — rejecting it would leave a
+  device whose gauge failed mid-session with no legal answer — so it joins
+  §9's other device-behaviour rules in being unreachable by any byte vector,
+  and `power.something_valid` in the harness is what asks it.
+
+`source` says what the device is running on rather than what it contains, so
+`external` claims nothing about a battery: plugged in with a pack at 40% is
+`external` and a valid percent together, and it is the absent percent that says
+there is no battery. `charging` and `charged` are for devices that can tell the
+two apart; the common build — a USB-C input and a fuel gauge with no
+charge-status pin — reports `external` and the charge it measures.
+
+Thirteen vectors, one producer case, both reference codecs, the software
+peripheral (`set_power`, which refuses the device rule where the mistake is
+made, and `GET_POWER` in its control plane) and five harness checks with a
+seeded fault against each of the four that state a MUST.
+
+### Two tables that restated the schema instead of reading it
+
+Both were found by adding the opcode above, which is the point of mentioning
+them: a schema addition should not be able to break a hand-maintained copy of
+the schema, and twice it did.
+
+- **`refdec.OPCODE_PARAM_SIZE` was a hand-written dict.** A new opcode reached
+  the harness as a `KeyError` in the middle of a run, from the one table there
+  that could go stale. It is derived from the schema's own `name:type` grammar
+  now, and produces byte-for-byte what the hand-written version held.
+- **`tools/mutate.py`'s `bound` operator could not mutate a bound written on a
+  struct field.** Its pattern started at the member name and left the
+  dereference behind, so `o->percent > 100` became `o->0)`, which does not
+  compile — a mutation that proves nothing, reported as a skip, inside a sweep
+  whose entire claim is that every mutation proves something. The pattern takes
+  an optional `x->` prefix now.
+
 ### GNSS aiding: the client can shorten the device's time to first fix
 
 A receiver with no current orbit data reads it from the satellites at 50 bit/s
 and takes tens of seconds, or in a paddock never finishes. The client has a
 network connection and the same data. Nothing in VTP/1 could carry it.
 
-New capability bit 8 (`gnss_aiding`, requiring `gps` and `control`), a seventh
+New capability bit 9 (`gnss_aiding`, requiring `gps` and `control`), a seventh
 characteristic, and four control opcodes. SPEC.md §14 is the normative text and
-RATIONALE §7 is the argument.
+RATIONALE §9 is the argument.
 
 - **A seventh characteristic, `aiding`, written without a response.** The
   transfer is tens of kilobytes; §9 allows one outstanding control request; so
@@ -50,11 +119,10 @@ RATIONALE §7 is the argument.
 
 Also in this change:
 
-- **`OPCODE_PARAM_SIZE` in the harness is derived from the schema.** It was ten
-  hand-written entries with no way to acquire an eleventh, and an opcode added
-  to the schema surfaced as a `KeyError` inside a check about capabilities.
-  §11.3 makes new opcodes the extension point, so this table was always going
-  to be asked for one it did not hold. The ten derived values are identical.
+- **`OPCODE_PARAM_SIZE` was derived from the schema here too**, independently
+  of the entry above, and this branch's version was dropped on merge in favour
+  of the one already on main. Two changes arriving at the same fix in the same
+  week is the table saying what it is.
 - **`control.opcode_capability` is no longer an expected skip.** The reference
   peripheral does not declare `gnss_aiding`, so the check now has an unowned
   opcode to try and runs for the first time.
@@ -154,12 +222,10 @@ seventh characteristic rather than by review:
 - **`Runner._run` listed its own phase order**, so a phase added to
   `checks.PHASES` was registered, ordered and reported on — and never run. Nine
   checks existed and did not execute. Sliced from `PHASES` now.
-- **`OPCODE_PARAM_SIZE`** — see above.
 - **The peripheral selftest's encrypt-everything posture** was a written-out
   set of six characteristic names, so a seventh was conforming, served and
   documented while being left unprotected by a constant nobody revisits. It is
   derived from the profile now.
-
 
 ### A busy radio was being reported as a device losing data
 

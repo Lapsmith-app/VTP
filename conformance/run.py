@@ -40,6 +40,9 @@ ROLES = {
     "can":     {"can_batch", "can_list"},
     "imu":     {"imu_batch"},
     "monitor": {"monitor_list", "monitor_update"},
+    # §9.9 — the GET_POWER detail. A role like any other: a device without a
+    # battery never declares the bit and is never handed these.
+    "power":   {"power_state"},
     # §14 — the aiding role's three control-detail records. Named after the
     # capability bit, like every other role here, so `--roles gnss_aiding`
     # works and IMPLIES picks up its `gps` and `control` requirement from the

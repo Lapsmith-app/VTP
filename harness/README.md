@@ -127,7 +127,7 @@ The report ends with a **Not verified** section, and it is not boilerplate — i
 is assembled from the run, so a check skipped for a reason specific to your
 device appears there rather than disappearing into a count.
 
-Three things are permanently in it:
+Four things are permanently in it:
 
 - **§2.1–§2.3** — link-layer payload, PHY and connection interval. No desktop
   operating system exposes these to an application. The harness checks the
@@ -138,6 +138,11 @@ Three things are permanently in it:
   Bluetooth stack sit between the device and every arrival time measured here,
   and they are worth tens of milliseconds against a clock specified in
   microseconds. Ordering and internal consistency are checked; accuracy is not.
+- **§9.9's numbers themselves.** The harness checks that a device declaring
+  `power` answers `GET_POWER`, that it reports something valid, and that what it
+  reports obeys §9.9's rules. Whether 7.42 V is what the pack is actually
+  sitting at is not observable from this side of the link, in exactly the way
+  §9.1's link parameters are not.
 - **§13.5's freshness expiry.** Every declared channel carries a `max_age` and
   the harness checks it is non-zero, but what happens when one lapses happens on
   the device's own display and puts nothing on the wire. Stop writing and watch

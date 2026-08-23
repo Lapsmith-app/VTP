@@ -699,6 +699,37 @@ def main():
         "link_params: with no link attached every field MUST read absent, "
         "never as a guess")
 
+    # ---- GET_POWER reports what it measures, and only that --------------
+    # SPEC.md 9.9. The two fields are independent because a device knows them
+    # independently, and this asserts both ends of that: a device on its own
+    # pack with a working gauge, and one on the ignition feed with no charge to
+    # report at all.
+    resp = device.handle_control(bytes([dev.GET_POWER, 6]))
+    check(resp[2] == dev.ST_OK, "GET_POWER was refused")
+    power = vtp1.decode_power_state(resp[3:])
+    check(power["absent"] == [] and power["source_known"],
+          "this build measures both, so GET_POWER MUST report both")
+    check(power["percent"] <= 100,
+          "SPEC.md 9.9 -- percent is 0..100 and a receiver rejects the record "
+          "rather than clamping it")
+
+    wired = dev.VtpDevice(now_us=lambda: 0)
+    wired.set_power(source=dev.SRC_EXTERNAL)
+    measured = vtp1.decode_power_state(
+        wired.handle_control(bytes([dev.GET_POWER, 7]))[3:])
+    check(measured["absent"] == ["percent"]
+          and measured["source"] == dev.SRC_EXTERNAL,
+          "a device on the ignition feed MUST clear the percent bit rather "
+          "than reporting 100% for a battery it does not have -- and MUST "
+          "still report the source it does know")
+    check(measured["percent"] == 0,
+          "SPEC.md 1.1 -- the byte behind a cleared validity bit MUST be zero, "
+          "so a stale reading cannot leak onto the wire")
+
+    check(device.handle_control(bytes([dev.GET_POWER, 8]) + b"\x00")[2]
+          == dev.ST_BAD_PARAMS,
+          "GET_POWER is parameterless; a trailing byte MUST be refused")
+
     # SPEC.md §9.3 — a frame matching several subscriptions is forwarded once,
     # governed by the most specific mask.
     device.handle_control(bytes([dev.CAN_RESET, 20]))
@@ -1190,6 +1221,7 @@ def main():
         "GPS_SET_RATE": bytes([dev.GPS_SET_RATE, 6]) + struct.pack("<H", 5),
         "IMU_SET_RATE": bytes([dev.IMU_SET_RATE, 7]) + struct.pack("<H", 50),
         "MONITOR_LIST": bytes([dev.MONITOR_LIST, 8]),
+        "GET_POWER": bytes([dev.GET_POWER, 12]),
     }
     for name, request in owned.items():
         got = bare.handle_control(request)

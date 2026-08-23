@@ -526,6 +526,15 @@ static void do_link_params(const jctx *c, const jv *in) {
     encoded(vtp_encode_link_params(&l, out, sizeof out), out);
 }
 
+static void do_power_state(const jctx *c, const jv *in) {
+    vtp_power_state_t p;
+    memset(&p, 0, sizeof p);
+    p.validity = (uint8_t)jint(c, in, "validity");
+    p.source   = (uint8_t)jint(c, in, "source");
+    p.percent  = (uint8_t)jint(c, in, "percent");
+    encoded(vtp_encode_power_state(&p, out, sizeof out), out);
+}
+
 static void do_gnss_aid_caps(const jctx *c, const jv *in) {
     vtp_gnss_aid_caps_t a;
     memset(&a, 0, sizeof a);
@@ -589,6 +598,7 @@ int main(void) {
         else if (!strcmp(record, "control_response")) do_control_response(&ctx, in);
         else if (!strcmp(record, "time_sync"))        do_time_sync(&ctx, in);
         else if (!strcmp(record, "link_params"))      do_link_params(&ctx, in);
+        else if (!strcmp(record, "power_state"))      do_power_state(&ctx, in);
         else if (!strcmp(record, "gnss_aid_caps"))    do_gnss_aid_caps(&ctx, in);
         else if (!strcmp(record, "aid_begin_result")) do_aid_begin_result(&ctx, in);
         else if (!strcmp(record, "aid_commit_result")) do_aid_commit_result(&ctx, in);

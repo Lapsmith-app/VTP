@@ -495,6 +495,22 @@ int vtp_encode_link_params(const vtp_link_params_t *l, uint8_t *out, size_t cap)
     return VTP_LINK_PARAMS_SIZE;
 }
 
+int vtp_encode_power_state(const vtp_power_state_t *p, uint8_t *out, size_t cap) {
+    /* An encoder must not emit what its own decoder rejects. SPEC.md §9.9. */
+    if ((p->validity & VTP_POWER_VALIDITY_PERCENT) && p->percent > 100) return -1;
+    if (cap < VTP_POWER_STATE_SIZE) return -1;
+    memset(out, 0, VTP_POWER_STATE_SIZE);
+
+    const uint32_t v = KNOWN_BITS(p->validity, VTP_POWER_VALIDITY_KNOWN);
+
+    out[VTP_POWER_STATE_OFF_VALIDITY] = (uint8_t)v;
+    out[VTP_POWER_STATE_OFF_SOURCE] =
+         (uint8_t)gate32(p->source, v, VTP_POWER_VALIDITY_SOURCE);
+    out[VTP_POWER_STATE_OFF_PERCENT] =
+         (uint8_t)gate32(p->percent, v, VTP_POWER_VALIDITY_PERCENT);
+    return VTP_POWER_STATE_SIZE;
+}
+
 int vtp_encode_control_response(const vtp_control_response_t *r,
                                 uint8_t *out, size_t cap) {
     /* An encoder must not emit what its own decoder rejects. SPEC.md §9. */

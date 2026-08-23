@@ -273,8 +273,9 @@ Total: **24 bytes**. All fields little-endian.
 | 5 | `can_fd` | **Requires `can`.** |
 | 6 | `masked_subscriptions` | **Requires `can`.** |
 | 7 | `on_change_subscriptions` | **Requires `can`.** |
-| 8 | `gnss_aiding` | Client supplies orbit data to the device's receiver (§14) **Requires `gps`, `control`.** |
-| 9+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+| 8 | `power` | Device reports its own power state (§9.9) **Requires `control`.** |
+| 9 | `gnss_aiding` | Client supplies orbit data to the device's receiver (§14) **Requires `gps`, `control`.** |
+| 10+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:capabilities -->
 
 A client MUST read this characteristic on every connection and MUST NOT cache it
@@ -308,7 +309,7 @@ last column says exactly what inert means for it.
 | `imu` | bit 2 (`imu`) | `notify` | always present; client enables it for a set bit | device | client | the CCCD exists; no notification is ever sent on it |
 | `control` | bit 4 (`control`) | `write`, `indicate` (write with-response) | always present; client enables it for a set bit | client | client | the CCCD exists; writes are rejected with an ATT error and no opcode is parsed |
 | `monitor_values` | bit 3 (`monitor`) | `write` (write with-response) | — | client | device | writes are rejected with an ATT error and change nothing |
-| `aiding` | bit 8 (`gnss_aiding`) | `write-without-response` (write without-response) | — | client | device | writes are silently discarded; a client cannot reach this characteristic legitimately without GNSS_AID_BEGIN having answered ok first |
+| `aiding` | bit 9 (`gnss_aiding`) | `write-without-response` (write without-response) | — | client | device | writes are silently discarded; a client cannot reach this characteristic legitimately without GNSS_AID_BEGIN having answered ok first |
 <!-- END GENERATED: profile:attributes -->
 
 A device MUST NOT add a characteristic to the VTP/1 service beyond these, and
@@ -366,7 +367,8 @@ VTP/1?", Info answers "what does it do?", and neither half-answers the other.
 | 5 | `can_fd` | bit 1 (`can`) | — |
 | 6 | `masked_subscriptions` | bit 1 (`can`) | — |
 | 7 | `on_change_subscriptions` | bit 1 (`can`) | — |
-| 8 | `gnss_aiding` | bit 0 (`gps`), bit 4 (`control`) | — |
+| 8 | `power` | bit 4 (`control`) | — |
+| 9 | `gnss_aiding` | bit 0 (`gps`), bit 4 (`control`) | — |
 <!-- END GENERATED: profile:capabilities -->
 
 **The largest CAN payload follows from the bits and is not a field.** A client
@@ -1327,6 +1329,7 @@ Control characteristic is live.
 | `0x30` | `TIME_SYNC` | — | — | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
 | `0x31` | `GET_LINK_PARAMS` | — | — | `link_params record` | — |
 | `0x40` | `MONITOR_LIST` | `monitor` | — | `monitor_declaration record` | Every channel this device asks the client to supply, in one response (SPEC.md 13.3) |
+| `0x50` | `GET_POWER` | `power` | — | `power_state record` | What the device knows about its own supply, measured when asked (SPEC.md 9.9) |
 <!-- END GENERATED: control -->
 
 `status` values:
@@ -1740,6 +1743,109 @@ is why `VtpDevice.handle_control` produces notifications outside `poll()`.
 Both opcodes are idempotent: setting a rate to the value it already holds is
 `ok` and changes nothing (§9.6).
 
+### 9.9 Power
+
+A device that runs on a battery knows something a client cannot measure and a
+driver needs before a session rather than after it. `GET_POWER` asks for it.
+The detail of a successful response is one `power_state` record:
+
+<!-- BEGIN GENERATED: power_state -->
+*The detail of a GET_POWER response. What the device knows about its own supply, and no more.*
+
+Total: **4 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `validity` | bitmask `power_validity` |
+| 1 | 1 | `u8` | `source` | enum `power_source`; valid when `validity` bit 0 (`source`) is set |
+| 2 | 1 | `u8` | `percent` | `%`; Charge remaining, 0..100; a receiver MUST reject a larger value (SPEC.md 9.9); valid when `validity` bit 1 (`percent`) is set |
+| 3 | 1 | `u8` | `reserved` | Power metadata; **reserved — MUST be zero** |
+<!-- END GENERATED: power_state -->
+
+<!-- BEGIN GENERATED: bitmask:power_validity -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `source` | source is valid |
+| 1 | `percent` | percent is valid |
+| 2+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:power_validity -->
+
+<!-- BEGIN GENERATED: enum:power_source -->
+| Value | Name | Meaning |
+| --- | --- | --- |
+| 1 | `external` | Running from an external supply. Says nothing about a battery: `percent` reports one if the device has one |
+| 2 | `discharging` | Running from its battery |
+| 3 | `charging` | External supply present, battery taking charge |
+| 4 | `charged` | External supply present, battery no longer taking charge |
+| *other* | *unknown* | MUST decode as unknown, never as a default |
+<!-- END GENERATED: enum:power_source -->
+
+**The value is measured when the request arrives**, so the record carries no
+timestamp. A client that wants a fresher answer asks again. Nothing here is
+pushed: a supply reading changes over minutes, a notification stream for it
+would cost a characteristic and a CCCD for a value nobody watches, and §11.3
+makes an opcode the extension point for exactly this shape of thing — something
+a client asks for rather than something the device sends.
+
+**`percent` is 0..100.** A receiver MUST reject a record whose `percent` is
+above 100 when the `percent` bit is set, rather than clamping it. The value came
+out of the same four bytes as the source, so a record that is wrong about one is
+not trustworthy about the other — and a client that clamps shows a full battery
+on a device that has lost track of its pack.
+
+**`source` is what keeps `percent` honest.** A logger wired to the car's
+ignition feed has no charge to report, and without somewhere to say so it must
+answer 100% forever: a reserved value meaning "not applicable", in the one field
+a client renders as a gauge. That is the failure §1.1 exists to prevent, and it
+costs one byte to avoid. A client with both fields hides the gauge for
+`external` and shows it otherwise; a client that only wants a number reads
+`percent` and ignores the rest.
+
+The two fields are independently valid for the same reason. A device on external
+power sets `source` and clears `percent`; a device whose gauge failed
+mid-session does the reverse. A field whose bit is clear MUST be written as zero
+and MUST be reported absent, exactly as everywhere else (§1.1).
+
+**`source` says what the device is running on, not what it contains.**
+`external` claims nothing about a battery, so `external` with a valid `percent`
+is an ordinary device — plugged in, with a pack at 40% — and `external` with the
+percent bit clear is one that has no pack at all. It is the absent `percent`
+that says there is no battery, not the source.
+
+That ordering matters for the common build: a USB-C input and a fuel gauge, with
+no charge-status pin. It knows it is on external power and knows the charge, and
+cannot tell charging from charged. `external` is the honest answer there, and
+`charging` and `charged` are for devices that can tell — a device SHOULD report
+the most specific member it can support, and MUST NOT report one it cannot.
+
+**A device MUST NOT declare `power` and then answer with every validity bit
+clear.** With nothing valid it has said what a device without the capability
+says by not declaring it, and a client that asked has spent a round trip to
+learn nothing. The empty record still decodes — it is well formed, and a
+receiver that rejected it would leave a device whose sensor failed mid-session
+with no legal answer at all — so this is a rule about what a device declares
+rather than about a payload, and one of the several rules in §9 that no byte
+vector can reach.
+
+**Nothing here is a voltage.** A device that measures its pack with a divider
+and an ADC owns the conversion to a percentage, along with the cell chemistry
+and the calibration that answer needs. Carrying volts as well would put the same
+quantity on the wire twice, in a form a client cannot act on without knowing the
+chemistry anyway — and a client that had to convert would be making the same
+guess one layer further from the hardware that could inform it.
+
+**The standard Battery Service is not this**, and a device MAY expose `0x180F`
+as well for the benefit of generic Bluetooth tools, exactly as §3.4 recommends
+the Device Information Service. It carries a percentage with no way to say
+"external power" and no way to say "unknown", so a device with either state to
+report has to invent a number there. A client MUST take `GET_POWER` as this
+protocol's answer where a device implements both, and a device that exposes both
+MUST NOT let them disagree.
+
+`power` is capability bit 8, the first bit past the eight the advertisement
+carries (§3.3). A client learns about it from Info, after connecting, which is
+also when it could first draw it.
+
 ---
 
 ## 10. Security
@@ -1864,6 +1970,7 @@ all.
 | `control_response` | No — closed for major version 1 | — |
 | `time_sync` | No — closed for major version 1 | — |
 | `link_params` | No — closed for major version 1 | On request |
+| `power_state` | No — closed for major version 1 | On request |
 | `gnss_aid_caps` | No — closed for major version 1 | — |
 | `aid_begin_result` | No — closed for major version 1 | — |
 | `aid_chunk` | No — closed for major version 1 | — |
@@ -1941,6 +2048,15 @@ corpus can test the reporting. It remains a report rather than a proof — a
 device that misreports cannot be caught by any means this specification
 provides — but a value a client can read and log is a considerable improvement
 on a requirement nobody can observe.
+
+§9.9's power reading has the same shape one step further out. Its layout,
+its validity rules and its `percent` bound are all in the corpus; what is not,
+and cannot be, is whether the numbers are true. A device reporting 8.4 V on a
+flat pack, or one that declares `power` and answers with every validity bit
+clear, produces bytes no vector can distinguish from a device that is right.
+The second of those is at least a rule — §9.9 states it, and the harness asks
+it against a live device — and the first is a measurement, which no protocol
+can verify about the thing doing the measuring.
 
 An implementer SHOULD treat §2.1-§2.3 as the part of this specification that
 needs verifying on a bench rather than in CI.
@@ -2187,7 +2303,7 @@ takes tens of seconds under an open sky and may not complete at all in a
 paddock or under a grandstand. A client has a network connection and can
 supply the same data in about a second.
 
-A device implementing this role MUST set `capabilities` bit 8, which §4.1
+A device implementing this role MUST set `capabilities` bit 9, which §4.1
 requires it to set `gps` and `control` alongside. The `aiding` characteristic
 is present on every VTP/1 device whether or not the role is implemented
 (§4.1).
@@ -2481,12 +2597,13 @@ record tables above.
 | --- | --- | --- |
 | `gps_fix.validity` | bits 12–31 | Validity for fields added in a later minor |
 | `gps_fix.fix_flags` | bits 5–7 | Additional solution-quality flags |
-| `info.capabilities` | bits 9–31 | Roles and features added in a later minor |
+| `info.capabilities` | bits 10–31 | Roles and features added in a later minor |
 | `can_header.flags` | bits 1–7 | Additional batch-level CAN status |
 | `imu_header.flags` | bits 3–7 | Additional sensor groups |
 | `info.clock_flags` | bits 2–7 | Additional clock properties |
 | `monitor_value.validity` | bits 1–7 | Validity for values added in a later minor |
 | `link_params.validity` | bits 4–15 | Validity for link parameters added in a later minor |
+| `power_state.validity` | bits 2–7 | Validity for power fields added in a later minor |
 | `gnss_aid_caps.flags` | bits 1–7 | Additional aiding properties |
 | `gnss_aid_caps.validity` | bits 1–7 | Validity for aiding capabilities added in a later minor |
 | `aid_commit_result.validity` | bits 1–7 | Validity for commit results added in a later minor |
@@ -2496,6 +2613,7 @@ record tables above.
 | `monitor_declaration.reserved` | 1 byte | Declaration metadata |
 | `monitor_header.reserved` | 1 byte | Update metadata |
 | `can_list_page.reserved` | 1 byte | Paging metadata |
+| `power_state.reserved` | 1 byte | Power metadata |
 | `gnss_aid_caps.reserved_3` | 1 byte | Aiding metadata |
 | `aid_begin_result.reserved_3` | 1 byte | Transfer metadata |
 | Extension types | `0x80`–`0xFF` | Vendor-private; this specification MUST NOT assign them (§5.5) |

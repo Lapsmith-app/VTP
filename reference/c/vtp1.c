@@ -480,6 +480,39 @@ int vtp_phy_known(uint8_t p) {
     }
 }
 
+int vtp_power_source_known(uint8_t s) {
+    switch (s) {
+        case VTP_POWER_SOURCE_EXTERNAL:
+        case VTP_POWER_SOURCE_DISCHARGING:
+        case VTP_POWER_SOURCE_CHARGING:
+        case VTP_POWER_SOURCE_CHARGED:
+            return 1;
+        default:
+            return 0;   /* A member a later minor added. Stays unknown. */
+    }
+}
+
+int vtp_decode_power_state(const uint8_t *b, size_t len,
+                           vtp_power_state_t *o, const char **err) {
+    /* Fixed size, no extension mechanism: any other length is malformed. */
+    if (len != VTP_POWER_STATE_SIZE) { *err = "length"; return -1; }
+
+    o->validity = b[VTP_POWER_STATE_OFF_VALIDITY];
+    o->source   = b[VTP_POWER_STATE_OFF_SOURCE];
+    o->percent  = b[VTP_POWER_STATE_OFF_PERCENT];
+
+    /* SPEC.md §9.9 -- 0..100, and rejected rather than clamped. Checked only
+     * where the validity bit claims the byte means something. The value came
+     * out of the same record as the source, so a decoder that
+     * repairs it shows a full battery on a device that has lost track of its
+     * own pack. */
+    if ((o->validity & VTP_POWER_VALIDITY_PERCENT) && o->percent > 100) {
+        *err = "percent-out-of-range";
+        return -1;
+    }
+    return 0;
+}
+
 int vtp_status_known(uint8_t s) {
     switch (s) {
         case VTP_STATUS_OK:

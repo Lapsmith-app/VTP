@@ -312,6 +312,11 @@ FAULTS = {
     "rate_ceiling_ignored": "SPEC.md §9.4 — a rate above the declared maximum is accepted, not refused rate_exceeded",
     "info_rate_above_ceiling": "SPEC.md §4 — Info publishes a current rate above its own maximum",
     "inert_control_accepts_writes": "SPEC.md §4.1 — a device that has not declared Control answers writes to it",
+    "power_unsupported": "SPEC.md §9.9 — GET_POWER refused by a device that declares the capability owning it",
+    "power_percent_impossible": "SPEC.md §9.9 — a percent above 100, which a receiver rejects rather than clamps",
+    "power_stale_behind_bit": "SPEC.md §9.9 — a charge reading left in the bytes with its validity bit clear",
+    "power_declared_but_empty": "SPEC.md §9.9 — the `power` capability declared and nothing reported valid",
+    "power_reserved_nonzero": "SPEC.md §9.9 — the reserved byte of power_state is not zero",
     # SPEC.md §14. Every one of these is a defect that costs a client its
     # transfer without ever refusing a request, which is what makes the role
     # worth checking at all: the bulk path carries no errors by construction,
@@ -850,6 +855,41 @@ class LoopbackTransport(Transport):
             base = 3 + refdec.offset("link_params", "att_mtu")
             struct.pack_into("<H", response, base,
                              struct.unpack_from("<H", response, base)[0] + 4)
+        if "power_unsupported" in self.faults and \
+                opcode == refdec.OPCODE["GET_POWER"]:
+            # A device whose Info declares bit 8 and whose control plane has
+            # never heard of the opcode that bit owns. The client is left with
+            # two statements about the same device and no way to tell which is
+            # the true one; the detail goes with the refusal, because §9 allows
+            # one only on ok.
+            return bytearray(response[:2]
+                             + bytes([refdec.STATUS_VALUE["unsupported_opcode"]]))
+        if status == 0 and opcode == refdec.OPCODE["GET_POWER"] and \
+                len(response) >= 3 + refdec.size("power_state"):
+            base = 3
+            pbit = refdec.bit("power_validity", "percent")
+            if "power_percent_impossible" in self.faults:
+                # §9.9 -- 200%. A client that clamps it to 100 shows a full
+                # battery on a device that has lost track of its own pack, so
+                # the record is rejected whole and this must surface as a
+                # decode failure rather than a reading.
+                response[base + refdec.offset("power_state", "validity")] |= \
+                    1 << refdec.bit("power_validity", "percent")
+                response[base + refdec.offset("power_state", "percent")] = 200
+            if "power_stale_behind_bit" in self.faults:
+                # The last good reading left in the bytes behind a cleared bit:
+                # §1.1's plausible wrong value, one firmware change away from a
+                # client that reads it.
+                response[base + refdec.offset("power_state", "validity")] &= \
+                    ~(1 << pbit) & 0xFF
+                response[base + refdec.offset("power_state", "percent")] = 63
+            if "power_declared_but_empty" in self.faults:
+                # Well formed, honestly zeroed, and useless: a device that
+                # declares the capability and reports nothing valid.
+                for name in ("validity", "source", "percent"):
+                    response[base + refdec.offset("power_state", name)] = 0
+            if "power_reserved_nonzero" in self.faults:
+                response[base + refdec.offset("power_state", "reserved")] = 1
         if "opcode_capability_late" in self.faults:
             response = self._corrupt_capability_refusal(response, request)
         if "rate_not_applied" in self.faults and status == 0 and opcode in (

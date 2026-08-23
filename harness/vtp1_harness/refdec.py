@@ -127,27 +127,18 @@ OPCODE_NAME = {v: k for k, v in OPCODE.items()}
 #: clock, which every device has.
 OPCODE_CAPABILITY = {op["name"]: op.get("capability")
                      for op in SCHEMA["control"]["opcodes"]}
-#: Derived from each opcode's `params`, not listed by hand. The hand-written
-#: version reproduced these ten values correctly and had no way to acquire an
-#: eleventh: an opcode added to the schema raised KeyError here, in a check
-#: about capabilities, some distance from the omission. SPEC.md 11.3 makes new
-#: opcodes the protocol's general-purpose extension point, so this table was
-#: always going to be asked for one it did not hold.
-_TYPE_BYTES = {"u8": 1, "i8": 1, "u16": 2, "i16": 2,
-               "u32": 4, "i32": 4, "u64": 8, "i64": 8}
-
-
-def _param_size(params):
-    total = 0
-    for part in (p.strip() for p in params.split(",")):
-        if not part:
-            continue
-        total += _TYPE_BYTES[part.split(":")[1].strip()]
-    return total
-
-
-OPCODE_PARAM_SIZE = {op["name"]: _param_size(op.get("params") or "")
-                     for op in SCHEMA["control"]["opcodes"]}
+#: How many parameter bytes each opcode takes, derived from the schema's own
+#: `name:type` grammar rather than restated. It was a hand-written dict, and an
+#: opcode added to the schema then reached this harness as a KeyError in the
+#: middle of a run against somebody's firmware -- from the one table here that
+#: could go stale, in a repository whose whole argument is that such tables do.
+_PARAM_WIDTH = {"u8": 1, "i8": 1, "u16": 2, "i16": 2,
+                "u32": 4, "i32": 4, "u64": 8, "i64": 8}
+OPCODE_PARAM_SIZE = {
+    op["name"]: sum(_PARAM_WIDTH[part.split(":")[1].strip()]
+                    for part in op.get("params", "").split(",") if part.strip())
+    for op in SCHEMA["control"]["opcodes"]
+}
 STATUS = enum_values("status")
 STATUS_VALUE = {name: value for value, name in STATUS.items()}
 CAPABILITIES = bits("capabilities")

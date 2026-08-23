@@ -451,6 +451,24 @@ def encode_link_params(link_params):
     return _pack("link_params", _gate("link_params", link_params))
 
 
+POWER_BIT = {b["name"]: 1 << b["bit"]
+             for b in SCHEMA["bitmasks"]["power_validity"]["bits"]}
+
+
+def encode_power_state(power):
+    """SPEC.md §9.9. The detail of a GET_POWER response.
+
+    An encoder must not emit what its own decoder rejects, so the one range
+    this record has is checked here too -- and only where the validity bit
+    claims the byte means something, since a cleared bit is written as zero and
+    zero is always in range.
+    """
+    if (power.get("validity", 0) & POWER_BIT["percent"]
+            and power.get("percent", 0) > 100):
+        raise EncodeError(
+            f"power_state.percent is {power['percent']}; the field is 0..100 "
+            f"and a receiver rejects the record rather than clamping it")
+    return _pack("power_state", _gate("power_state", power))
 def encode_gnss_aid_caps(caps):
     """SPEC.md §14.2. The detail of a GNSS_AID_INFO response."""
     return _pack("gnss_aid_caps", _gate("gnss_aid_caps", caps))
@@ -500,6 +518,7 @@ ENCODERS = {
     "imu_batch": lambda d: encode_imu_batch(d["header"], d["samples"]),
     "info": encode_info,
     "link_params": encode_link_params,
+    "power_state": encode_power_state,
     "can_list": lambda d: encode_can_list(d["page"], d["entries"]),
     "monitor_list": lambda d: encode_monitor_list(d["declaration"], d["entries"]),
     "monitor_update": lambda d: encode_monitor_update(d["header"], d["values"]),

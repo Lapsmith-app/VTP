@@ -97,6 +97,24 @@ static void put_link_absent(const vtp_link_params_t *l) {
     printf("]");
 }
 
+/* The same idea for power_state (SPEC.md §9.9). */
+static const struct { const char *name; uint8_t bit; } POWER_GATED[] = {
+    {"percent",    VTP_POWER_VALIDITY_PERCENT},
+    {"source",     VTP_POWER_VALIDITY_SOURCE},
+};
+
+static void put_power_absent(const vtp_power_state_t *p) {
+    printf(",\"absent\":[");
+    int first = 1;
+    /* Emitted in sorted order so it compares equal to the vector's list. */
+    for (size_t i = 0; i < sizeof POWER_GATED / sizeof POWER_GATED[0]; i++) {
+        if (vtp_power_valid(p, POWER_GATED[i].bit)) continue;
+        printf("%s\"%s\"", first ? "" : ",", POWER_GATED[i].name);
+        first = 0;
+    }
+    printf("]");
+}
+
 /* SPEC.md §7 — a sensor group whose presence flag is clear is ABSENT, not a
  * measurement of zero. The decoder carries raw values and leaves this to the
  * caller, exactly as it does for gps_fix, so the harness reports what an
@@ -317,6 +335,16 @@ int main(void) {
             put_link_absent(&l);
             finish(enc, vtp_encode_link_params(&l, enc, sizeof enc));
 
+        } else if (!strcmp(record, "power_state")) {
+            vtp_power_state_t p;
+            if (vtp_decode_power_state(buf, len, &p, &err)) { reject(err); continue; }
+            printf("{\"ok\":true,\"validity\":%u,\"source\":%u,"
+                   "\"percent\":%u,\"source_known\":%s,\"reserved\":%u",
+                   p.validity, p.source, p.percent,
+                   vtp_power_source_known(p.source) ? "true" : "false",
+                   buf[VTP_POWER_STATE_OFF_RESERVED]);
+            put_power_absent(&p);
+            finish(enc, vtp_encode_power_state(&p, enc, sizeof enc));
         } else if (!strcmp(record, "gnss_aid_caps")) {
             vtp_gnss_aid_caps_t c;
             if (vtp_decode_gnss_aid_caps(buf, len, &c, &err)) { reject(err); continue; }

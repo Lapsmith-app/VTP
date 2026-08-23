@@ -288,6 +288,31 @@
         }
       ]
     },
+    "power_source": {
+      "width": 1,
+      "members": [
+        {
+          "value": 1,
+          "name": "external",
+          "desc": "Running from an external supply. Says nothing about a battery: `percent` reports one if the device has one"
+        },
+        {
+          "value": 2,
+          "name": "discharging",
+          "desc": "Running from its battery"
+        },
+        {
+          "value": 3,
+          "name": "charging",
+          "desc": "External supply present, battery taking charge"
+        },
+        {
+          "value": 4,
+          "name": "charged",
+          "desc": "External supply present, battery no longer taking charge"
+        }
+      ]
+    },
     "aid_format": {
       "width": 1,
       "members": [
@@ -467,6 +492,14 @@
         },
         {
           "bit": 8,
+          "name": "power",
+          "implies": [
+            "control"
+          ],
+          "desc": "Device reports its own power state (\u00a79.9)"
+        },
+        {
+          "bit": 9,
           "name": "gnss_aiding",
           "implies": [
             "gps",
@@ -475,7 +508,7 @@
           "desc": "Client supplies orbit data to the device's receiver (\u00a714)"
         }
       ],
-      "reserved_from": 9,
+      "reserved_from": 10,
       "reserved_purpose": "Roles and features added in a later minor"
     },
     "can_flags": {
@@ -567,6 +600,23 @@
       ],
       "reserved_from": 4,
       "reserved_purpose": "Validity for link parameters added in a later minor"
+    },
+    "power_validity": {
+      "width": 1,
+      "bits": [
+        {
+          "bit": 0,
+          "name": "source",
+          "desc": "source is valid"
+        },
+        {
+          "bit": 1,
+          "name": "percent",
+          "desc": "percent is valid"
+        }
+      ],
+      "reserved_from": 2,
+      "reserved_purpose": "Validity for power fields added in a later minor"
     },
     "aid_flags": {
       "width": 1,
@@ -1408,6 +1458,46 @@
         }
       ]
     },
+    "power_state": {
+      "access": "control",
+      "size": 4,
+      "validity": "power_validity",
+      "desc": "The detail of a GET_POWER response. What the device knows about its own supply, and no more.",
+      "fields": [
+        {
+          "name": "validity",
+          "offset": 0,
+          "size": 1,
+          "type": "u8",
+          "bitmask": "power_validity"
+        },
+        {
+          "name": "source",
+          "offset": 1,
+          "size": 1,
+          "type": "u8",
+          "enum": "power_source",
+          "valid_bit": "source"
+        },
+        {
+          "name": "percent",
+          "offset": 2,
+          "size": 1,
+          "type": "u8",
+          "units": "%",
+          "valid_bit": "percent",
+          "desc": "Charge remaining, 0..100; a receiver MUST reject a larger value (SPEC.md 9.9)"
+        },
+        {
+          "name": "reserved",
+          "offset": 3,
+          "size": 1,
+          "type": "u8",
+          "reserved": true,
+          "desc": "Power metadata"
+        }
+      ]
+    },
     "gnss_aid_caps": {
       "access": "control",
       "size": 16,
@@ -1660,6 +1750,14 @@
         "params": "",
         "response": "monitor_declaration record",
         "desc": "Every channel this device asks the client to supply, in one response (SPEC.md 13.3)"
+      },
+      {
+        "value": 80,
+        "name": "GET_POWER",
+        "capability": "power",
+        "params": "",
+        "response": "power_state record",
+        "desc": "What the device knows about its own supply, measured when asked (SPEC.md 9.9)"
       }
     ]
   }

@@ -185,6 +185,26 @@ enums:
       - {value: 1, name: le_1m,    desc: "LE 1M"}
       - {value: 2, name: le_2m,    desc: "LE 2M"}
       - {value: 3, name: le_coded, desc: "LE Coded"}
+  power_source:
+    width: 1
+    # No zero member, for the same reason `phy` has none: "this device cannot
+    # tell" is a cleared validity bit, never a reserved value of the field
+    # (SPEC.md 1.1). A zeroed byte therefore cannot pass for mains power.
+    #
+    # These are four answers to "what is this device running on", ordered by
+    # how much the device can tell. `external` claims nothing about a battery,
+    # so it is the honest answer for the common build -- a USB-C input and a
+    # fuel gauge, with no charge-status pin -- which knows it is plugged in,
+    # knows the pack is at 40%, and cannot tell charging from charged.
+    #
+    # `charged` is separate from `charging` for devices that CAN tell, because
+    # otherwise such a device has to report `charging` forever and tell a
+    # driver the pack is still filling when it stopped an hour ago.
+    members:
+      - {value: 1, name: external,    desc: "Running from an external supply. Says nothing about a battery: `percent` reports one if the device has one"}
+      - {value: 2, name: discharging, desc: "Running from its battery"}
+      - {value: 3, name: charging,    desc: "External supply present, battery taking charge"}
+      - {value: 4, name: charged,     desc: "External supply present, battery no longer taking charge"}
   aid_format:
     width: 1
     # What the bytes in an aiding transfer ARE. The device forwards them to
@@ -263,9 +283,19 @@ bitmasks:
       - {bit: 5, name: can_fd, implies: [can]}
       - {bit: 6, name: masked_subscriptions, implies: [can]}
       - {bit: 7, name: on_change_subscriptions, implies: [can]}
-      - {bit: 8, name: gnss_aiding, implies: [gps, control],
+      # Bit 8 is the first capability the advertisement cannot carry: SPEC.md
+      # 3.3's Service Data block holds bits 0-7 and its size is fixed. That is
+      # not a defect here -- a supply reading is something a client draws after
+      # it connects, not something it ranks devices by before it does.
+      - {bit: 8, name: power, implies: [control],
+         desc: "Device reports its own power state (§9.9)"}
+      # Bit 9 for the same reason bit 8 is not advertised: aiding is something
+      # a client does after it connects. `power` took bit 8 on main while this
+      # was in review, and a capability bit is a wire value -- the branch that
+      # has not landed is the one that moves.
+      - {bit: 9, name: gnss_aiding, implies: [gps, control],
          desc: "Client supplies orbit data to the device's receiver (§14)"}
-    reserved_from: 9
+    reserved_from: 10
     reserved_purpose: "Roles and features added in a later minor"
   # These three were plain u8 fields with a prose description, so nothing
   # derived their reserved ranges: Appendix A listed them by hand and went
@@ -307,6 +337,17 @@ bitmasks:
       - {bit: 3, name: phy,            desc: "phy_tx and phy_rx are valid"}
     reserved_from: 4
     reserved_purpose: "Validity for link parameters added in a later minor"
+  power_validity:
+    width: 1
+    # Two bits rather than one, because a device knows these separately: one
+    # wired to the ignition feed knows it is on external power and has no
+    # charge to report, and one whose gauge has failed knows the opposite.
+    # SPEC.md 9.9.
+    bits:
+      - {bit: 0, name: source,  desc: "source is valid"}
+      - {bit: 1, name: percent, desc: "percent is valid"}
+    reserved_from: 2
+    reserved_purpose: "Validity for power fields added in a later minor"
   aid_flags:
     width: 1
     bits:
@@ -553,6 +594,25 @@ records:
       - {name: phy_tx,              offset: 14, size: 1, type: u8, enum: phy, valid_bit: phy}
       - {name: phy_rx,              offset: 15, size: 1, type: u8, enum: phy, valid_bit: phy}
 
+  power_state:
+    access: control
+    size: 4
+    validity: power_validity
+    desc: "The detail of a GET_POWER response. What the device knows about its own supply, and no more."
+    fields:
+      - {name: validity, offset: 0, size: 1, type: u8, bitmask: power_validity}
+      # `source` rather than a battery-present flag, and it is the field that
+      # keeps `percent` honest: without it a device on the car's ignition feed
+      # has to report 100% forever, which is a magic value meaning "not
+      # applicable" in a field a client renders as a gauge. SPEC.md 1.1 is
+      # about exactly that, and one byte closes it.
+      - {name: source,   offset: 1, size: 1, type: u8, enum: power_source, valid_bit: source}
+      # 0..100 and nothing else. A receiver rejects a larger value rather than
+      # clamping it (SPEC.md 9.9): the byte came out of the same record as the
+      # source, so neither is trustworthy.
+      - {name: percent,  offset: 2, size: 1, type: u8, units: "%", valid_bit: percent,
+         desc: "Charge remaining, 0..100; a receiver MUST reject a larger value (SPEC.md 9.9)"}
+      - {name: reserved, offset: 3, size: 1, type: u8, reserved: true, desc: "Power metadata"}
   gnss_aid_caps:
     access: control
     size: 16
@@ -648,3 +708,8 @@ control:
     - {value: 0x30, name: TIME_SYNC,          capability: null,    params: "",                             response: "time_sync record",      desc: "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"}
     - {value: 0x31, name: GET_LINK_PARAMS,    capability: null,    params: "",                             response: "link_params record"}
     - {value: 0x40, name: MONITOR_LIST,       capability: monitor, params: "",                             response: "monitor_declaration record", desc: "Every channel this device asks the client to supply, in one response (SPEC.md 13.3)"}
+    # 0x50 rather than 0x32, so the 0x3x block keeps meaning "every device
+    # answers this". Power is a role with a bit of its own, and putting it
+    # beside TIME_SYNC and GET_LINK_PARAMS would file the one opcode in that
+    # block a device may refuse next to the two it never may.
+    - {value: 0x50, name: GET_POWER,          capability: power,   params: "",                             response: "power_state record",    desc: "What the device knows about its own supply, measured when asked (SPEC.md 9.9)"}
