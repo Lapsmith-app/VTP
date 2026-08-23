@@ -494,6 +494,67 @@ Stating these plainly, because a rationale that only lists benefits is marketing
 
 ---
 
+## 8. Why the supply reading is an opcode, and why it is two fields
+
+Bluetooth has had a Battery Service since 2011. `0x180F` is one characteristic
+carrying one byte, every generic tool reads it without being told how, and
+SPEC.md §3.4 already takes exactly that argument for the Device Information
+Service: a thing every tool looks at is worth exposing precisely because nothing
+in this protocol has to know about it. The first draft of SPEC.md §9.9
+rejected it on the grounds that a percentage is a lie on
+hand-built hardware and that the record should carry millivolts instead. That
+was wrong twice over, and the correction is worth recording because the mistake
+is a recurring one.
+
+It was wrong about the client. Volts are not actionable without the cell
+chemistry, the cell count and the load, so a client handed 7.42 V either renders
+a number nobody reads or converts it to a percentage itself — which is the same
+guess the device was being spared, made one layer further from the hardware that
+could inform it. And it was wrong about the device: a builder who has only a
+divider will map it to a percentage anyway, and doing that on the board is where
+the conversion belongs.
+
+What survives the correction is smaller and is not about accuracy at all. It is
+that a logger wired to the car's ignition feed has **no charge to report**, and
+in a percentage-only encoding it must answer 100 forever. That is a reserved
+value meaning "not applicable" in the one field a client draws as a gauge — the
+same shape as latitude `0x7FFFFFFF` decoding to 214.7°, which §2.1 is about, and
+the same shape as the "absence is a magic value" row in README.md's comparison
+table. One byte of `source` closes it, and a client that does not care reads
+`percent` and ignores the rest.
+
+So the record is a source and a percentage, each behind a validity bit, and
+`0x180F` is a thing a device MAY also expose rather than the thing this
+specification points at: it can say neither "external power" nor "unknown", and
+a device with either state to report has to invent a number in the only field it
+has.
+
+**It is polled, not pushed.** A supply reading changes over minutes. A
+notification stream for it would cost a characteristic, a CCCD, a place in the
+fixed attribute table and a conformance role, for a value no client watches
+continuously — and SPEC.md §11.3 names new opcodes as the extension point for
+exactly this shape of thing, something a client asks for rather than something
+the device sends. A client that wants a low-battery warning polls every
+half-minute and pays one round trip for it.
+
+**It has a capability bit rather than a `bad_params`.** Bit 8 costs a client one
+test against a word it already read, and it means an app can decide whether to
+draw a battery indicator at all before asking a question the device might refuse.
+The alternative — ask everyone, treat `unsupported_opcode` as "no battery" — is
+the same information one round trip later and reads identically to a device that
+is broken.
+
+The costs are real. Bit 8 is the first capability past the eight the
+advertisement carries (SPEC.md §3.3), so this is the first role a scanner cannot
+see before connecting; the record has one reserved byte and six reserved
+validity bits and nothing else, so anything richer — a voltage after all, a
+current draw, a time-to-empty estimate — is a later opcode rather than a later
+field; and there is deliberately no way to ask "tell me when it gets low",
+because that is a threshold, a hysteresis and a subscription for a question
+`GET_POWER` answers in one round trip.
+
+---
+
 ## Contradictions found by review, and how each was closed
 
 SPEC.md states rules; this is why these particular rules are the ones it

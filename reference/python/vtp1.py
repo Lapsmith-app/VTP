@@ -462,12 +462,43 @@ def decode_link_params(buf):
     return lp
 
 
+def decode_power_state(buf):
+    """SPEC.md §9.9 — the detail of a GET_POWER response.
+
+    Fixed size with no extension mechanism, so any other length is rejected.
+    """
+    if len(buf) != _size("power_state"):
+        raise Reject("length")
+    ps = _unpack("power_state", buf)
+
+    bit_of = {b["name"]: b["bit"]
+              for b in SCHEMA["bitmasks"]["power_validity"]["bits"]}
+
+    # SPEC.md §9.9 — 0..100 and nothing else, checked only where the validity
+    # bit claims the byte means something. Rejected rather than clamped for the
+    # same reason gps_fix rejects a latitude outside the earth: the value came
+    # out of the same record as the rest, so a decoder that repairs it hands the
+    # client a full battery on a device that has lost track of its own pack.
+    if ps["validity"] & (1 << bit_of["percent"]) and ps["percent"] > 100:
+        raise Reject("percent-out-of-range")
+
+    ps["absent"] = sorted(
+        f["name"] for f in SCHEMA["records"]["power_state"]["fields"]
+        if f.get("valid_bit") is not None
+        and not (ps["validity"] & (1 << bit_of[f["valid_bit"]])))
+
+    known = {m["value"] for m in SCHEMA["enums"]["power_source"]["members"]}
+    ps["source_known"] = ps["source"] in known
+    return ps
+
+
 DECODERS = {
     "gps_fix": decode_gps_fix,
     "can_batch": decode_can_batch,
     "imu_batch": decode_imu_batch,
     "info": decode_info,
     "link_params": decode_link_params,
+    "power_state": decode_power_state,
     "can_list": decode_can_list,
     "monitor_list": decode_monitor_list,
     "monitor_update": decode_monitor_update,

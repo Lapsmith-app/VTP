@@ -43,7 +43,7 @@ SECTION_TITLES = {
     "9": "Control characteristic", "9.1": "Link parameters",
     "9.2": "CAN subscriptions", "9.3": "Overlapping subscriptions",
     "9.4": "Load", "9.5": "The subscription table",
-    "9.6": "The request lifecycle", "9.7": "TIME_SYNC",
+    "9.6": "The request lifecycle", "9.7": "TIME_SYNC", "9.9": "Power",
     "10": "Security", "12.1": "What the corpus does not cover",
     "13.1": "The device asks; the client supplies",
     "13.2": "Channels", "13.3": "The declaration", "13.4": "Values",

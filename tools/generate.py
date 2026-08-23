@@ -468,7 +468,8 @@ def spec_tables(schema):
             "imu_sample": "Up to 833 per second",
             "can_list_page": "One per CAN_LIST page",
             "can_subscription": "One per table entry",
-            "link_params": "On request"}
+            "link_params": "On request",
+            "power_state": "On request"}
     for name, rec in schema["records"].items():
         mark = ("**Yes** — `ext_count` trailer (§5.5)" if rec.get("extensible")
                 else "No — closed for major version 1")
@@ -876,8 +877,8 @@ def _reserved_case(schema, record, field, value):
         return ({"header": hdr, "values": [val]},
                 encode(schema, "monitor_header", hdr)
                 + encode(schema, "monitor_value", gated))
-    if record == "link_params":
-        return ({field: value}, encode(schema, "link_params", {field: value}))
+    if record in ("link_params", "power_state"):
+        return ({field: value}, encode(schema, record, {field: value}))
     sys.exit(f"reserved_bit_cases: no builder for record {record!r}; a bitmask "
              f"field was added and its producer case cannot be generated")
 
@@ -2019,6 +2020,113 @@ def vectors(schema):
          "hex": (encode(schema, "link_params", dict(validity=all_valid)) + b"\x00").hex(),
          "must_reject": "length"},
     ]
+    # ---- Power -----------------------------------------------------------
+    P = {b["name"]: 1 << b["bit"]
+         for b in schema["bitmasks"]["power_validity"]["bits"]}
+    all_power = P["source"] | P["percent"]
+    files["power.json"] = [
+        case(schema, "power_state", "running-on-its-battery",
+             dict(validity=all_power, source=2, percent=63),
+             "A logger on its own pack, a little under two thirds through it. "
+             "Both fields valid, which is the ordinary answer."),
+        case(schema, "power_state", "external-supply-no-battery",
+             dict(validity=P["source"], source=1),
+             "A logger wired to the car's ignition feed with no pack at all. "
+             "It reports `external` and clears the percent bit; a client MUST "
+             "render the charge as unavailable and MUST NOT read 0% out of the "
+             "byte.",
+             note="This is the case `source` exists for. Without it such a "
+                  "device has to report 100% forever -- a magic value meaning "
+                  "`not applicable` in the one field a client draws as a gauge, "
+                  "which is what SPEC.md 1.1 forbids everywhere else. The "
+                  "absent percent is what says there is no battery; `external` "
+                  "on its own does not."),
+        case(schema, "power_state", "charged-on-external",
+             dict(validity=all_power, source=4, percent=100),
+             "External supply present and the pack no longer taking charge. "
+             "`charged` is a distinct member so a device with the information "
+             "does not have to keep saying `charging`.",
+             note="percent is 100, the top of the field's range and a legal "
+                  "value; 101 is the first that is not (SPEC.md 9.9)."),
+        case(schema, "power_state", "gauge-failed-mid-session",
+             dict(validity=P["source"], source=2),
+             "A device that knows it is on its battery and has lost the gauge "
+             "that says how much is left. The honest answer is one bit set and "
+             "one clear, which is why percent has a validity bit at all.",
+             note="A device that answered 0% here would be reporting a flat "
+                  "pack, and a device that answered 100% a full one. Both are "
+                  "measurements it does not have."),
+        case(schema, "power_state", "nothing-determinable",
+             dict(validity=0),
+             "Both bits clear. Decodable, and a device that declares the "
+             "`power` capability MUST NOT answer this way -- with nothing valid "
+             "it has said what a device without the capability says by not "
+             "declaring it.",
+             note="Not a reject: the record is well formed, and SPEC.md 1.1 is "
+                  "about a receiver never producing a plausible wrong value, "
+                  "which an all-absent decode is the opposite of. The rule this "
+                  "breaks is the device's, and the harness is what asks it."),
+        case(schema, "power_state", "stale-values-behind-cleared-bits",
+             dict(validity=0, source=2, percent=63),
+             "A non-conforming device that clears both validity bits and leaves "
+             "the last reading in the bytes. A decoder MUST report both absent "
+             "on the strength of the mask alone, and MUST NOT read 63% out of "
+             "them.",
+             canonical=False,
+             note="Not byte-canonical, so the round-trip asserts that a "
+                  "conforming encoder NORMALISES these bytes to zero. Both bits "
+                  "are clear in one case deliberately -- this is the only "
+                  "coverage the power_state encoder's gating rule gets, and a "
+                  "case clearing one would leave the other gate untested."),
+        case(schema, "power_state", "unknown-source-value",
+             dict(validity=all_power, source=9, percent=63),
+             "A source member from a later minor version. A decoder MUST report "
+             "it unknown and MUST NOT fall back to `discharging` -- it still "
+             "has the percentage, and inventing the one field it does not have "
+             "is what SPEC.md 1.1 forbids."),
+        case(schema, "power_state", "reserved-byte-nonzero",
+             dict(validity=all_power, source=2, percent=63, reserved=64),
+             "Byte 3 carries something a future minor assigned. Both halves of "
+             "SPEC.md 2 apply: a decoder MUST ignore it, and a 1.0 encoder MUST "
+             "normalise it to zero.",
+             canonical=False),
+        case(schema, "power_state", "reserved-validity-bit-set",
+             dict(validity=all_power | (1 << 7), source=2, percent=63),
+             "A future minor set power_validity bit 7. A decoder MUST ignore the "
+             "unknown bit and decode both known fields normally, and a VTP/1.0 "
+             "encoder MUST normalise the bit away on transmit (SPEC.md 2).",
+             canonical=False),
+        case(schema, "power_state", "external-supply-with-a-pack",
+             dict(validity=all_power, source=1, percent=40),
+             "Plugged in, with a battery at 40%. `external` claims nothing "
+             "about a battery, so this is an ordinary state rather than a "
+             "contradiction, and both fields are valid together.",
+             note="The build this exists for is a USB-C input and a fuel gauge "
+                  "with no charge-status pin: it knows it is on external power "
+                  "and knows the pack is at 40%, and cannot honestly claim "
+                  "`charging` or `charged`. A device that CAN tell reports one "
+                  "of those instead."),
+        case(schema, "power_state", "percent-above-full",
+             dict(validity=all_power, source=2, percent=200),
+             "200%. Rejected whole rather than clamped to 100: the byte came out "
+             "of the same four as the source, so neither is trustworthy, and a "
+             "client that clamps shows a full battery on a device that has lost "
+             "track of its own pack.",
+             reject="percent-out-of-range"),
+        {"name": "short-payload",
+         "desc": "3 bytes. A truncated control response MUST be rejected whole.",
+         "record": "power_state",
+         "hex": encode(schema, "power_state", dict(validity=0))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "long-payload",
+         "desc": "5 bytes. power_state is a fixed-size record with no extension "
+                 "mechanism, so trailing bytes MUST be rejected.",
+         "record": "power_state",
+         "hex": (encode(schema, "power_state", dict(validity=0))
+                 + b"\x00").hex(),
+         "must_reject": "length"},
+    ]
+
     # ---- Control response envelope ---------------------------------------
     def resp(opcode, tag, status, detail=b""):
         return bytes([opcode, tag, status]) + detail

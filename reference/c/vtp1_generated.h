@@ -148,6 +148,13 @@
 #define VTP_LINK_PARAMS_OFF_PHY_TX 14
 #define VTP_LINK_PARAMS_OFF_PHY_RX 15
 
+/* The detail of a GET_POWER response. What the device knows about its own supply, and no more. */
+#define VTP_POWER_STATE_SIZE 4
+#define VTP_POWER_STATE_OFF_VALIDITY 0
+#define VTP_POWER_STATE_OFF_SOURCE 1
+#define VTP_POWER_STATE_OFF_PERCENT 2
+#define VTP_POWER_STATE_OFF_RESERVED 3
+
 typedef enum {
     VTP_FIX_TYPE_NONE = 0,
     VTP_FIX_TYPE_DEAD_RECKON = 1,
@@ -193,6 +200,13 @@ typedef enum {
     VTP_PHY_LE_CODED = 3,
 } vtp_phy_t;
 
+typedef enum {
+    VTP_POWER_SOURCE_EXTERNAL = 1,
+    VTP_POWER_SOURCE_DISCHARGING = 2,
+    VTP_POWER_SOURCE_CHARGING = 3,
+    VTP_POWER_SOURCE_CHARGED = 4,
+} vtp_power_source_t;
+
 #define VTP_GPS_VALIDITY_T_UTC (1u << 0)
 #define VTP_GPS_VALIDITY_T_UTC_RESOLVED (1u << 1)
 #define VTP_GPS_VALIDITY_POSITION (1u << 2)
@@ -224,7 +238,8 @@ typedef enum {
 #define VTP_CAPABILITIES_CAN_FD (1u << 5)
 #define VTP_CAPABILITIES_MASKED_SUBSCRIPTIONS (1u << 6)
 #define VTP_CAPABILITIES_ON_CHANGE_SUBSCRIPTIONS (1u << 7)
-#define VTP_CAPABILITIES_RESERVED 0xFFFFFF00u
+#define VTP_CAPABILITIES_POWER (1u << 8)
+#define VTP_CAPABILITIES_RESERVED 0xFFFFFE00u
 #define VTP_CAPABILITIES_KNOWN (~(uint32_t)VTP_CAPABILITIES_RESERVED)
 
 #define VTP_CAN_FLAGS_SHEDDING (1u << 0)
@@ -253,6 +268,11 @@ typedef enum {
 #define VTP_LINK_VALIDITY_RESERVED 0xFFF0u
 #define VTP_LINK_VALIDITY_KNOWN (~(uint32_t)VTP_LINK_VALIDITY_RESERVED)
 
+#define VTP_POWER_VALIDITY_SOURCE (1u << 0)
+#define VTP_POWER_VALIDITY_PERCENT (1u << 1)
+#define VTP_POWER_VALIDITY_RESERVED 0xFCu
+#define VTP_POWER_VALIDITY_KNOWN (~(uint32_t)VTP_POWER_VALIDITY_RESERVED)
+
 /* SPEC.md 4.1 -- a capability bit and every bit it requires. */
 typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rule_t;
 #define VTP_CAPABILITY_RULES { \
@@ -264,8 +284,9 @@ typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rul
     { (1u << 5), 0x00000002u, "can_fd" }, \
     { (1u << 6), 0x00000002u, "masked_subscriptions" }, \
     { (1u << 7), 0x00000002u, "on_change_subscriptions" }, \
+    { (1u << 8), 0x00000010u, "power" }, \
 }
-#define VTP_CAPABILITY_RULE_COUNT 8
+#define VTP_CAPABILITY_RULE_COUNT 9
 
 /* SPEC.md 4.1 -- info fields that MUST be zero when their
  * capability bit is clear. Offset and size, so one loop covers all. */
