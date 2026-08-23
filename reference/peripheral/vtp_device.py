@@ -33,6 +33,7 @@ CAP_GPS, CAP_CAN, CAP_IMU = 1 << 0, 1 << 1, 1 << 2
 CAP_MONITOR = 1 << 3
 CAP_CONTROL, CAP_CAN_FD = 1 << 4, 1 << 5
 CAP_MASKED_SUBS, CAP_ONCHANGE_SUBS = 1 << 6, 1 << 7
+CAP_POWER = 1 << 8
 
 V_T_UTC, V_T_UTC_RESOLVED, V_POSITION = 1 << 0, 1 << 1, 1 << 2
 V_ALT_MSL, V_ALT_ELLIPSOID, V_VELOCITY = 1 << 3, 1 << 4, 1 << 5
@@ -49,6 +50,11 @@ CAN_RESET, CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK = 0x01, 0x02, 0x03
 CAN_UNSUBSCRIBE, CAN_LIST = 0x04, 0x05
 GPS_SET_RATE, IMU_SET_RATE, TIME_SYNC = 0x10, 0x20, 0x30
 GET_LINK_PARAMS, MONITOR_LIST = 0x31, 0x40
+GET_POWER = 0x50
+
+# SPEC.md 9.9 -- power_source members and power_validity bits.
+SRC_EXTERNAL, SRC_DISCHARGING, SRC_CHARGING, SRC_CHARGED = 1, 2, 3, 4
+PWR_SOURCE, PWR_PERCENT = 1 << 0, 1 << 1
 
 # SPEC.md §13.2 — channels a Monitor device may ask the client for.
 CH_LAP_TIME, CH_LAST_LAP_TIME, CH_BEST_LAP_TIME = 1, 2, 3
@@ -217,7 +223,7 @@ class VtpDevice:
     # each rule. selftest.py builds a device without them to check the other.
     DEFAULT_CAPABILITIES = (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
                             | CAP_MONITOR | CAP_MASKED_SUBS
-                            | CAP_ONCHANGE_SUBS)
+                            | CAP_ONCHANGE_SUBS | CAP_POWER)
 
     def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
                  circuit=None, monitor_channels=None, capabilities=None):
@@ -286,6 +292,12 @@ class VtpDevice:
         self._monitor_seq = None
         self._monitor_updates = 0
         self._link = None
+
+        # SPEC.md 9.9 -- a device on its own pack with a gauge that works, so
+        # this build exercises both validity bits. `set_power` moves it;
+        # nothing else here does, because a supply reading is not on the
+        # protocol's clock and does not belong in poll().
+        self._power = {"source": SRC_DISCHARGING, "percent": 63}
 
     # -- clock ------------------------------------------------------------
 
@@ -961,6 +973,14 @@ class VtpDevice:
                 return reply(ST_BAD_PARAMS)
             return reply(ST_OK, self._link_params())
 
+        if opcode == GET_POWER:
+            # SPEC.md 9.9 -- parameterless, and measured when the request
+            # arrives rather than sampled on a timer: the answer a client gets
+            # is the reading this device had at the moment it was asked.
+            if params:
+                return reply(ST_BAD_PARAMS)
+            return reply(ST_OK, self._power_state())
+
         if opcode == MONITOR_LIST:
             # SPEC.md §13.3 — parameterless: the declaration is not paged, so
             # there is no `start` to take. It used to take one, mirroring
@@ -1118,6 +1138,45 @@ class VtpDevice:
         as a number nobody supplied."""
         from display import render_lines
         return render_lines(self.monitor_state())
+
+    def set_power(self, source=None, percent=None):
+        """What the device's own supply monitoring found.
+
+        Both arguments are independent, and None means "this build cannot
+        measure it" rather than zero -- which is the whole shape of SPEC.md 9.9.
+        A device wired to the ignition feed passes `percent=None` forever and
+        reports `external` truthfully, rather than reporting 100% and leaving a
+        client to render a gauge for a battery that does not exist. A device
+        that is plugged in AND has a pack passes both -- `external` claims
+        nothing about a battery, so `set_power(SRC_EXTERNAL, 40)` is an
+        ordinary state and not a contradiction.
+
+        SPEC.md 9.9's one device rule is refused HERE, where the mistake is,
+        rather than at the next GET_POWER: by then the device is running and
+        the traceback names a control response rather than the call that made
+        it wrong.
+        """
+        if (self.capabilities & CAP_POWER
+                and source is None and percent is None):
+            raise ValueError(
+                "a device declaring `power` MUST report at least one valid "
+                "field (SPEC.md 9.9); with nothing to say it declares no "
+                "`power` capability instead")
+        self._power = {"source": source, "percent": percent}
+
+    def _power_state(self):
+        """SPEC.md 9.9 -- the detail of a GET_POWER response.
+
+        Presence, not truthiness, for the same reason _link_params uses it: a
+        percent of 0 is a flat battery and a real measurement, and reading it
+        as "unknown" would hide the one state a driver most needs to see.
+        """
+        fields, validity = {"source": 0, "percent": 0}, 0
+        for bit, name in ((PWR_SOURCE, "source"), (PWR_PERCENT, "percent")):
+            if self._power.get(name) is not None:
+                validity |= bit
+                fields[name] = self._power[name]
+        return enc.encode_power_state({"validity": validity, **fields})
 
     def _link_params(self):
         link = self._link or {}

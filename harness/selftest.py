@@ -84,6 +84,11 @@ CAUGHT_BY = {
     "rate_ceiling_ignored": "control.rate_ceiling",
     "info_rate_above_ceiling": "info.rate_ceiling",
     "inert_control_accepts_writes": "gatt.inert_control_rejects_writes",
+    "power_unsupported": "power.get_power",
+    "power_percent_impossible": "power.get_power",
+    "power_stale_behind_bit": "power.absent_fields_zero",
+    "power_declared_but_empty": "power.something_valid",
+    "power_reserved_nonzero": "power.reserved",
 }
 
 #: A MUST or SHOULD check with no seeded fault against it, and why there is

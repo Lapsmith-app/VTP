@@ -606,16 +606,16 @@
       "name": "reserved-bits-info-capabilities",
       "record": "info",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- info.capabilities bits 8-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "desc": "SPEC.md 2 -- info.capabilities bits 9-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
         "protocol_major": 1,
         "protocol_minor": 0,
-        "capabilities": 2147483903,
+        "capabilities": 2147484159,
         "gps_rate_hz": 10,
         "gps_max_rate_hz": 10,
         "max_notify_bytes": 244
       },
-      "expect_hex": "0100ff0000000a000a00000000000000000000000000f400"
+      "expect_hex": "0100ff0100000a000a00000000000000000000000000f400"
     },
     {
       "name": "reserved-bits-info-clock-flags",
@@ -748,6 +748,16 @@
         "validity": 32783
       },
       "expect_hex": "0f000000000000000000000000000000"
+    },
+    {
+      "name": "reserved-bits-power-state-validity",
+      "record": "power_state",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- power_state.validity bits 2-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "validity": 131
+      },
+      "expect_hex": "03000000"
     },
     {
       "name": "control-detail-on-ok",

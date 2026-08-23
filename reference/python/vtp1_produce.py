@@ -50,6 +50,8 @@ def produce(record, data):
         return enc.encode_time_sync(data)
     if record == "link_params":
         return enc.encode_link_params(data)
+    if record == "power_state":
+        return enc.encode_power_state(data)
     raise LookupError(record)
 
 

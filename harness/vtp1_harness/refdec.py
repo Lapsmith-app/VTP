@@ -127,11 +127,17 @@ OPCODE_NAME = {v: k for k, v in OPCODE.items()}
 #: clock, which every device has.
 OPCODE_CAPABILITY = {op["name"]: op.get("capability")
                      for op in SCHEMA["control"]["opcodes"]}
+#: How many parameter bytes each opcode takes, derived from the schema's own
+#: `name:type` grammar rather than restated. It was a hand-written dict, and an
+#: opcode added to the schema then reached this harness as a KeyError in the
+#: middle of a run against somebody's firmware -- from the one table here that
+#: could go stale, in a repository whose whole argument is that such tables do.
+_PARAM_WIDTH = {"u8": 1, "i8": 1, "u16": 2, "i16": 2,
+                "u32": 4, "i32": 4, "u64": 8, "i64": 8}
 OPCODE_PARAM_SIZE = {
-    "CAN_RESET": 0, "CAN_SUBSCRIBE": 7, "CAN_SUBSCRIBE_MASK": 11,
-    "CAN_UNSUBSCRIBE": 2, "CAN_LIST": 2, "GPS_SET_RATE": 2,
-    "IMU_SET_RATE": 2, "TIME_SYNC": 0, "GET_LINK_PARAMS": 0,
-    "MONITOR_LIST": 0,
+    op["name"]: sum(_PARAM_WIDTH[part.split(":")[1].strip()]
+                    for part in op.get("params", "").split(",") if part.strip())
+    for op in SCHEMA["control"]["opcodes"]
 }
 STATUS = enum_values("status")
 STATUS_VALUE = {name: value for value, name in STATUS.items()}

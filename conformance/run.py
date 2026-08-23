@@ -40,6 +40,9 @@ ROLES = {
     "can":     {"can_batch", "can_list"},
     "imu":     {"imu_batch"},
     "monitor": {"monitor_list", "monitor_update"},
+    # §9.9 — the GET_POWER detail. A role like any other: a device without a
+    # battery never declares the bit and is never handed these.
+    "power":   {"power_state"},
 }
 
 # A role whose records only exist if another one does. This is not the runner's
