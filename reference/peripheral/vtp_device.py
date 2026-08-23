@@ -19,6 +19,7 @@ import pathlib
 import struct
 import sys
 import time
+import zlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "reference" / "python"))
@@ -33,6 +34,9 @@ CAP_GPS, CAP_CAN, CAP_IMU = 1 << 0, 1 << 1, 1 << 2
 CAP_MONITOR = 1 << 3
 CAP_CONTROL, CAP_CAN_FD = 1 << 4, 1 << 5
 CAP_MASKED_SUBS = 1 << 6
+# Bit 7 was on_change_subscriptions in a pre-1.0 draft and stays unassigned.
+CAP_POWER = 1 << 8
+CAP_GNSS_AIDING = 1 << 9
 
 V_T_UTC, V_T_UTC_RESOLVED, V_POSITION = 1 << 0, 1 << 1, 1 << 2
 V_ALT_MSL, V_ALT_ELLIPSOID, V_VELOCITY = 1 << 3, 1 << 4, 1 << 5
@@ -49,6 +53,37 @@ CAN_RESET, CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK = 0x01, 0x02, 0x03
 CAN_UNSUBSCRIBE = 0x04
 GPS_SET_RATE, IMU_SET_RATE, TIME_SYNC = 0x10, 0x20, 0x30
 MONITOR_LIST = 0x40
+GET_POWER = 0x50
+
+# SPEC.md 9.7 -- power_source members and power_validity bits.
+SRC_EXTERNAL, SRC_DISCHARGING, SRC_CHARGING, SRC_CHARGED = 1, 2, 3, 4
+PWR_SOURCE, PWR_PERCENT = 1 << 0, 1 << 1
+GNSS_AID_INFO, GNSS_AID_BEGIN = 0x11, 0x12
+GNSS_AID_COMMIT = 0x13           # 0x14 was GNSS_AID_ABORT; unassigned
+
+# SPEC.md §14.1 — the one aiding format this device accepts. It forwards the
+# bytes to its receiver without interpreting them, so this names what the
+# RECEIVER speaks; the value is here so a client knows what to fetch.
+AID_FORMAT_UBX_MGA = 1
+
+AID_RESULT_APPLIED, AID_RESULT_INCOMPLETE = 1, 2
+AID_RESULT_BAD_CRC, AID_RESULT_REJECTED = 3, 4
+
+AID_V_HELD_UNTIL = 0x01          # aid_validity bit 0
+COMMIT_V_FIRST_MISSING = 0x01    # commit_validity bit 0
+
+# SPEC.md §14.2 — a device ceiling, and the reason GNSS_AID_BEGIN can refuse
+# before a single chunk is written. Sized for an AssistNow Offline product.
+AID_MAX_BYTES = 131_072
+
+# SPEC.md §14.3 — three bytes of ATT Write Command header and two of chunk
+# header come off the negotiated MTU before any payload fits.
+AID_CHUNK_OVERHEAD = 5
+
+# SPEC.md §14.3 — `index` and `first_missing` are u16, so this is the most a
+# transfer may need. Derived from the field rather than written as a number
+# somebody has to keep in step with it.
+AID_MAX_CHUNKS = 0xFFFF
 
 # SPEC.md §13.2 — channels a Monitor device may ask the client for.
 CH_LAP_TIME, CH_LAST_LAP_TIME, CH_BEST_LAP_TIME = 1, 2, 3
@@ -216,7 +251,14 @@ class VtpDevice:
     # device that hard-codes them can only ever demonstrate one half of each
     # rule. selftest.py builds a device without them to check the other.
     DEFAULT_CAPABILITIES = (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
-                            | CAP_MONITOR | CAP_MASKED_SUBS)
+                            | CAP_MONITOR | CAP_MASKED_SUBS
+                            | CAP_POWER | CAP_GNSS_AIDING)
+
+    #: SPEC.md §14 — what this device declares in gnss_aid_caps. Named on the
+    #: class so the conformance harness can seed a fault against the device's
+    #: own numbers rather than a copy of them.
+    AID_FORMAT = AID_FORMAT_UBX_MGA
+    AID_MAX_BYTES_DECLARED = AID_MAX_BYTES
 
     def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
                  circuit=None, monitor_channels=None, capabilities=None):
@@ -230,6 +272,9 @@ class VtpDevice:
         # The largest MTU this build will ever accept. `self.mtu` moves with
         # the link; this does not, and batches are never sized above it.
         self._device_mtu_ceiling = mtu
+        # False until a backend tells us what the link actually negotiated.
+        # `--mtu` is what this build was CONFIGURED for, not what it got.
+        self._mtu_observed = False
         self.gps_hz = gps_hz
         self.imu_hz = imu_hz
         self.circuit = circuit or Circuit()
@@ -284,6 +329,24 @@ class VtpDevice:
         self._monitor_values = {}
         self._monitor_seq = None
         self._monitor_updates = 0
+        # SPEC.md §14.3 — at most one transfer open, so this is one slot and
+        # not a table. None when nothing is in flight.
+        self._aid = None
+        # What this device is holding, as GNSS_AID_INFO reports it. None means
+        # it holds nothing, which is the cleared validity bit rather than a
+        # zero -- "valid until the Unix epoch" is a different claim.
+        self._aid_held_until = None
+        # A COUNT, not the payloads. Retaining each applied transfer kept up to
+        # AID_MAX_BYTES per commit for the life of the process, with nothing
+        # reading it -- and a client re-pushing aiding on every reconnect is
+        # the normal pattern, not an unusual one.
+        self._aid_applied = 0
+
+        # SPEC.md 9.7 -- a device on its own pack with a gauge that works, so
+        # this build exercises both validity bits. `set_power` moves it;
+        # nothing else here does, because a supply reading is not on the
+        # protocol's clock and does not belong in poll().
+        self._power = {"source": SRC_DISCHARGING, "percent": 63}
 
     # -- clock ------------------------------------------------------------
 
@@ -308,6 +371,15 @@ class VtpDevice:
         self._monitor_values.clear()
         self._monitor_seq = None
         self._monitor_updates = 0
+        # A transfer belongs to the connection that opened it (SPEC.md 14.3):
+        # the client that would have committed it is gone, and a new client
+        # has no way to learn its shape. Without this rule the one-open-
+        # transfer slot would be held by a client that cannot close it.
+        #
+        # `_aid_held_until` deliberately survives: aiding already handed to
+        # the receiver is in the receiver, not in this connection, and the
+        # next client learns what is held by reading GNSS_AID_INFO.
+        self._aid = None
 
     def record_refused(self, stream, payload):
         """A notification the transport would not accept.
@@ -356,6 +428,7 @@ class VtpDevice:
         self._can_pending, self._can_batch_t0 = [], None
         self._monitor_values.clear()
         self._monitor_seq = None
+        self._aid = None
         # The MTU was NEGOTIATED, so it describes a link that has gone. It used
         # to persist until a new central happened to replace it, so batches for
         # the next connection were sized to this one's link.
@@ -733,6 +806,12 @@ class VtpDevice:
         build was designed to hold.
         """
         self.mtu = min(att_mtu, self._device_mtu_ceiling)
+        # Recorded because SPEC.md §14.3 needs the difference. Sizing a
+        # notification from an assumed MTU costs a refused packet the pump
+        # retries; sizing a CHUNK from one costs every chunk of the transfer,
+        # silently, because the client writes what the device asked for and
+        # the device then rejects its own arithmetic.
+        self._mtu_observed = True
 
     def handle_control(self, request, t_rx=None):
         """SPEC.md §9. `[opcode][tag][params]` in, `[opcode][tag][status]
@@ -869,6 +948,69 @@ class VtpDevice:
             return reply(ST_OK, enc.encode_time_sync({
                 "t_device_rx": t_rx, "t_device_tx": self.now_us()}))
 
+        if opcode == GET_POWER:
+            # SPEC.md 9.7 -- parameterless, and measured when the request
+            # arrives rather than sampled on a timer: the answer a client gets
+            # is the reading this device had at the moment it was asked.
+            if params:
+                return reply(ST_BAD_PARAMS)
+            return reply(ST_OK, self._power_state())
+
+        if opcode == GNSS_AID_INFO:
+            if params:
+                return reply(ST_BAD_PARAMS)
+            return reply(ST_OK, self._aid_caps())
+
+        if opcode == GNSS_AID_BEGIN:
+            if len(params) != 5:
+                return reply(ST_BAD_PARAMS)
+            fmt, total = struct.unpack("<BI", params)
+            # SPEC.md §14.1 -- a format this device did not declare. The bytes
+            # are opaque to the protocol, so this refusal is the only place a
+            # wrong product can be caught at all; accepting it would mean a
+            # 40 kB transfer the receiver silently discards.
+            if fmt != self.AID_FORMAT:
+                return reply(ST_BAD_PARAMS)
+            # Zero is not a transfer, and SPEC.md §14.2 makes max_bytes a
+            # ceiling this device refuses at rather than discovers by running
+            # out of memory somewhere in the middle.
+            if total == 0 or total > self.AID_MAX_BYTES_DECLARED:
+                return reply(ST_BAD_PARAMS)
+
+            chunk_bytes = self._aid_chunk_bytes()
+            if chunk_bytes <= 0:
+                return reply(ST_BAD_PARAMS)
+
+            # SPEC.md §14.3 -- `index` and `first_missing` are both u16 while
+            # total_bytes is u32, so a large enough transfer has chunks that
+            # cannot be named. Refused here, where both numbers are first
+            # known, rather than discovered at a commit the client cannot
+            # express.
+            if -(-total // chunk_bytes) > AID_MAX_CHUNKS:
+                return reply(ST_BAD_PARAMS)
+
+            # SPEC.md §14.3 -- one transfer open, and a BEGIN over an open one
+            # discards it. Nothing else is needed to keep the two apart: ATT
+            # delivers this client's writes in order, so every chunk of the
+            # old transfer arrived before the BEGIN that discarded it.
+            self._aid = {
+                "total_bytes": total,
+                "chunk_bytes": chunk_bytes,
+                "chunks": {},
+            }
+            return reply(ST_OK, enc.encode_aid_begin_result(
+                {"chunk_bytes": chunk_bytes}))
+
+        if opcode == GNSS_AID_COMMIT:
+            if len(params) != 4:
+                return reply(ST_BAD_PARAMS)
+            (crc,) = struct.unpack("<I", params)
+            # SPEC.md §14.4 -- no transfer open. Note this is bad_params and
+            # not a result: there is no transfer to report on.
+            if not self._aid:
+                return reply(ST_BAD_PARAMS)
+            return reply(ST_OK, self._aid_commit(crc))
+
         if opcode == MONITOR_LIST:
             # SPEC.md §13.3 — parameterless: the declaration is not paged, so
             # there is no `start` to take. It used to take one, mirroring the
@@ -893,6 +1035,145 @@ class VtpDevice:
             {"count": len(self._monitor_channels), "reserved": 0},
             [{"slot": s, "channel": c, "max_age": MONITOR_MAX_AGE.get(c, 20)}
              for s, c in self._monitor_channels])
+
+    # -- aiding (SPEC.md §14) ---------------------------------------------
+
+    def _aid_caps(self):
+        """SPEC.md §14.2 — what this device accepts, and what it already holds."""
+        held = self._aid_held_until
+        return enc.encode_gnss_aid_caps({
+            "validity": AID_V_HELD_UNTIL if held is not None else 0,
+            "format": self.AID_FORMAT,
+            "max_bytes": self.AID_MAX_BYTES_DECLARED,
+            "held_until": held or 0,
+        })
+
+    def _aid_chunk_bytes(self):
+        """SPEC.md §14.3 — the payload size every chunk but the last carries.
+
+        `self.mtu` is only the negotiated value once a backend has observed it.
+        Bless learns it on CoreBluetooth and nowhere else, so on BlueZ and
+        WinRT this device is holding whatever `--mtu` said -- 247 by default.
+        Sizing chunks from that on a link that negotiated 185 asks the client
+        for 241-byte writes it cannot make, and the 179-byte ones it can make
+        are then rejected by this device as the wrong length: every chunk of
+        the transfer discarded, with the only symptom a commit that reports
+        everything missing.
+
+        So when the MTU has not been observed, chunks are sized from the
+        minimum ATT MTU this protocol requires (§2.1). That is smaller than
+        necessary on a link that negotiated more, and it is writable on every
+        conforming link, which is the correct way round for a number the client
+        cannot second-guess.
+        """
+        mtu = self.mtu if self._mtu_observed else MIN_ATT_MTU
+        return mtu - AID_CHUNK_OVERHEAD
+
+    def _aid_expected_chunks(self, transfer):
+        return -(-transfer["total_bytes"] // transfer["chunk_bytes"])
+
+    def handle_aiding_write(self, payload):
+        """SPEC.md §14.3 — one chunk, written without a response.
+
+        Returns a reason string for the caller's log and nothing else: there is
+        no response path, and every rule below is one a client cannot break
+        without having ignored the GNSS_AID_BEGIN that answered it. Silence is
+        the specified behaviour, not an omission.
+        """
+        if not self.capabilities & CAP_GNSS_AIDING:
+            return "aiding-not-supported"
+        if len(payload) < 2:
+            return "length"
+        (index,) = struct.unpack_from("<H", payload, 0)
+        body = payload[2:]
+
+        # A chunk with no transfer open belongs to one this device discarded:
+        # ATT delivers a client's writes in order, so a chunk for the CURRENT
+        # transfer cannot arrive before the BEGIN that opened it answered.
+        if not self._aid:
+            return "no-open-transfer"
+        t = self._aid
+
+        expected = self._aid_expected_chunks(t)
+        if index >= expected:
+            return "index-beyond-transfer"
+
+        # SPEC.md §14.3 -- every chunk but the last carries exactly
+        # chunk_bytes. The device knows both numbers from its own BEGIN, so a
+        # short chunk is detectable here rather than at the CRC, where it would
+        # be indistinguishable from corruption and cost the whole transfer.
+        last = index == expected - 1
+        want = (t["total_bytes"] - index * t["chunk_bytes"]) if last \
+            else t["chunk_bytes"]
+        if len(body) != want:
+            return "wrong-chunk-length"
+
+        # A repeat is explicitly allowed: it is how a client fills a gap
+        # SPEC.md §14.4 told it about.
+        t["chunks"][index] = bytes(body)
+        return None
+
+    def _aid_commit(self, crc):
+        """SPEC.md §14.4 — what became of the transfer.
+
+        The status of the RESPONSE is ok throughout: a transfer was open and
+        the request was well formed, so the device applied it. What it found
+        is in the result, which is the only place an index to resend from can
+        travel (§14.5).
+        """
+        t = self._aid
+        expected = self._aid_expected_chunks(t)
+
+        def result(value, first_missing=None):
+            return enc.encode_aid_commit_result({
+                "validity": COMMIT_V_FIRST_MISSING if first_missing is not None
+                            else 0,
+                "result": value,
+                "first_missing": first_missing or 0,
+            })
+
+        missing = [i for i in range(expected) if i not in t["chunks"]]
+        if missing:
+            # SPEC.md §14.4 -- the LOWEST index, and the transfer stays open so
+            # the client can resend just the gap. That is the whole reason a
+            # write-without-response path is safe to use for this. The index is
+            # always one the device genuinely does not hold, so a client
+            # resending from it makes progress on every round.
+            return result(AID_RESULT_INCOMPLETE, missing[0])
+
+        data = b"".join(t["chunks"][i] for i in range(expected))
+        # SPEC.md §14.4 -- CRC-32 over the reassembled payload, not the chunks.
+        # zlib.crc32 is the IEEE 802.3 polynomial, reflected, which is what the
+        # specification names exactly so that two implementations agree.
+        if zlib.crc32(data) != crc:
+            self._aid = None
+            return result(AID_RESULT_BAD_CRC)
+
+        # SPEC.md §14.6 -- applied whole, at commit, and to the RECEIVER. A
+        # real device writes these bytes out of the UART here and nowhere else;
+        # in particular nothing from `data` reaches a gps_fix.
+        self._aid = None
+        applied = self.apply_aiding(data)
+        if not applied:
+            return result(AID_RESULT_REJECTED)
+        self._aid_applied += 1
+        return result(AID_RESULT_APPLIED)
+
+    @property
+    def aid_transfers_applied(self):
+        """Transfers handed to the receiver since this device started."""
+        return self._aid_applied
+
+    def apply_aiding(self, data):
+        """Hand a completed transfer to the receiver. Overridable.
+
+        This synthetic device has no receiver, so it accepts anything and
+        records the fact. A real one writes `data` to the GNSS module and
+        answers on what the module said -- u-blox returns UBX-MGA-ACK, and a
+        NAK is what SPEC.md §14.4's `rejected` exists to carry: the bytes
+        arrived intact and this receiver would not take them.
+        """
+        return True
 
     def handle_monitor_write(self, payload):
         """SPEC.md §13.4 — a client-to-device batch of values.
@@ -1015,3 +1296,42 @@ class VtpDevice:
         as a number nobody supplied."""
         from display import render_lines
         return render_lines(self.monitor_state())
+
+    def set_power(self, source=None, percent=None):
+        """What the device's own supply monitoring found.
+
+        Both arguments are independent, and None means "this build cannot
+        measure it" rather than zero -- which is the whole shape of SPEC.md 9.7.
+        A device wired to the ignition feed passes `percent=None` forever and
+        reports `external` truthfully, rather than reporting 100% and leaving a
+        client to render a gauge for a battery that does not exist. A device
+        that is plugged in AND has a pack passes both -- `external` claims
+        nothing about a battery, so `set_power(SRC_EXTERNAL, 40)` is an
+        ordinary state and not a contradiction.
+
+        SPEC.md 9.7's one device rule is refused HERE, where the mistake is,
+        rather than at the next GET_POWER: by then the device is running and
+        the traceback names a control response rather than the call that made
+        it wrong.
+        """
+        if (self.capabilities & CAP_POWER
+                and source is None and percent is None):
+            raise ValueError(
+                "a device declaring `power` MUST report at least one valid "
+                "field (SPEC.md 9.7); with nothing to say it declares no "
+                "`power` capability instead")
+        self._power = {"source": source, "percent": percent}
+
+    def _power_state(self):
+        """SPEC.md 9.7 -- the detail of a GET_POWER response.
+
+        Presence, not truthiness: a percent of 0 is a flat battery and a real
+        measurement, and reading it as "unknown" would hide the one state a
+        driver most needs to see.
+        """
+        fields, validity = {"source": 0, "percent": 0}, 0
+        for bit, name in ((PWR_SOURCE, "source"), (PWR_PERCENT, "percent")):
+            if self._power.get(name) is not None:
+                validity |= bit
+                fields[name] = self._power[name]
+        return enc.encode_power_state({"validity": validity, **fields})

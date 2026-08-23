@@ -127,17 +127,21 @@ The report ends with a **Not verified** section, and it is not boilerplate — i
 is assembled from the run, so a check skipped for a reason specific to your
 device appears there rather than disappearing into a count.
 
-Three things are permanently in it:
+Four things are permanently in it:
 
 - **§2.1–§2.3** — link-layer payload, PHY and connection interval. No desktop
-  operating system exposes these to an application. The harness checks the
-  device's own `GET_LINK_PARAMS` report for internal consistency and against the
-  one figure the host does know, the ATT MTU. A device that misreports cannot be
-  caught by any means this specification provides. §12.1 says the same thing.
+  operating system exposes these to an application, so the harness checks the
+  one figure the host does know, the ATT MTU, and nothing else. §12.1 says the
+  same thing.
 - **§8.1's clock discipline and §6.1's timing bounds.** The host's scheduler and
   Bluetooth stack sit between the device and every arrival time measured here,
   and they are worth tens of milliseconds against a clock specified in
   microseconds. Ordering and internal consistency are checked; accuracy is not.
+- **§9.7's numbers themselves.** The harness checks that a device declaring
+  `power` answers `GET_POWER`, that it reports something valid, and that what it
+  reports obeys §9.7's rules. Whether the pack is actually two-thirds full is
+  not observable from this side of the link, any more than §2's link
+  parameters are.
 - **§13.5's freshness expiry.** Every declared channel carries a `max_age` and
   the harness checks it is non-zero, but what happens when one lapses happens on
   the device's own display and puts nothing on the wire. Stop writing and watch
@@ -267,8 +271,8 @@ async def can_something(s):
 `requires` names capability bits from §4, so a device that never claimed a role
 is never failed for it. `Fail(..., severity="MUST")` overrides the check's own
 severity for one finding, which a SHOULD check needs when its failure mode is
-worse than the rule it is mainly about — not implementing `GET_LINK_PARAMS` is a
-SHOULD, not answering it breaks a MUST. `raise Skip(...)` when something cannot
+worse than the rule it is mainly about — surfacing an out-of-range reading is a
+SHOULD, acting on one breaks a MUST. `raise Skip(...)` when something cannot
 be asked here and say why — the reason is printed under Not verified rather than swallowed.
 `raise Observe(...)` for a measurement that is nobody's pass or fail, so the
 report cannot accumulate green ticks for things nothing was asserted about.

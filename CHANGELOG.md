@@ -87,7 +87,274 @@ decision went the other way: the role is retained in full, unchanged.
 Everything downstream follows the schema: both references, the software
 peripheral, the harness (which now proves table state behaviourally — install,
 send, observe, remove — instead of reading `CAN_LIST` back), and the corpus
-(105 vectors across 7 record types, 34 producer cases).
+(138 vectors across 9 record types, 41 producer cases).
+
+### The same review, applied to the two roles that landed beside it
+
+Power and GNSS aiding (below) landed on main while the review above was in
+flight, so the merge asked them the same question: does each piece earn its
+place? The roles stay — a supply reading and a time-to-first-fix cut are
+things a driver actually gets — and both came out smaller. Wire values that
+landed on main are unchanged (bits 8 and 9, opcodes 0x11–0x13, 0x50); what
+follows is what moved. Power is SPEC.md §9.7 now and aiding's arguments live
+in RATIONALE §9 and §10, since the review renumbered §9's subsections.
+
+- **`percent` above 100 is a device-side violation, not a receiver reject.**
+  The same downgrade the review applied to GPS ranges: the record is well
+  formed, so a receiver decodes it, MUST NOT clamp it, and SHOULD surface it.
+  The encoders still refuse to emit one — the device-side half of the rule —
+  and the `percent-above-full` vector expects a decode with no round-trip.
+  The harness check moved from "the detail failed to decode" to
+  `power.percent_in_range`, which reads the value like a client would.
+- **The aiding session number is gone** from `aid_begin_result`, every chunk
+  and the commit. ATT delivers a client's writes on one ordered bearer, so a
+  chunk for a discarded transfer cannot arrive after the `GNSS_AID_BEGIN`
+  that discarded it: the byte distinguished transfers the transport already
+  keeps apart, which is the subscription-handle mistake wearing a new name.
+  A chunk header is `index:u16` — two bytes, so `chunk_bytes` is now
+  `ATT_MTU - 5`.
+- **`GNSS_AID_ABORT` (0x14) is gone, and stays unassigned.** Opening the next
+  transfer discards the open one, and so does disconnecting — both now stated
+  in §14.3. An opcode whose whole effect the next `GNSS_AID_BEGIN` already
+  has is a second name for the same act. The harness's abort check became
+  `aiding.begin_supersedes`, with a seeded fault of the same shape.
+- **The commit's `chunks` count is gone**; `GNSS_AID_COMMIT` carries the
+  CRC-32 alone. The device computes the same number from its own BEGIN, so
+  the parameter could only agree or be refused, and the CRC backstops every
+  disagreement that matters — including the ones the count cannot see. With
+  it went §14.4's count-mismatch rules and its non-termination proof, the
+  count-mismatch harness check, and the fault seeded against it.
+- **The `persists` flag is gone**, and `gnss_aid_caps` bytes 2–3 are
+  reserved. A client reads `GNSS_AID_INFO` on every connection, and that read
+  answers for the connection it happens on; a prediction about the next boot
+  is a value nothing can act on.
+
+RATIONALE §10.6 records all four aiding removals with the full argument.
+Capability bit 7 (`on_change_subscriptions`, removed by the review above) is
+now a hole below assigned bits 8 and 9 rather than the top of the assigned
+range, so every generated mask and table derives the reserved set from the
+named bits instead of a boundary — a retired bit is reserved exactly like the
+range above it, and Appendix A lists it.
+
+### Added — a device can report its own supply (SPEC.md §9.7)
+
+A logger runs off something, and until now the protocol had no way to say what
+or how much is left. `GET_POWER` (opcode `0x50`, owned by `capabilities` bit 8,
+`power`) answers with a four-byte `power_state` record: a source enum and a
+percentage, each behind its own validity bit.
+
+Two fields rather than one, and rather than the three the first draft had. The
+draft carried a supply voltage in millivolts on the grounds that a percentage is
+a guess on hand-built hardware — which was wrong about the client, since volts
+are not actionable without the cell chemistry and the load, and wrong about the
+device, since a builder with a divider will map it to a percentage anyway and
+the board is where that conversion belongs.
+
+What is left is not about accuracy. A logger wired to the car's ignition feed
+has no charge to report, and in a percentage-only encoding it has to answer 100
+forever: a reserved value meaning "not applicable" in the one field a client
+draws as a gauge, which is the same shape as latitude `0x7FFFFFFF` decoding to
+214.7°. One byte of `source` closes that, and a client that does not care reads
+`percent` and ignores the rest. RATIONALE §9 has the argument, including why
+the reading is polled rather than pushed and why the standard Battery Service is
+something a device MAY also expose rather than the thing this specification
+points at.
+
+Three rules came with it:
+
+- **`percent` is 0..100, and the bound is the device's.** An encoder refuses
+  a larger value rather than clamping it, a receiver decodes the record and
+  flags the field, and a client that clamps shows a full battery on a device
+  that has lost track of its pack. (The first draft made this a receiver
+  reject; the review entry above records the downgrade.)
+- **A field whose validity bit is clear MUST be zero**, as everywhere else. The
+  corpus carries a non-canonical vector with a stale 63% behind a cleared bit,
+  which is the only coverage the encoder's gating rule for this record gets.
+- **A device MUST NOT declare `power` and then report nothing valid.** With
+  every bit clear it has said what a device without the capability says by not
+  declaring it. The empty record still decodes — rejecting it would leave a
+  device whose gauge failed mid-session with no legal answer — so it joins
+  §9's other device-behaviour rules in being unreachable by any byte vector,
+  and `power.something_valid` in the harness is what asks it.
+
+`source` says what the device is running on rather than what it contains, so
+`external` claims nothing about a battery: plugged in with a pack at 40% is
+`external` and a valid percent together, and it is the absent percent that says
+there is no battery. `charging` and `charged` are for devices that can tell the
+two apart; the common build — a USB-C input and a fuel gauge with no
+charge-status pin — reports `external` and the charge it measures.
+
+Thirteen vectors, one producer case, both reference codecs, the software
+peripheral (`set_power`, which refuses the device rule where the mistake is
+made, and `GET_POWER` in its control plane) and five harness checks with a
+seeded fault against each of the four that state a MUST.
+
+### Two tables that restated the schema instead of reading it
+
+Both were found by adding the opcode above, which is the point of mentioning
+them: a schema addition should not be able to break a hand-maintained copy of
+the schema, and twice it did.
+
+- **`refdec.OPCODE_PARAM_SIZE` was a hand-written dict.** A new opcode reached
+  the harness as a `KeyError` in the middle of a run, from the one table there
+  that could go stale. It is derived from the schema's own `name:type` grammar
+  now, and produces byte-for-byte what the hand-written version held.
+- **`tools/mutate.py`'s `bound` operator could not mutate a bound written on a
+  struct field.** Its pattern started at the member name and left the
+  dereference behind, so `o->percent > 100` became `o->0)`, which does not
+  compile — a mutation that proves nothing, reported as a skip, inside a sweep
+  whose entire claim is that every mutation proves something. The pattern takes
+  an optional `x->` prefix now.
+
+### GNSS aiding: the client can shorten the device's time to first fix
+
+A receiver with no current orbit data reads it from the satellites at 50 bit/s
+and takes tens of seconds, or in a paddock never finishes. The client has a
+network connection and the same data. Nothing in VTP/1 could carry it.
+
+New capability bit 9 (`gnss_aiding`, requiring `gps` and `control`), a seventh
+characteristic, and three control opcodes. SPEC.md §14 is the normative text
+and RATIONALE §10 is the argument.
+
+- **A seventh characteristic, `aiding`, written without a response.** The
+  transfer is tens of kilobytes; §9 allows one outstanding control request; so
+  carrying it as opcodes alone is ~164 round trips and a control plane that can
+  answer nothing else for several seconds. This is a change to the fixed
+  attribute table of §4.1 and is therefore a pre-1.0 change or none at all.
+- **`GNSS_AID_INFO` first.** The device declares the one format it accepts —
+  enumerated, never a vendor string — plus its size ceiling and the validity
+  window it already holds, so a client does not push 40 kB the device is
+  still sitting on.
+- **`GNSS_AID_BEGIN` fixes the chunking.** `chunk_bytes`
+  is constant for the transfer so that index-to-offset is arithmetic. Without
+  that a device cannot place a resent chunk, and the missing-chunk report below
+  has nothing to offer.
+- **`GNSS_AID_COMMIT` reports what became of it**, including the lowest chunk
+  index that never arrived — §8.3's rule that loss is a number, applied to a
+  path with no per-write acknowledgement. `incomplete` leaves the transfer
+  open; the client resends the gap and commits again, and terminates because
+  that index strictly advances.
+- **A refused transfer is not a refused request.** Commit answers `ok` and puts
+  the outcome in the detail, because §9 carries no detail on a non-ok status
+  and an `incomplete` with no index to resend from is useless.
+- **A device MUST NOT report aiding as measurement.** It may seed a receiver's
+  search; it MUST NOT reach a `gps_fix`. The sharpest case of §1.1 in the
+  document — a plausible position from something that is not a sensor.
+- **Nothing reserved for RTCM3.** Corrections are named out of scope in §14.6
+  rather than given a slot: §11.4 allows a new `aid_format` member at any time,
+  so an allocated value buys nothing, and the lifecycle work it implies —
+  continuous rather than one-shot, with an inbound rate ceiling and airtime
+  rules against CAN — is what a future minor version would actually have to do.
+
+Also in this change:
+
+- **`OPCODE_PARAM_SIZE` was derived from the schema here too**, independently
+  of the entry above, and this branch's version was dropped on merge in favour
+  of the one already on main. Two changes arriving at the same fix in the same
+  week is the table saying what it is.
+- **`control.opcode_capability` is no longer an expected skip.** The reference
+  peripheral does not declare `gnss_aiding`, so the check now has an unowned
+  opcode to try and runs for the first time.
+- **The reference peripheral implements the role**, and the harness checks it.
+  Nine checks in a new `aiding` phase cover the declaration, the chunk size
+  against the negotiated MTU, both pre-transfer refusals, a complete transfer,
+  a deliberately withheld chunk and the resend that follows it, a CRC
+  mismatch, and a superseding BEGIN. Eight new seeded faults hold them to
+  account; the harness selftest now proves 54 defects are caught rather
+  than 41.
+- **The conformance corpus can say nothing about any of this.** It decodes
+  bytes a device sends, and every §14 rule is about bytes a device receives.
+  The harness is the only mechanical coverage the role has, which is the same
+  position Monitor is in and worth stating rather than discovering.
+
+Five more found by review of the pull request:
+
+- **`--encrypt all` did not protect Aiding on Linux or Windows.** bless 0.3.0
+  translates the encryption permission only for characteristics carrying
+  `read` or `write`: BlueZ leaves write-without-response and the notify streams
+  in clear, and WinRT shifts its permission word past the bit it is testing and
+  enforces nothing at all. 0.3.0 is the newest bless there is, so there is no
+  upgrade that fixes it. The peripheral now computes the gap from the backend
+  and the schema's own property table, names it in a `NOT ENCRYPTED on this
+  backend` warning at startup, documents it in the peripheral README, and
+  asserts it in the selftest so a future bless closing the gap fails a check
+  rather than leaving the documentation wrong. The permission is still
+  requested; what changed is that the peripheral no longer implies it took
+  effect. This is not specific to aiding — the notify streams were already
+  affected — but aiding is the first characteristic BlueZ protects *nothing*
+  on.
+- **Transfers failed whenever the real MTU was under 247.** `set_negotiated_mtu`
+  is only ever called on CoreBluetooth, so on BlueZ and WinRT the device held
+  whatever `--mtu` said and sized chunks from it. At a negotiated 185 it asked
+  for 241-byte writes the client cannot make, then rejected the 179-byte ones
+  it can as the wrong length — every chunk of the transfer discarded, with the
+  only symptom a commit reporting everything missing. The device now records
+  whether its MTU was observed or assumed, and sizes chunks from §2.1's
+  minimum when assumed: smaller than necessary on a link that negotiated more,
+  and writable on every conforming link, which is the correct way round for a
+  number the client cannot second-guess.
+- **Some valid transfers could not be committed.** `chunks` and `first_missing`
+  are `u16` while `total_bytes` is `u32`, and nothing bounded the pair, so a
+  large enough transfer had a count no client could send and a gap no device
+  could name. §14.3 now caps a transfer at 65535 chunks and requires
+  `bad_params` at `GNSS_AID_BEGIN`, where both numbers are first known.
+- **`--roles gnss_aiding` did not work.** The conformance runner's role table
+  had no entry for it, so the role could not be selected and `--roles
+  gps,control` silently skipped every aiding vector. Added; the `gps` and
+  `control` implication comes from the schema, as the other roles' do.
+- **Both encoders emitted records the specification forbids.** Neither checked
+  for a zero `chunk_bytes` (§14.3) nor for `first_missing` being set beside a
+  result other than `incomplete` (§14.4) — and the generated reserved-bit
+  producer case *required* the second, because it sets every assigned bit of
+  the mask beside a `clean` result of `applied`. So the corpus was asserting
+  that a conforming encoder must report a chunk lost from a transfer that
+  succeeded. Both encoders validate now, the generated case uses `incomplete`,
+  and three producer cases cover the refusals. The enum values are deliberately
+  not validated: §11.4 lets a minor version add results, and the corpus carries
+  an unknown one on purpose.
+
+Four defects found by reviewing the above, all in code added by it:
+
+- **A commit whose `chunks` contradicted the transfer never terminated.** With
+  every chunk received but a wrong count, the device answered `incomplete`
+  naming `first_missing` 0 — an index it holds. A client following §14.4
+  resends that chunk, commits again with the same count and gets the same
+  answer forever. §14.4 now says the count is redundant with the transfer's own
+  shape, is carried so a disagreement is caught rather than acted on, and MUST
+  be refused `bad_params` with the transfer left open. It cannot be a result:
+  a device holding everything has no index it did not receive, so the one it
+  would have to send is a falsehood a client acts on. Neither transfer check
+  caught it, because both sent the correct count; `aiding.rejects_count_mismatch`
+  and a seeded fault close that.
+- **The C decoders dropped `reserved_3`.** The structs omitted the field and
+  the CLI printed a literal zero, while the Python decoder read the byte — the
+  two references disagreeing about one payload, which is the defect class this
+  repository exists to prevent. No vector carried a non-zero reserved byte, so
+  nothing noticed. Decoded from the bytes now, as `info.reserved_20` always
+  was, with two vectors that would have caught it.
+- **`aiding.format` returned its `Observe` instead of raising it.** `Observe`
+  is an exception the runner collects, so the observation was constructed and
+  discarded and the check reported PASS with an empty message — losing the one
+  line that tells an implementer the format, the ceiling and what the device
+  holds.
+- **The peripheral retained every applied transfer.** `_aid_applied` kept the
+  payload of each commit for the life of the process with nothing reading it,
+  and re-pushing aiding on reconnect is the normal client pattern, not an
+  unusual one. It is a count now, and that count and the discarded-chunk
+  counter both reach the status line — where they separate "this client sent
+  nothing" from "every chunk it sent was discarded", the same pair of opposite
+  faults the monitor line already distinguishes.
+
+Three places where a list had been written out twice, each found by adding the
+seventh characteristic rather than by review:
+
+- **`Runner._run` listed its own phase order**, so a phase added to
+  `checks.PHASES` was registered, ordered and reported on — and never run. Nine
+  checks existed and did not execute. Sliced from `PHASES` now.
+- **The peripheral selftest's encrypt-everything posture** was a written-out
+  set of six characteristic names, so a seventh was conforming, served and
+  documented while being left unprotected by a constant nobody revisits. It is
+  derived from the profile now.
 
 ### A busy radio was being reported as a device losing data
 

@@ -482,6 +482,41 @@ static void do_time_sync(const jctx *c, const jv *in) {
     encoded(vtp_encode_time_sync(&t, out, sizeof out), out);
 }
 
+static void do_power_state(const jctx *c, const jv *in) {
+    vtp_power_state_t p;
+    memset(&p, 0, sizeof p);
+    p.validity = (uint8_t)jint(c, in, "validity");
+    p.source   = (uint8_t)jint(c, in, "source");
+    p.percent  = (uint8_t)jint(c, in, "percent");
+    encoded(vtp_encode_power_state(&p, out, sizeof out), out);
+}
+
+static void do_gnss_aid_caps(const jctx *c, const jv *in) {
+    vtp_gnss_aid_caps_t a;
+    memset(&a, 0, sizeof a);
+    a.validity   = (uint8_t) jint(c, in, "validity");
+    a.format     = (uint8_t) jint(c, in, "format");
+    a.max_bytes  = (uint32_t)jint(c, in, "max_bytes");
+    a.held_until = (int64_t) jint(c, in, "held_until");
+    encoded(vtp_encode_gnss_aid_caps(&a, out, sizeof out), out);
+}
+
+static void do_aid_begin_result(const jctx *c, const jv *in) {
+    vtp_aid_begin_result_t b;
+    memset(&b, 0, sizeof b);
+    b.chunk_bytes = (uint16_t)jint(c, in, "chunk_bytes");
+    encoded(vtp_encode_aid_begin_result(&b, out, sizeof out), out);
+}
+
+static void do_aid_commit_result(const jctx *c, const jv *in) {
+    vtp_aid_commit_result_t r;
+    memset(&r, 0, sizeof r);
+    r.validity      = (uint8_t) jint(c, in, "validity");
+    r.result        = (uint8_t) jint(c, in, "result");
+    r.first_missing = (uint16_t)jint(c, in, "first_missing");
+    encoded(vtp_encode_aid_commit_result(&r, out, sizeof out), out);
+}
+
 /* ---- main ------------------------------------------------------------- */
 
 int main(void) {
@@ -515,6 +550,10 @@ int main(void) {
         else if (!strcmp(record, "monitor_update"))   do_monitor_update(&ctx, in);
         else if (!strcmp(record, "control_response")) do_control_response(&ctx, in);
         else if (!strcmp(record, "time_sync"))        do_time_sync(&ctx, in);
+        else if (!strcmp(record, "power_state"))      do_power_state(&ctx, in);
+        else if (!strcmp(record, "gnss_aid_caps"))    do_gnss_aid_caps(&ctx, in);
+        else if (!strcmp(record, "aid_begin_result")) do_aid_begin_result(&ctx, in);
+        else if (!strcmp(record, "aid_commit_result")) do_aid_commit_result(&ctx, in);
         else printf("{\"ok\":false,\"reason\":\"harness: no encoder for record\"}\n");
         fflush(stdout);
     }

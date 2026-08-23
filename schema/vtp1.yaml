@@ -90,6 +90,25 @@ profile:
       read_by: device
       inert: "writes are rejected with an ATT error and change nothing"
       record: monitor_header
+    # Bulk client-to-device transfer, and the only attribute in this table
+    # written without a response. AssistNow Offline is tens of kilobytes;
+    # pushing that through Control's one-outstanding-request rule (SPEC.md 9)
+    # is one round trip per 244 bytes and locks the control plane for seconds.
+    #
+    # Nothing is lost by dropping the per-write response, because there was
+    # never an error to carry: a chunk is only legitimate after
+    # GNSS_AID_BEGIN answered `ok`, and every outcome the client cares about
+    # -- completeness, integrity, what the receiver made of it -- is reported
+    # by GNSS_AID_COMMIT on the plane that already has typed failures.
+    - name: aiding
+      capability: gnss_aiding
+      properties: [write-without-response]
+      cccd: none
+      write_type: without-response
+      written_by: client
+      read_by: device
+      inert: "writes are silently discarded; a client cannot reach this characteristic legitimately without GNSS_AID_BEGIN having answered ok first"
+      record: aid_chunk
 
   # Info fields that describe a capacity. Each MUST be zero when its capability
   # bit is clear -- SPEC.md 4 already says a capacity of zero means "none", and
@@ -161,6 +180,56 @@ enums:
       - {value: 7, name: speed,              desc: "mm/s"}
       - {value: 8, name: session_distance,   desc: "m"}
       - {value: 9, name: session_time,       desc: "ms"}
+  power_source:
+    width: 1
+    # No zero member: "this device cannot tell" is a cleared validity bit,
+    # never a reserved value of the field (SPEC.md 1.1). A zeroed byte
+    # therefore cannot pass for mains power.
+    #
+    # These are four answers to "what is this device running on", ordered by
+    # how much the device can tell. `external` claims nothing about a battery,
+    # so it is the honest answer for the common build -- a USB-C input and a
+    # fuel gauge, with no charge-status pin -- which knows it is plugged in,
+    # knows the pack is at 40%, and cannot tell charging from charged.
+    #
+    # `charged` is separate from `charging` for devices that CAN tell, because
+    # otherwise such a device has to report `charging` forever and tell a
+    # driver the pack is still filling when it stopped an hour ago.
+    members:
+      - {value: 1, name: external,    desc: "Running from an external supply. Says nothing about a battery: `percent` reports one if the device has one"}
+      - {value: 2, name: discharging, desc: "Running from its battery"}
+      - {value: 3, name: charging,    desc: "External supply present, battery taking charge"}
+      - {value: 4, name: charged,     desc: "External supply present, battery no longer taking charge"}
+  aid_format:
+    width: 1
+    # What the bytes in an aiding transfer ARE. The device forwards them to
+    # its receiver without inspecting them, so this is the one thing a client
+    # must get right and the one thing it cannot derive: the format belongs to
+    # the receiver, not to this protocol.
+    #
+    # Enumerated rather than a vendor string, for SPEC.md 13.2's reason -- a
+    # client cannot fail to understand a declaration in any way except not
+    # implementing it. No zero member, so a zeroed field cannot pass for a
+    # real format.
+    #
+    # One member, and deliberately nothing reserved beside it. SPEC.md 11.4
+    # lets a minor version ADD an enum member at any time, so allocating a
+    # value for a format nobody implements buys exactly nothing that adding it
+    # later would not -- there is no collision to avoid and no compatibility
+    # cliff to get ahead of. RTCM3 corrections were the candidate and are the
+    # illustration: see SPEC.md 14.6 for why they are out of scope, which is a
+    # scoping statement rather than a held slot.
+    members:
+      - {value: 1, name: ubx_mga, desc: "A concatenated sequence of UBX-MGA messages, as served by u-blox AssistNow"}
+  aid_result:
+    width: 1
+    # The outcome of a transfer, which is not the same thing as the outcome of
+    # the request that reported it -- see SPEC.md 14.5. No zero member.
+    members:
+      - {value: 1, name: applied,    desc: "Every chunk arrived, the CRC matched, and the data went to the receiver"}
+      - {value: 2, name: incomplete, desc: "One or more chunks are missing; first_missing names the lowest"}
+      - {value: 3, name: bad_crc,    desc: "Every chunk arrived and the CRC-32 does not match"}
+      - {value: 4, name: rejected,   desc: "The transfer was intact and the receiver refused it"}
 
 bitmasks:
   gps_validity:
@@ -208,7 +277,23 @@ bitmasks:
       - {bit: 4, name: control}
       - {bit: 5, name: can_fd, implies: [can]}
       - {bit: 6, name: masked_subscriptions, implies: [can]}
-    reserved_from: 7
+      # Bit 7 was on_change_subscriptions and is deliberately not renumbered
+      # over: a capability bit is a wire value, and reusing it would make a
+      # device built against the draft that assigned it indistinguishable from
+      # one meaning whatever bit 7 says next. It is reserved like bits 10+,
+      # and the generated masks treat every unnamed bit the same way.
+      #
+      # Bit 8 is the first capability the advertisement cannot carry: SPEC.md
+      # 3.3's Service Data block holds bits 0-7 and its size is fixed. That is
+      # not a defect here -- a supply reading is something a client draws after
+      # it connects, not something it ranks devices by before it does.
+      - {bit: 8, name: power, implies: [control],
+         desc: "Device reports its own power state (SPEC.md 9.7)"}
+      # Bit 9 for the same reason bit 8 is not advertised: aiding is something
+      # a client does after it connects.
+      - {bit: 9, name: gnss_aiding, implies: [gps, control],
+         desc: "Client supplies orbit data to the device's receiver (§14)"}
+    reserved_from: 10
     reserved_purpose: "Roles and features added in a later minor"
   # These three were plain u8 fields with a prose description, so nothing
   # derived their reserved ranges: Appendix A listed them by hand and went
@@ -241,6 +326,29 @@ bitmasks:
       - {bit: 0, name: present, desc: "The client can currently supply this channel"}
     reserved_from: 1
     reserved_purpose: "Validity for values added in a later minor"
+  power_validity:
+    width: 1
+    # Two bits rather than one, because a device knows these separately: one
+    # wired to the ignition feed knows it is on external power and has no
+    # charge to report, and one whose gauge has failed knows the opposite.
+    # SPEC.md 9.7.
+    bits:
+      - {bit: 0, name: source,  desc: "source is valid"}
+      - {bit: 1, name: percent, desc: "percent is valid"}
+    reserved_from: 2
+    reserved_purpose: "Validity for power fields added in a later minor"
+  aid_validity:
+    width: 1
+    bits:
+      - {bit: 0, name: held_until, desc: "held_until carries the end of a window the device already holds"}
+    reserved_from: 1
+    reserved_purpose: "Validity for aiding capabilities added in a later minor"
+  commit_validity:
+    width: 1
+    bits:
+      - {bit: 0, name: first_missing, desc: "first_missing names a chunk the device did not receive"}
+    reserved_from: 1
+    reserved_purpose: "Validity for commit results added in a later minor"
 
 records:
 
@@ -430,6 +538,83 @@ records:
       - {name: t_device_rx, offset: 0, size: 8, type: u64, units: µs, desc: "Device clock when the request arrived"}
       - {name: t_device_tx, offset: 8, size: 8, type: u64, units: µs, desc: "Device clock when this answer was prepared; MUST NOT be earlier than t_device_rx"}
 
+  power_state:
+    access: control
+    size: 4
+    validity: power_validity
+    desc: "The detail of a GET_POWER response. What the device knows about its own supply, and no more."
+    fields:
+      - {name: validity, offset: 0, size: 1, type: u8, bitmask: power_validity}
+      # `source` rather than a battery-present flag, and it is the field that
+      # keeps `percent` honest: without it a device on the car's ignition feed
+      # has to report 100% forever, which is a magic value meaning "not
+      # applicable" in a field a client renders as a gauge. SPEC.md 1.1 is
+      # about exactly that, and one byte closes it.
+      - {name: source,   offset: 1, size: 1, type: u8, enum: power_source, valid_bit: source}
+      # 0..100 and nothing else. The bound is the device's: an encoder
+      # refuses a larger value rather than clamping it, and a receiver
+      # decodes the record and SHOULD flag the field (SPEC.md 9.7) -- the
+      # malformed/content division SPEC.md 1.1 draws.
+      - {name: percent,  offset: 2, size: 1, type: u8, units: "%", valid_bit: percent,
+         desc: "Charge remaining, 0..100; a device MUST NOT emit a larger value (SPEC.md 9.7)"}
+      - {name: reserved, offset: 3, size: 1, type: u8, reserved: true, desc: "Power metadata"}
+  gnss_aid_caps:
+    access: control
+    size: 16
+    validity: aid_validity
+    desc: "What aiding this device accepts, and what it already holds."
+    fields:
+      - {name: validity,   offset: 0, size: 1, type: u8, bitmask: aid_validity}
+      - {name: format,     offset: 1, size: 1, type: u8, enum: aid_format, desc: "The one format this device accepts"}
+      # Bytes 2-3 held an aid_flags bitmask whose one bit, `persists`, said
+      # whether held_until survives a power cycle. But a client MUST read
+      # GNSS_AID_INFO on every connection (SPEC.md 14.1), and THAT read says
+      # what the device holds now -- a prediction about the next boot was a
+      # value nothing could act on. Removed; see RATIONALE.
+      - {name: reserved_2, offset: 2, size: 2, type: u16, reserved: true, desc: "Was aid_flags; aiding metadata"}
+      - {name: max_bytes,  offset: 4, size: 4, type: u32, units: bytes, desc: "Largest total_bytes this device will accept in one transfer"}
+      # Same type and units as gps_fix.t_utc, deliberately: a client comparing
+      # the two should not have to convert.
+      - {name: held_until, offset: 8, size: 8, type: i64, units: ms, valid_bit: held_until,
+         desc: "Unix epoch; the end of the validity window this device already holds (SPEC.md 14.2)"}
+
+  aid_begin_result:
+    access: control
+    size: 4
+    desc: "The detail of a GNSS_AID_BEGIN response. Opens a transfer and fixes its chunking."
+    fields:
+      # Fixed, not per-chunk, because index-to-offset must be arithmetic. With
+      # variable chunks a device cannot place chunk 7 without having received
+      # 0..6, and resending only the gap -- the entire point of reporting
+      # first_missing -- stops working.
+      - {name: chunk_bytes, offset: 0, size: 2, type: u16, units: bytes, desc: "Payload bytes in every chunk but the last; byte offset is index x chunk_bytes (SPEC.md 14.3)"}
+      # Byte 2 held a session number every chunk and commit echoed back. ATT
+      # runs all of a client's writes down one ordered bearer, so a chunk for
+      # a discarded transfer cannot arrive after the GNSS_AID_BEGIN that
+      # discarded it -- the number distinguished transfers that the transport
+      # already keeps apart. Removed; see RATIONALE.
+      - {name: reserved_2,  offset: 2, size: 2, type: u16, reserved: true, desc: "Was the session number; transfer metadata"}
+
+  aid_chunk:
+    characteristic: aiding
+    size: 2          # plus the payload bytes of this chunk
+    access: write
+    variable: payload
+    desc: "One chunk of an aiding transfer, written without a response."
+    fields:
+      - {name: index, offset: 0, size: 2, type: u16, desc: "0-based; the payload belongs at index x chunk_bytes"}
+
+  aid_commit_result:
+    access: control
+    size: 4
+    validity: commit_validity
+    desc: "The detail of a GNSS_AID_COMMIT response. What became of the transfer."
+    fields:
+      - {name: validity,      offset: 0, size: 1, type: u8, bitmask: commit_validity}
+      - {name: result,        offset: 1, size: 1, type: u8, enum: aid_result}
+      - {name: first_missing, offset: 2, size: 2, type: u16, valid_bit: first_missing,
+         desc: "Lowest chunk index the device did not receive; the client resends from here (SPEC.md 14.4)"}
+
 control:
   request:  "[opcode:u8][tag:u8][params...]"
   response: "[opcode:u8][tag:u8][status:u8][detail...]"
@@ -462,6 +647,16 @@ control:
     # applied rate is read back from Info, so there is no response detail to
     # keep in step with it.
     - {value: 0x10, name: GPS_SET_RATE,       capability: gps,     params: "hz:u16",                       response: "",                      desc: "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.6)"}
+    # SPEC.md 14. Three opcodes rather than one because a bulk transfer has
+    # three distinct moments on this plane -- ask what is wanted, open,
+    # close -- and only the filling is high volume. The filling is therefore
+    # the only part that leaves it. 0x14 was GNSS_AID_ABORT and is
+    # unassigned: a transfer is abandoned by opening another or by
+    # disconnecting (SPEC.md 14.3), and an opcode whose whole effect the next
+    # BEGIN already has is a second name for the same act.
+    - {value: 0x11, name: GNSS_AID_INFO,   capability: gnss_aiding, params: "",                                  response: "gnss_aid_caps record",     desc: "What aiding this device accepts, and what it already holds (SPEC.md 14.2)"}
+    - {value: 0x12, name: GNSS_AID_BEGIN,  capability: gnss_aiding, params: "format:u8, total_bytes:u32",         response: "aid_begin_result record",  desc: "Open a transfer; the response fixes the chunk size (SPEC.md 14.3)"}
+    - {value: 0x13, name: GNSS_AID_COMMIT, capability: gnss_aiding, params: "crc32:u32",                          response: "aid_commit_result record", desc: "Close the open transfer and report what became of it (SPEC.md 14.4)"}
     - {value: 0x20, name: IMU_SET_RATE,       capability: imu,     params: "hz:u16",                       response: "",                      desc: "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.6)"}
     # params is the empty string, not a dash. It carried a literal em-dash,
     # which is how the SPEC.md table renders "no parameters" -- the display
@@ -471,3 +666,8 @@ control:
     # refuses the dash outright.
     - {value: 0x30, name: TIME_SYNC,          capability: null,    params: "",                             response: "time_sync record",      desc: "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.5)"}
     - {value: 0x40, name: MONITOR_LIST,       capability: monitor, params: "",                             response: "monitor_declaration record", desc: "Every channel this device asks the client to supply, in one response (SPEC.md 13.3)"}
+    # 0x50 rather than 0x31, so the 0x3x block keeps meaning "every device
+    # answers this". Power is a role with a bit of its own, and putting it
+    # beside TIME_SYNC would file an opcode a device may refuse next to the
+    # one it never may.
+    - {value: 0x50, name: GET_POWER,          capability: power,   params: "",                             response: "power_state record",    desc: "What the device knows about its own supply, measured when asked (SPEC.md 9.7)"}

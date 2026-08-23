@@ -164,7 +164,12 @@ def op_bound():
     now fails the run.
     """
     text = (CDIR / DECODER).read_text()
-    for m in reversed(list(re.finditer(r"(\w+) > (\d+)\)", text))):
+    # The optional `x->` prefix matters: without it the pattern started at the
+    # member name and left the dereference behind, so a bound written on a
+    # struct field mutated into `o->0)` and did not compile -- a mutation that
+    # proves nothing, reported as a skip, in a sweep whose whole claim is that
+    # every one of them proves something.
+    for m in reversed(list(re.finditer(r"((?:\w+->)?\w+) > (\d+)\)", text))):
         mutated = text[:m.start()] + "0)" + text[m.end():]
         line = text[:m.start()].count("\n") + 1
         yield (f"decoder drops the {m.group(1)} > {m.group(2)} bound "

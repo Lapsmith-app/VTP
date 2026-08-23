@@ -40,7 +40,19 @@ int vtp_encode_imu_batch(const vtp_imu_header_t *hdr,
 
 int vtp_encode_info(const vtp_info_t *info, uint8_t *out, size_t cap);
 
+/* Fields whose validity bit is clear are written as zero, as everywhere else:
+ * a held_until behind a cleared bit cannot ship a stale window. */
+int vtp_encode_gnss_aid_caps(const vtp_gnss_aid_caps_t *c, uint8_t *out, size_t cap);
+int vtp_encode_aid_begin_result(const vtp_aid_begin_result_t *b, uint8_t *out, size_t cap);
+int vtp_encode_aid_commit_result(const vtp_aid_commit_result_t *c, uint8_t *out, size_t cap);
 int vtp_encode_time_sync(const vtp_time_sync_t *t, uint8_t *out, size_t cap);
+
+/* Fields whose validity bit is clear are written as zero, as everywhere else.
+ * A percent above 100 with its bit set is refused rather than clamped: the
+ * device MUST NOT emit one (SPEC.md §9.7), and the encoder is the device
+ * side of that rule. The decoder deliberately accepts it and leaves the
+ * flagging to the caller. */
+int vtp_encode_power_state(const vtp_power_state_t *p, uint8_t *out, size_t cap);
 int vtp_encode_control_response(const vtp_control_response_t *r,
                                 uint8_t *out, size_t cap);
 

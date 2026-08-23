@@ -196,6 +196,17 @@ static void atomicity(void) {
            "time_sync refuses a negative round trip");
         ok(untouched(out, sizeof out), "time_sync wrote nothing when it refused");
     }
+    {
+        SETUP;
+        vtp_power_state_t p;
+        memset(&p, 0, sizeof p);
+        p.validity = VTP_POWER_VALIDITY_PERCENT;
+        p.percent  = 200;           /* SPEC.md 9.7 -- the field is 0..100 */
+        ok(vtp_encode_power_state(&p, out, sizeof out) == -1,
+           "power_state refuses a percent above 100");
+        ok(untouched(out, sizeof out),
+           "power_state wrote nothing when it refused");
+    }
 }
 
 /* ---- a buffer too small to hold the answer ----------------------------- */
@@ -226,6 +237,15 @@ static void short_buffers(void) {
            "time_sync refuses a buffer one byte short");
         ok(untouched(out, sizeof out),
            "time_sync wrote nothing into a short buffer");
+    }
+    {
+        SETUP;
+        vtp_power_state_t p;
+        memset(&p, 0, sizeof p);
+        ok(vtp_encode_power_state(&p, out, VTP_POWER_STATE_SIZE - 1) == -1,
+           "power_state refuses a buffer one byte short");
+        ok(untouched(out, sizeof out),
+           "power_state wrote nothing into a short buffer");
     }
     {
         SETUP;

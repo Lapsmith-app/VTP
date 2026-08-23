@@ -74,6 +74,24 @@ static void put_absent(const vtp_gps_fix_t *f) {
     printf("]");
 }
 
+/* The same idea for power_state (SPEC.md §9.7). */
+static const struct { const char *name; uint8_t bit; } POWER_GATED[] = {
+    {"percent",    VTP_POWER_VALIDITY_PERCENT},
+    {"source",     VTP_POWER_VALIDITY_SOURCE},
+};
+
+static void put_power_absent(const vtp_power_state_t *p) {
+    printf(",\"absent\":[");
+    int first = 1;
+    /* Emitted in sorted order so it compares equal to the vector's list. */
+    for (size_t i = 0; i < sizeof POWER_GATED / sizeof POWER_GATED[0]; i++) {
+        if (vtp_power_valid(p, POWER_GATED[i].bit)) continue;
+        printf("%s\"%s\"", first ? "" : ",", POWER_GATED[i].name);
+        first = 0;
+    }
+    printf("]");
+}
+
 /* SPEC.md §7 — a sensor group whose presence flag is clear is ABSENT, not a
  * measurement of zero. The decoder carries raw values and leaves this to the
  * caller, exactly as it does for gps_fix, so the harness reports what an
@@ -257,6 +275,48 @@ int main(void) {
             }
             printf("]");
             finish(enc, vtp_encode_monitor_update(&mh, vals, enc, sizeof enc));
+
+        } else if (!strcmp(record, "power_state")) {
+            vtp_power_state_t p;
+            if (vtp_decode_power_state(buf, len, &p, &err)) { reject(err); continue; }
+            printf("{\"ok\":true,\"validity\":%u,\"source\":%u,"
+                   "\"percent\":%u,\"source_known\":%s,\"reserved\":%u",
+                   p.validity, p.source, p.percent,
+                   vtp_power_source_known(p.source) ? "true" : "false",
+                   buf[VTP_POWER_STATE_OFF_RESERVED]);
+            put_power_absent(&p);
+            finish(enc, vtp_encode_power_state(&p, enc, sizeof enc));
+
+        } else if (!strcmp(record, "gnss_aid_caps")) {
+            vtp_gnss_aid_caps_t c;
+            if (vtp_decode_gnss_aid_caps(buf, len, &c, &err)) { reject(err); continue; }
+            printf("{\"ok\":true,\"validity\":%u,\"format\":%u,"
+                   "\"reserved_2\":%u,\"max_bytes\":%u,\"held_until\":%lld,"
+                   "\"format_known\":%s,\"absent\":[%s]",
+                   c.validity, c.format, c.reserved_2, c.max_bytes,
+                   (long long)c.held_until,
+                   vtp_aid_format_known(c.format) ? "true" : "false",
+                   vtp_aid_valid(&c, VTP_AID_VALIDITY_HELD_UNTIL)
+                       ? "" : "\"held_until\"");
+            finish(enc, vtp_encode_gnss_aid_caps(&c, enc, sizeof enc));
+
+        } else if (!strcmp(record, "aid_begin_result")) {
+            vtp_aid_begin_result_t b;
+            if (vtp_decode_aid_begin_result(buf, len, &b, &err)) { reject(err); continue; }
+            printf("{\"ok\":true,\"chunk_bytes\":%u,\"reserved_2\":%u",
+                   b.chunk_bytes, b.reserved_2);
+            finish(enc, vtp_encode_aid_begin_result(&b, enc, sizeof enc));
+
+        } else if (!strcmp(record, "aid_commit_result")) {
+            vtp_aid_commit_result_t c;
+            if (vtp_decode_aid_commit_result(buf, len, &c, &err)) { reject(err); continue; }
+            printf("{\"ok\":true,\"validity\":%u,\"result\":%u,"
+                   "\"first_missing\":%u,\"result_known\":%s,\"absent\":[%s]",
+                   c.validity, c.result, c.first_missing,
+                   vtp_aid_result_known(c.result) ? "true" : "false",
+                   vtp_commit_valid(&c, VTP_COMMIT_VALIDITY_FIRST_MISSING)
+                       ? "" : "\"first_missing\"");
+            finish(enc, vtp_encode_aid_commit_result(&c, enc, sizeof enc));
 
         } else if (!strcmp(record, "control_response")) {
             vtp_control_response_t r;

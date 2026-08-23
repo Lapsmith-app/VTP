@@ -88,10 +88,15 @@ def _known_bits(bitmask):
     sets one has published a claim it cannot make.
     """
     spec = SCHEMA["bitmasks"][bitmask]
-    reserved_from = spec.get("reserved_from")
-    if reserved_from is None:
+    if "reserved_from" not in spec:
         return (1 << (spec["width"] * 8)) - 1
-    return (1 << reserved_from) - 1
+    # From the NAMED bits, not from reserved_from: a bit retired below the
+    # boundary -- capabilities bit 7, assigned by a pre-1.0 draft -- is
+    # reserved exactly like the range above it.
+    known = 0
+    for b in spec["bits"]:
+        known |= 1 << b["bit"]
+    return known
 
 
 def _normalise_bitmasks(name, values):
@@ -434,6 +439,68 @@ def encode_time_sync(ts):
     return _pack("time_sync", ts)
 
 
+POWER_BIT = {b["name"]: 1 << b["bit"]
+             for b in SCHEMA["bitmasks"]["power_validity"]["bits"]}
+
+
+def encode_power_state(power):
+    """SPEC.md §9.7. The detail of a GET_POWER response.
+
+    A device MUST NOT emit a percent above 100, and the encoder is the device
+    side of that rule -- checked only where the validity bit claims the byte
+    means something, since a cleared bit is written as zero and zero is always
+    in range. The decoder deliberately does NOT reject it: the record is well
+    formed, so a receiver decodes it and SHOULD flag the value instead.
+    """
+    if (power.get("validity", 0) & POWER_BIT["percent"]
+            and power.get("percent", 0) > 100):
+        raise EncodeError(
+            f"power_state.percent is {power['percent']}; the field is 0..100 "
+            f"and a device MUST NOT emit a larger value (SPEC.md 9.7)")
+    return _pack("power_state", _gate("power_state", power))
+
+
+def encode_gnss_aid_caps(caps):
+    """SPEC.md §14.2. The detail of a GNSS_AID_INFO response."""
+    return _pack("gnss_aid_caps", _gate("gnss_aid_caps", caps))
+
+
+def encode_aid_begin_result(begin):
+    """SPEC.md §14.3. The detail of a GNSS_AID_BEGIN response."""
+    # §14.3 -- MUST NOT be zero. A zero chunk size is a transfer that cannot
+    # carry a byte, and the client has no way to tell it from a device that
+    # simply will not say: it would write chunks of nothing until the commit
+    # reported everything missing.
+    if not begin.get("chunk_bytes"):
+        raise EncodeError("aid_begin_result.chunk_bytes MUST NOT be zero "
+                          "(SPEC.md 14.3)")
+    return _pack("aid_begin_result", begin)
+
+
+def encode_aid_commit_result(commit):
+    """SPEC.md §14.4. The detail of a GNSS_AID_COMMIT response."""
+    # §14.4 -- the first_missing bit is set if and only if the result is
+    # `incomplete`. Set beside any other result it names a chunk as lost from a
+    # transfer that did not lose one; clear beside `incomplete` it says
+    # something is missing and refuses to say what, which is the one thing that
+    # makes a write-without-response path recoverable.
+    #
+    # The enum VALUE is deliberately not checked: SPEC.md 11.4 lets a minor
+    # version add results, and the corpus carries an unknown one on purpose.
+    incomplete = next(m["value"] for m in SCHEMA["enums"]["aid_result"]["members"]
+                      if m["name"] == "incomplete")
+    bit = 1 << next(b["bit"] for b in SCHEMA["bitmasks"]["commit_validity"]["bits"]
+                    if b["name"] == "first_missing")
+    named = bool(_known_bits("commit_validity") & commit.get("validity", 0) & bit)
+    if named != (commit.get("result") == incomplete):
+        raise EncodeError(
+            f"aid_commit_result: first_missing is "
+            f"{'set' if named else 'clear'} beside result "
+            f"{commit.get('result')}; SPEC.md 14.4 sets it if and only if the "
+            f"result is incomplete ({incomplete})")
+    return _pack("aid_commit_result", _gate("aid_commit_result", commit))
+
+
 # Keyed by the runner-contract record name, so a harness can round-trip a
 # decode without knowing which record it holds.
 ENCODERS = {
@@ -441,8 +508,12 @@ ENCODERS = {
     "can_batch": lambda d: encode_can_batch(d["header"], d["records"]),
     "imu_batch": lambda d: encode_imu_batch(d["header"], d["samples"]),
     "info": encode_info,
+    "power_state": encode_power_state,
     "monitor_list": lambda d: encode_monitor_list(d["declaration"], d["entries"]),
     "monitor_update": lambda d: encode_monitor_update(d["header"], d["values"]),
     "control_response": encode_control_response,
     "time_sync": encode_time_sync,
+    "gnss_aid_caps": encode_gnss_aid_caps,
+    "aid_begin_result": encode_aid_begin_result,
+    "aid_commit_result": encode_aid_commit_result,
 }

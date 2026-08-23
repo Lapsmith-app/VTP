@@ -484,7 +484,7 @@ Stating these plainly, because a rationale that only lists benefits is marketing
   timer. Flushing once per connection interval makes this a wash, but for a
   single slow signal on an idle bus, VTP/1 delivers marginally later. The win is
   throughput and timestamp accuracy, not first-byte latency.
-- **More surface to get wrong.** Six characteristics, three batch formats and an
+- **More surface to get wrong.** Seven characteristics, three batch formats and an
   extension mechanism is more specification than a single 20-byte struct. The
   conformance corpus exists because that is a real cost and it needs paying down
   with tests rather than with prose.
@@ -744,6 +744,198 @@ enforced by the ATT layer, so an unencrypted write never reaches application
 code and there is nothing there to generate a `needs_encryption` reply from.
 An earlier draft required both, which cannot be implemented; the status stays
 allocated because a status, once allocated, is never reused (SPEC §11.4).
+## 9. Why the supply reading is an opcode, and why it is two fields
+
+Bluetooth has had a Battery Service since 2011. `0x180F` is one characteristic
+carrying one byte, every generic tool reads it without being told how, and
+SPEC §3.4 already takes exactly that argument for the Device Information
+Service: a thing every tool looks at is worth exposing precisely because nothing
+in this protocol has to know about it. The first draft of what became SPEC §9.7
+rejected it on the grounds that a percentage is a lie on
+hand-built hardware and that the record should carry millivolts instead. That
+was wrong twice over, and the correction is worth recording because the mistake
+is a recurring one.
+
+It was wrong about the client. Volts are not actionable without the cell
+chemistry, the cell count and the load, so a client handed 7.42 V either renders
+a number nobody reads or converts it to a percentage itself — which is the same
+guess the device was being spared, made one layer further from the hardware that
+could inform it. And it was wrong about the device: a builder who has only a
+divider will map it to a percentage anyway, and doing that on the board is where
+the conversion belongs.
+
+What survives the correction is smaller and is not about accuracy at all. It is
+that a logger wired to the car's ignition feed has **no charge to report**, and
+in a percentage-only encoding it must answer 100 forever. That is a reserved
+value meaning "not applicable" in the one field a client draws as a gauge — the
+same shape as latitude `0x7FFFFFFF` decoding to 214.7°, which SPEC §5.4 is about, and
+the same shape as the "absence is a magic value" row in README.md's comparison
+table. One byte of `source` closes it, and a client that does not care reads
+`percent` and ignores the rest.
+
+So the record is a source and a percentage, each behind a validity bit, and
+`0x180F` is a thing a device MAY also expose rather than the thing this
+specification points at: it can say neither "external power" nor "unknown", and
+a device with either state to report has to invent a number in the only field it
+has.
+
+**It is polled, not pushed.** A supply reading changes over minutes. A
+notification stream for it would cost a characteristic, a CCCD, a place in the
+fixed attribute table and a conformance role, for a value no client watches
+continuously — and SPEC §11.3 names new opcodes as the extension point for
+exactly this shape of thing, something a client asks for rather than something
+the device sends. A client that wants a low-battery warning polls every
+half-minute and pays one round trip for it.
+
+**It has a capability bit rather than a `bad_params`.** Bit 8 costs a client one
+test against a word it already read, and it means an app can decide whether to
+draw a battery indicator at all before asking a question the device might refuse.
+The alternative — ask everyone, treat `unsupported_opcode` as "no battery" — is
+the same information one round trip later and reads identically to a device that
+is broken.
+
+The costs are real. Bit 8 is the first capability past the eight the
+advertisement carries (SPEC §3.3), so this is the first role a scanner cannot
+see before connecting; the record has one reserved byte and six reserved
+validity bits and nothing else, so anything richer — a voltage after all, a
+current draw, a time-to-empty estimate — is a later opcode rather than a later
+field; and there is deliberately no way to ask "tell me when it gets low",
+because that is a threshold, a hysteresis and a subscription for a question
+`GET_POWER` answers in one round trip.
+
+---
+
+## 10. Why aiding is a transfer, and why it is not on Control
+
+A GNSS receiver with no current orbit data reads it from the satellites, at
+50 bits per second, and takes tens of seconds to finish. Under a grandstand or
+between two transporters it may never finish. The phone in the driver's pocket
+can fetch the same data over the network in a moment, so the only question was
+how it reaches the device.
+
+### 10.1 Control could carry it, and should not
+
+SPEC §11.3 names new control opcodes as this protocol's general-purpose extension
+point, and by that reading aiding is three opcodes and nothing else. The
+arithmetic is what rules it out. A predicted-orbit product runs to tens of
+kilobytes; SPEC §9 allows a client one outstanding request; so a 40 kB transfer is
+about 164 write-and-wait round trips, several seconds of wall clock, and a
+control plane that can answer nothing else while it runs — no `TIME_SYNC`, no
+subscription change, no rate change.
+
+Written without a response on its own characteristic, the same transfer is a
+few hundred milliseconds and blocks nothing.
+
+That is a new attribute in a table SPEC §4.1 calls fixed, which would be a VTP/2
+change after 1.0 and is an ordinary one before it. It is being made now
+because it cannot be made later.
+
+### 10.2 Dropping the per-write response costs nothing
+
+A Write Command has no reply, so the obvious objection is that the device
+cannot say "that chunk was malformed". It never needed to. A chunk is
+legitimate only after `GNSS_AID_BEGIN` answered `ok`, which fixed the shape of
+the whole transfer, so the device can tell a chunk it cannot place from one it
+can without being asked — and every outcome a client acts on arrives at
+`GNSS_AID_COMMIT`, on the plane that already has tags, typed failures and a
+lifecycle.
+
+The division is the one SPEC §14.5 states: the fast path carries bytes, and
+the control plane carries meaning.
+
+### 10.3 Loss becomes a number, as it does everywhere else
+
+Without acknowledgement per chunk, a lost write is invisible until the whole
+transfer is wrong — the failure mode SPEC §8.3 exists to prevent on the outbound
+streams. So commit reports the lowest index the device did not receive, the
+client resends from there, and the exchange terminates because that index
+strictly advances.
+
+It only works because `chunk_bytes` is fixed for the transfer. With
+variable-length chunks a device cannot place chunk 7 without having received 0
+through 6, and there is no gap to resend — only a transfer to start again.
+
+### 10.4 The bytes are opaque, and that is a real cost
+
+SPEC §1.1 says no receiver may produce a plausible wrong value, and this
+specification has otherwise refused every opportunity to carry something it
+does not understand: equations rather than DBC, enumerated channels rather than
+an expression language, no vendor namespace anywhere. An aiding payload is a
+vendor blob, and pretending otherwise would be worse than admitting it.
+
+Three things bound the damage. The bytes travel client to device, so they enter
+no recording. A wrong payload costs time to first fix, not a corrupted lap. And
+the one thing a client could get wrong without noticing — which format the
+receiver speaks — is the one thing the protocol does carry, as an enumeration
+the device declares rather than a string the client guesses.
+
+What is not bounded by any of that is a device treating aiding as measurement,
+which is why SPEC §14.6 forbids it in those words. Aiding is a plausible position
+arriving from something that is not a sensor; a fix built from one would be
+wrong, plausible, and indistinguishable from a real one.
+
+### 10.5 Nothing is reserved for corrections
+
+Differential corrections were the obvious neighbour: same direction, same
+opacity, same reason the phone has the data and the logger does not. They are
+out of scope, and no slot is held for them.
+
+Holding one would have bought nothing. SPEC §11.4 lets a minor version add an
+`aid_format` member whenever it likes, so there is no collision to get ahead of
+and no compatibility cliff — an allocated value for a format nobody implements
+is a line in a table that means nothing, and a device could declare it and be
+conforming while doing anything at all. The lifecycle is the actual work:
+corrections are continuous for a session rather than one transfer at connect,
+which needs an inbound rate ceiling and rules about airtime against CAN. That
+work is what a future minor version would do, and reserving a number now does
+none of it.
+
+### 10.6 What earlier drafts carried, and this one does not
+
+Aiding went through the same review as the rest of the protocol
+(CHANGELOG.md), and four pieces of its first draft did not survive it. They
+are recorded here because each is the kind of thing a reviewer will propose
+adding back.
+
+**A session number.** Every chunk and the commit echoed a byte from
+`GNSS_AID_BEGIN`, so that a chunk still in flight for a discarded transfer
+could not land in the one that superseded it. But there is no such chunk. ATT
+runs every write a client makes down one ordered L2CAP bearer: whatever the
+client wrote before the new BEGIN arrives before it, and a chunk of the new
+transfer cannot be written before the BEGIN's response reports `chunk_bytes`.
+The session number distinguished transfers the transport already keeps apart —
+state on both sides, echoed in every packet, guarding a race that cannot
+occur. It was the subscription-handle mistake (§8.7) wearing a new name, and
+it went the same way.
+
+**An abort opcode.** `GNSS_AID_ABORT` discarded an open transfer. So does
+opening the next transfer, and so does disconnecting — and a client abandoning
+a transfer is always about to do one or the other, because an open transfer it
+does not intend to finish costs it nothing to leave. An opcode whose whole
+effect the next BEGIN already has is a second name for the same act, and every
+name is conformance surface: with it gone, so are its parameter checks, its
+session validation, and the checks that tested them. `0x14` stays unassigned.
+
+**A `persists` flag.** `gnss_aid_caps` said whether `held_until` survives a
+power cycle, so a client could predict what the device would hold on the
+*next* connection. But a client MUST read `GNSS_AID_INFO` before every
+transfer, and that read answers for the connection it happens on — the only
+one in which the answer is actionable. A prediction about the next boot is a
+value nothing can act on, carried so it could go stale.
+
+**A chunk count at commit.** The commit carried `chunks` so a disagreement
+about the transfer's shape would be caught rather than acted on. The device
+computes the same number from its own `GNSS_AID_BEGIN`, so the parameter could
+only ever agree or be refused — and the CRC already backstops every
+disagreement that matters, including the ones the count cannot see. Carrying
+it also required a paragraph about commits whose count contradicts the
+transfer, a `bad_params` rule for it, and a proof that the exchange still
+terminates. Four bytes of parameter bought a page of failure modes.
+
+What survived is the part that does the work: one transfer open at a time, a
+fixed `chunk_bytes` so index-to-offset is arithmetic, `first_missing` so loss
+is a number, and a CRC-32 stated exactly. The transfer protocol is the
+minimum that makes write-without-response recoverable, and nothing else.
 
 ---
 

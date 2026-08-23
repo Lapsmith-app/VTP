@@ -36,17 +36,21 @@ python3 conformance/run.py --impl "./my-decoder" --roles gps
 | `can` | `can_batch` — implies `control` |
 | `imu` | `imu_batch` |
 | `monitor` | `monitor_list`, `monitor_update` — implies `control` |
+| `power` | `power_state` — implies `control` |
+| `gnss_aiding` | `gnss_aid_caps`, `aid_begin_result`, `aid_commit_result` — implies `gps`, `control` |
 
 Only Info is unconditional. The Control characteristic is a capability
 (`capabilities` bit 4 — §4.1 has the matrix), not a requirement, so a GPS-only
 device is not asked for control responses; `core` used to carry them, which
 left such a device failing conformance for records it had never claimed.
 
-`can` and `monitor` imply `control` because §4.1 makes that implication
-normative: a CAN device is reached through `CAN_SUBSCRIBE` and a Monitor device
-declares its channels through `MONITOR_LIST`, so neither is usable without the
-Control characteristic. This table and that matrix are the same rule stated
-once each; the runner used to imply what the specification did not say.
+The implications come from §4.1's matrix, which makes them normative: a CAN
+device is reached through `CAN_SUBSCRIBE`, a Monitor device declares its
+channels through `MONITOR_LIST`, a device's supply is read with `GET_POWER`,
+and an aiding transfer is opened and closed on Control — so none of the four
+is usable without the Control characteristic. This table and that matrix are
+the same rule stated once each; the runner used to imply what the
+specification did not say.
 
 Omit `--roles` to run everything, which is what a full implementation should
 do. The summary line names the scope either way, because a green run over one

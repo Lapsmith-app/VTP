@@ -190,6 +190,59 @@ void vtp_monitor_value_at(const uint8_t *buf, uint8_t index,
  * lower bound on the magnitude, not a measurement. */
 #define VTP_IMU_FLAG_SATURATED 0x04
 
+/* ---- Aiding ----------------------------------------------------------- */
+
+/* SPEC.md §14.2 -- what aiding a device accepts, and what it already holds.
+ *
+ * `format` names the receiver's format, not this protocol's: the bytes of a
+ * transfer are opaque here and a client MUST NOT send a format the device did
+ * not declare. `held_until` is gated, because "holds nothing" and "holds a
+ * window ending at the Unix epoch" are different answers. */
+typedef struct {
+    uint8_t  validity;
+    uint8_t  format;
+    uint16_t reserved_2;   /* Appendix A holds it; MUST be ignored on receive */
+    uint32_t max_bytes;
+    int64_t  held_until;   /* ms, Unix epoch -- same as gps_fix.t_utc */
+} vtp_gnss_aid_caps_t;
+
+static inline int vtp_aid_valid(const vtp_gnss_aid_caps_t *c, uint8_t bit) {
+    return (c->validity & bit) != 0;
+}
+
+/* SPEC.md §14.3 -- the detail of GNSS_AID_BEGIN. `chunk_bytes` is fixed for
+ * the whole transfer so that index-to-offset is arithmetic; without that a
+ * device could not place a resent chunk. */
+typedef struct {
+    uint16_t chunk_bytes;
+    uint16_t reserved_2;   /* Appendix A holds it; MUST be ignored on receive */
+} vtp_aid_begin_result_t;
+
+/* SPEC.md §14.4 -- the detail of GNSS_AID_COMMIT. `first_missing` is gated:
+ * chunk 0 is a real index, so a cleared bit is the only way to say "nothing is
+ * missing" without it reading as "chunk 0 is". */
+typedef struct {
+    uint8_t  validity;
+    uint8_t  result;
+    uint16_t first_missing;
+} vtp_aid_commit_result_t;
+
+static inline int vtp_commit_valid(const vtp_aid_commit_result_t *c, uint8_t bit) {
+    return (c->validity & bit) != 0;
+}
+
+/* Non-zero when the value is one this build recognises. A false result means
+ * UNKNOWN and MUST NOT be treated as any particular member (SPEC.md §11.4). */
+int vtp_aid_format_known(uint8_t format);
+int vtp_aid_result_known(uint8_t result);
+
+int vtp_decode_gnss_aid_caps(const uint8_t *buf, size_t len,
+                             vtp_gnss_aid_caps_t *out, const char **err);
+int vtp_decode_aid_begin_result(const uint8_t *buf, size_t len,
+                                vtp_aid_begin_result_t *out, const char **err);
+int vtp_decode_aid_commit_result(const uint8_t *buf, size_t len,
+                                 vtp_aid_commit_result_t *out, const char **err);
+
 /* SPEC.md §9 -- the envelope of every Control response. `detail` points into
  * the caller's buffer and is non-NULL only when status is ok; its shape is
  * decided by the opcode, and §11.3 lets a minor version add opcodes carrying
@@ -208,6 +261,33 @@ int vtp_status_known(uint8_t status);
 
 int vtp_decode_control_response(const uint8_t *buf, size_t len,
                                 vtp_control_response_t *out, const char **err);
+
+/* ---- Power ------------------------------------------------------------ */
+
+/* SPEC.md §9.7 -- the detail of a GET_POWER response. Measured when the
+ * request arrives, so it carries no timestamp of its own.
+ *
+ * The two fields are gated separately because a device knows them separately:
+ * one on the car's ignition feed knows it is on external power and has no
+ * charge to report, and one whose gauge has failed knows the opposite. As
+ * everywhere else, a cleared bit means absent -- and the source enum has no
+ * zero member, so a zeroed byte can never pass for mains. */
+typedef struct {
+    uint8_t validity;
+    uint8_t source;      /* enum power_source */
+    uint8_t percent;     /* 0..100 */
+} vtp_power_state_t;
+
+static inline int vtp_power_valid(const vtp_power_state_t *p, uint8_t bit) {
+    return (p->validity & bit) != 0;
+}
+
+/* Non-zero when the source value is one this build recognises. A false result
+ * means UNKNOWN and MUST NOT be treated as any particular supply state. */
+int vtp_power_source_known(uint8_t source);
+
+int vtp_decode_power_state(const uint8_t *buf, size_t len,
+                           vtp_power_state_t *out, const char **err);
 
 /* SPEC.md §9.5 -- two readings of the device clock, so a client can take the
  * device's own processing time out of the round trip and bound its error. */

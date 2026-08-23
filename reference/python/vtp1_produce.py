@@ -46,6 +46,14 @@ def produce(record, data):
         return enc.encode_control_response(data)
     if record == "time_sync":
         return enc.encode_time_sync(data)
+    if record == "power_state":
+        return enc.encode_power_state(data)
+    if record == "gnss_aid_caps":
+        return enc.encode_gnss_aid_caps(data)
+    if record == "aid_begin_result":
+        return enc.encode_aid_begin_result(data)
+    if record == "aid_commit_result":
+        return enc.encode_aid_commit_result(data)
     raise LookupError(record)
 
 

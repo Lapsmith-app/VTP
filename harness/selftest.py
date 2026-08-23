@@ -44,6 +44,14 @@ CAUGHT_BY = {
     "inert_cccd_rejected": "gatt.inert_cccd",
     "implication_broken": "info.capability_implications",
     "opcode_capability_late": "control.opcode_capability",
+    "aid_stale_held_until": "aiding.declaration",
+    "aid_chunk_exceeds_mtu": "aiding.chunk_size",
+    "aid_accepts_undeclared_format": "aiding.rejects_undeclared_format",
+    "aid_accepts_oversized": "aiding.rejects_oversized",
+    "aid_applied_with_missing_index": "aiding.transfer",
+    "aid_reports_first_chunk_missing": "aiding.reports_missing_chunk",
+    "aid_ignores_crc": "aiding.detects_corruption",
+    "aid_begin_keeps_transfer": "aiding.begin_supersedes",
     "rate_not_applied": "control.rate_readback",
     "info_reserved_nonzero": "info.reserved_fields",
     "seq_starts_at_one": "seq.first_is_zero",
@@ -80,6 +88,11 @@ CAUGHT_BY = {
     "rate_ceiling_ignored": "control.rate_ceiling",
     "info_rate_above_ceiling": "info.rate_ceiling",
     "inert_control_accepts_writes": "gatt.inert_control_rejects_writes",
+    "power_unsupported": "power.get_power",
+    "power_percent_impossible": "power.percent_in_range",
+    "power_stale_behind_bit": "power.absent_fields_zero",
+    "power_declared_but_empty": "power.something_valid",
+    "power_reserved_nonzero": "power.reserved",
 }
 
 #: A MUST or SHOULD check with no seeded fault against it, and why there is
@@ -296,12 +309,12 @@ def _coverage_problems():
 #: matching, a refusal newly read as "not applicable" -- looks exactly like a
 #: passing run. This is the baseline that makes that visible.
 EXPECTED_SKIPS = {
+    "control.opcode_capability":
+        "this profile owns every opcode in this version",
     "gatt.inert_cccd":
         "this profile declares every capability that has a CCCD",
     "gatt.inert_control_rejects_writes":
         "this profile declares Control",
-    "control.opcode_capability":
-        "this profile owns every opcode in this version",
     "can.matches_subscription":
         "the harness subscribes with a mask that matches every frame",
 }

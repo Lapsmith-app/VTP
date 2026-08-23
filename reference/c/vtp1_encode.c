@@ -389,6 +389,75 @@ int vtp_encode_monitor_update(const vtp_monitor_header_t *h,
     return (int)needed;
 }
 
+int vtp_encode_gnss_aid_caps(const vtp_gnss_aid_caps_t *c, uint8_t *out, size_t cap) {
+    if (cap < VTP_GNSS_AID_CAPS_SIZE) return -1;
+    memset(out, 0, VTP_GNSS_AID_CAPS_SIZE);
+
+    const uint32_t v = KNOWN_BITS(c->validity, VTP_AID_VALIDITY_KNOWN);
+
+    out[VTP_GNSS_AID_CAPS_OFF_VALIDITY] = (uint8_t)v;
+    out[VTP_GNSS_AID_CAPS_OFF_FORMAT]   = c->format;
+    wr32(out + VTP_GNSS_AID_CAPS_OFF_MAX_BYTES, c->max_bytes);
+    wr64(out + VTP_GNSS_AID_CAPS_OFF_HELD_UNTIL,
+         (uint64_t)gate64((uint64_t)c->held_until, v, VTP_AID_VALIDITY_HELD_UNTIL));
+    return VTP_GNSS_AID_CAPS_SIZE;
+}
+
+int vtp_encode_aid_begin_result(const vtp_aid_begin_result_t *b, uint8_t *out, size_t cap) {
+    if (cap < VTP_AID_BEGIN_RESULT_SIZE) return -1;
+    /* SPEC.md 14.3 -- MUST NOT be zero. A transfer that cannot carry a byte,
+     * and indistinguishable to the client from a device that will not say: it
+     * writes chunks of nothing until the commit reports everything missing. */
+    if (b->chunk_bytes == 0) return -1;
+    memset(out, 0, VTP_AID_BEGIN_RESULT_SIZE);
+
+    wr16(out + VTP_AID_BEGIN_RESULT_OFF_CHUNK_BYTES, b->chunk_bytes);
+    return VTP_AID_BEGIN_RESULT_SIZE;
+}
+
+int vtp_encode_aid_commit_result(const vtp_aid_commit_result_t *c, uint8_t *out, size_t cap) {
+    if (cap < VTP_AID_COMMIT_RESULT_SIZE) return -1;
+
+    const uint32_t v = KNOWN_BITS(c->validity, VTP_COMMIT_VALIDITY_KNOWN);
+
+    /* SPEC.md 14.4 -- set if and only if the result is `incomplete`. Set
+     * beside any other result it names a chunk as lost from a transfer that
+     * lost none; clear beside `incomplete` it says something is missing and
+     * refuses to say what, which is the one thing that makes a
+     * write-without-response path recoverable.
+     *
+     * The enum VALUE is deliberately not checked: SPEC.md 11.4 lets a minor
+     * version add results, and the corpus carries an unknown one on purpose. */
+    const int named = (v & VTP_COMMIT_VALIDITY_FIRST_MISSING) != 0;
+    if (named != (c->result == VTP_AID_RESULT_INCOMPLETE)) return -1;
+
+    memset(out, 0, VTP_AID_COMMIT_RESULT_SIZE);
+
+    out[VTP_AID_COMMIT_RESULT_OFF_VALIDITY] = (uint8_t)v;
+    out[VTP_AID_COMMIT_RESULT_OFF_RESULT]   = c->result;
+    wr16(out + VTP_AID_COMMIT_RESULT_OFF_FIRST_MISSING,
+         (uint16_t)gate32(c->first_missing, v, VTP_COMMIT_VALIDITY_FIRST_MISSING));
+    return VTP_AID_COMMIT_RESULT_SIZE;
+}
+
+int vtp_encode_power_state(const vtp_power_state_t *p, uint8_t *out, size_t cap) {
+    /* The device side of SPEC.md 9.7's range rule: a percent above 100 is
+     * refused here, and deliberately NOT rejected by the decoder -- the
+     * record is well formed, so a receiver decodes it and flags the value. */
+    if ((p->validity & VTP_POWER_VALIDITY_PERCENT) && p->percent > 100) return -1;
+    if (cap < VTP_POWER_STATE_SIZE) return -1;
+    memset(out, 0, VTP_POWER_STATE_SIZE);
+
+    const uint32_t v = KNOWN_BITS(p->validity, VTP_POWER_VALIDITY_KNOWN);
+
+    out[VTP_POWER_STATE_OFF_VALIDITY] = (uint8_t)v;
+    out[VTP_POWER_STATE_OFF_SOURCE] =
+         (uint8_t)gate32(p->source, v, VTP_POWER_VALIDITY_SOURCE);
+    out[VTP_POWER_STATE_OFF_PERCENT] =
+         (uint8_t)gate32(p->percent, v, VTP_POWER_VALIDITY_PERCENT);
+    return VTP_POWER_STATE_SIZE;
+}
+
 int vtp_encode_control_response(const vtp_control_response_t *r,
                                 uint8_t *out, size_t cap) {
     /* An encoder must not emit what its own decoder rejects. SPEC.md §9. */

@@ -415,7 +415,8 @@ def spec_tables(schema):
 
     for name, bm in schema["bitmasks"].items():
         lines = ["| Bit | Name | Meaning |", "| --- | --- | --- |"]
-        for b in bm["bits"]:
+        named = {b["bit"] for b in bm["bits"]}
+        for b in sorted(bm["bits"], key=lambda b: b["bit"]):
             meaning = b.get("desc", "")
             if b.get("implies"):
                 # Rendered here as well as in the 4.1 matrix, because a reader
@@ -425,6 +426,13 @@ def spec_tables(schema):
                           f"**Requires {req}.**"
             lines.append(f"| {b['bit']} | `{b['name']}` | {meaning or '—'} |")
         if "reserved_from" in bm:
+            # A bit below reserved_from that no entry names is a retired
+            # assignment -- reserved exactly like the range above, and listed
+            # so the table accounts for every bit rather than skipping one.
+            for hole in sorted(set(range(bm["reserved_from"])) - named):
+                lines.insert(2 + sum(b < hole for b in named),
+                             f"| {hole} | *reserved* | MUST be zero on "
+                             f"transmit; MUST be ignored on receive |")
             lines.append(f"| {bm['reserved_from']}+ | *reserved* | MUST be zero on transmit; "
                          f"MUST be ignored on receive |")
         out[f"bitmask:{name}"] = "\n".join(lines)
@@ -465,7 +473,8 @@ def spec_tables(schema):
             "can_header": "One per notification",
             "can_record": "Up to 4000 per second",
             "imu_header": "One per notification",
-            "imu_sample": "Up to 833 per second"}
+            "imu_sample": "Up to 833 per second",
+            "power_state": "On request"}
     for name, rec in schema["records"].items():
         mark = ("**Yes** — `ext_count` trailer (§5.5)" if rec.get("extensible")
                 else "No — closed for major version 1")
@@ -524,6 +533,12 @@ def spec_tables(schema):
         where = [f"`{r}.{f['name']}`" for r, rec in schema["records"].items()
                  for f in rec["fields"] if f.get("bitmask") == name]
         span = f"bit {rf}" if rf == top else f"bits {rf}–{top}"
+        # A bit below reserved_from that no entry names is a retired
+        # assignment (capabilities bit 7) and is reserved too, so this table
+        # must account for it or Appendix A under-reports the reserved space.
+        holes = sorted(set(range(rf)) - {b["bit"] for b in bm["bits"]})
+        if holes:
+            span = ", ".join(f"bit {h}" for h in holes) + f", {span}"
         lines.append(f"| {', '.join(where) or '`' + name + '`'} | {span} | "
                      f"{bm.get('reserved_purpose', '—')} |")
     for rname, rec in schema["records"].items():
@@ -617,7 +632,12 @@ def c_header(schema):
             # assigned in a later minor leaves the reserved region by editing
             # the schema and nothing else.
             width = bm["width"] * 8
-            assigned = ((1 << width) - 1) & ~((1 << bm["reserved_from"]) - 1)
+            # From the NAMED bits, not from reserved_from: a bit retired
+            # below the boundary (capabilities bit 7) is reserved too.
+            named = 0
+            for b in bm["bits"]:
+                named |= 1 << b["bit"]
+            assigned = ((1 << width) - 1) & ~named
             suffix = "u" if width <= 32 else "ull"
             L.append(f"#define VTP_{name.upper()}_RESERVED "
                      f"0x{assigned:0{width // 4}X}{suffix}")
@@ -713,10 +733,15 @@ def reserved_mask(schema, bitmask):
     are the only bytes on the wire that a later minor version may redefine.
     """
     spec = schema["bitmasks"][bitmask]
-    rf = spec.get("reserved_from")
-    if rf is None:
+    if "reserved_from" not in spec:
         return (1 << (spec["width"] * 8)) - 1
-    return (1 << rf) - 1
+    # Derived from the NAMED bits rather than from reserved_from, so a bit
+    # retired below the boundary -- capabilities bit 7, which a pre-1.0 draft
+    # assigned -- is reserved exactly like the range above it.
+    known = 0
+    for b in spec["bits"]:
+        known |= 1 << b["bit"]
+    return known
 
 
 def _normalise(schema, record, values):
@@ -879,6 +904,24 @@ def _reserved_case(schema, record, field, value):
         return ({"header": hdr, "values": [val]},
                 encode(schema, "monitor_header", hdr)
                 + encode(schema, "monitor_value", gated))
+    if record == "power_state":
+        return ({field: value}, encode(schema, record, {field: value}))
+    if record == "gnss_aid_caps":
+        # `format` has no zero member (SPEC.md 14.1), so a case about the
+        # reserved bits of another field still has to name a real format.
+        clean = dict(format=1, max_bytes=65536, held_until=0)
+        return (dict(clean, **{field: value}),
+                encode(schema, "gnss_aid_caps", dict(clean, **{field: value})))
+    if record == "aid_commit_result":
+        # `incomplete`, because the reserved-bit case sets every ASSIGNED bit
+        # of the mask alongside the reserved one -- and SPEC.md 14.4 sets
+        # first_missing if and only if the result is incomplete. With `applied`
+        # here the corpus required a conforming encoder to emit a record the
+        # specification forbids: a chunk reported lost from a transfer that
+        # succeeded, which is the §1.1 failure this record is shaped against.
+        clean = dict(result=2, first_missing=7)
+        return (dict(clean, **{field: value}),
+                encode(schema, "aid_commit_result", dict(clean, **{field: value})))
     sys.exit(f"reserved_bit_cases: no builder for record {record!r}; a bitmask "
              f"field was added and its producer case cannot be generated")
 
@@ -918,7 +961,13 @@ def reserved_bit_cases(schema):
             # + solution_epoch, which is a real receiver's flags rather than an
             # impossible one. The case is about the RESERVED bits, and a
             # baseline the encoder must refuse for another reason tests nothing.
-            assigned = LEGAL_ASSIGNED.get(bm, (1 << reserved_from) - 1)
+            named = 0
+            for b in spec["bits"]:
+                named |= 1 << b["bit"]
+            # From the NAMED bits, not (1 << reserved_from) - 1: a bit retired
+            # below the boundary (capabilities bit 7) is reserved, and a
+            # baseline carrying it would be a payload the encoder must refuse.
+            assigned = LEGAL_ASSIGNED.get(bm, named)
             # The TOP reserved bit, because an encoder masking at the wrong
             # width passes on the lowest reserved bit and fails on the highest.
             dirty = assigned | (1 << top)
@@ -1869,6 +1918,249 @@ def vectors(schema):
                         dict(slot=0, validity=PRESENT, value=2)],
                        must_reject="duplicate-slot"))
 
+    # ---- Power -----------------------------------------------------------
+    P = {b["name"]: 1 << b["bit"]
+         for b in schema["bitmasks"]["power_validity"]["bits"]}
+    all_power = P["source"] | P["percent"]
+    files["power.json"] = [
+        case(schema, "power_state", "running-on-its-battery",
+             dict(validity=all_power, source=2, percent=63),
+             "A logger on its own pack, a little under two thirds through it. "
+             "Both fields valid, which is the ordinary answer."),
+        case(schema, "power_state", "external-supply-no-battery",
+             dict(validity=P["source"], source=1),
+             "A logger wired to the car's ignition feed with no pack at all. "
+             "It reports `external` and clears the percent bit; a client MUST "
+             "render the charge as unavailable and MUST NOT read 0% out of the "
+             "byte.",
+             note="This is the case `source` exists for. Without it such a "
+                  "device has to report 100% forever -- a magic value meaning "
+                  "`not applicable` in the one field a client draws as a gauge, "
+                  "which is what SPEC.md 1.1 forbids everywhere else. The "
+                  "absent percent is what says there is no battery; `external` "
+                  "on its own does not."),
+        case(schema, "power_state", "charged-on-external",
+             dict(validity=all_power, source=4, percent=100),
+             "External supply present and the pack no longer taking charge. "
+             "`charged` is a distinct member so a device with the information "
+             "does not have to keep saying `charging`.",
+             note="percent is 100, the top of the field's range and a legal "
+                  "value; 101 is the first that is not (SPEC.md 9.7)."),
+        case(schema, "power_state", "gauge-failed-mid-session",
+             dict(validity=P["source"], source=2),
+             "A device that knows it is on its battery and has lost the gauge "
+             "that says how much is left. The honest answer is one bit set and "
+             "one clear, which is why percent has a validity bit at all.",
+             note="A device that answered 0% here would be reporting a flat "
+                  "pack, and a device that answered 100% a full one. Both are "
+                  "measurements it does not have."),
+        case(schema, "power_state", "nothing-determinable",
+             dict(validity=0),
+             "Both bits clear. Decodable, and a device that declares the "
+             "`power` capability MUST NOT answer this way -- with nothing valid "
+             "it has said what a device without the capability says by not "
+             "declaring it.",
+             note="Not a reject: the record is well formed, and SPEC.md 1.1 is "
+                  "about a receiver never producing a plausible wrong value, "
+                  "which an all-absent decode is the opposite of. The rule this "
+                  "breaks is the device's, and the harness is what asks it."),
+        case(schema, "power_state", "stale-values-behind-cleared-bits",
+             dict(validity=0, source=2, percent=63),
+             "A non-conforming device that clears both validity bits and leaves "
+             "the last reading in the bytes. A decoder MUST report both absent "
+             "on the strength of the mask alone, and MUST NOT read 63% out of "
+             "them.",
+             canonical=False,
+             note="Not byte-canonical, so the round-trip asserts that a "
+                  "conforming encoder NORMALISES these bytes to zero. Both bits "
+                  "are clear in one case deliberately -- this is the only "
+                  "coverage the power_state encoder's gating rule gets, and a "
+                  "case clearing one would leave the other gate untested."),
+        case(schema, "power_state", "unknown-source-value",
+             dict(validity=all_power, source=9, percent=63),
+             "A source member from a later minor version. A decoder MUST report "
+             "it unknown and MUST NOT fall back to `discharging` -- it still "
+             "has the percentage, and inventing the one field it does not have "
+             "is what SPEC.md 1.1 forbids."),
+        case(schema, "power_state", "reserved-byte-nonzero",
+             dict(validity=all_power, source=2, percent=63, reserved=64),
+             "Byte 3 carries something a future minor assigned. Both halves of "
+             "SPEC.md 2 apply: a decoder MUST ignore it, and a 1.0 encoder MUST "
+             "normalise it to zero.",
+             canonical=False),
+        case(schema, "power_state", "reserved-validity-bit-set",
+             dict(validity=all_power | (1 << 7), source=2, percent=63),
+             "A future minor set power_validity bit 7. A decoder MUST ignore the "
+             "unknown bit and decode both known fields normally, and a VTP/1.0 "
+             "encoder MUST normalise the bit away on transmit (SPEC.md 2).",
+             canonical=False),
+        case(schema, "power_state", "external-supply-with-a-pack",
+             dict(validity=all_power, source=1, percent=40),
+             "Plugged in, with a battery at 40%. `external` claims nothing "
+             "about a battery, so this is an ordinary state rather than a "
+             "contradiction, and both fields are valid together.",
+             note="The build this exists for is a USB-C input and a fuel gauge "
+                  "with no charge-status pin: it knows it is on external power "
+                  "and knows the pack is at 40%, and cannot honestly claim "
+                  "`charging` or `charged`. A device that CAN tell reports one "
+                  "of those instead."),
+        case(schema, "power_state", "percent-above-full",
+             dict(validity=all_power, source=2, percent=200),
+             "200%, a device-side violation of SPEC.md 9.7. The record is "
+             "well-formed, so a receiver MUST decode it -- and SHOULD report "
+             "the value as a device defect rather than clamp it: a client "
+             "that clamps shows a full battery on a device that has lost "
+             "track of its own pack.",
+             no_roundtrip=True,
+             note="No round-trip: a conforming encoder refuses this percent, "
+                  "which is the device-side half of the same rule."),
+        {"name": "short-payload",
+         "desc": "3 bytes. A truncated control response MUST be rejected whole.",
+         "record": "power_state",
+         "hex": encode(schema, "power_state", dict(validity=0))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "long-payload",
+         "desc": "5 bytes. power_state is a fixed-size record with no extension "
+                 "mechanism, so trailing bytes MUST be rejected.",
+         "record": "power_state",
+         "hex": (encode(schema, "power_state", dict(validity=0))
+                 + b"\x00").hex(),
+         "must_reject": "length"},
+    ]
+
+    # ---- Aiding ----------------------------------------------------------
+    # SPEC.md 14. Three records reach the wire: what the device declares, what
+    # opening a transfer returns, and what closing one reports.
+    AV = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["aid_validity"]["bits"]}
+    CV = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["commit_validity"]["bits"]}
+    files["aiding.json"] = [
+        case(schema, "gnss_aid_caps", "caps-holding-a-window",
+             dict(validity=AV["held_until"], format=1,
+                  max_bytes=131_072, held_until=1_766_000_000_000),
+             "A device that accepts UBX-MGA and is already holding orbit data "
+             "valid to a stated instant. What it holds NOW is the whole "
+             "declaration: a client learns what survives a power cycle by "
+             "asking again on the next connection (SPEC.md 14.2).",
+             note="held_until uses the same type and units as gps_fix.t_utc, so a "
+                  "client comparing the two converts nothing."),
+        case(schema, "gnss_aid_caps", "caps-holding-nothing",
+             dict(validity=0, format=1, max_bytes=65_536),
+             "A device with no aiding loaded. held_until is zero AND its validity bit "
+             "is clear; a client MUST conclude 'holds nothing', never 'valid until the "
+             "Unix epoch'.",
+             note="validity, format and max_bytes all differ from "
+                  "caps-holding-a-window's values. Without that a decoder reading one "
+                  "field from another's offset passes the whole corpus -- a hole "
+                  "mutation testing has found in look-alike field pairs before."),
+        case(schema, "gnss_aid_caps", "caps-stale-value-behind-cleared-bit",
+             dict(validity=0, format=1,
+                  max_bytes=131_072, held_until=1_766_000_000_000),
+             "A non-conforming device that clears the held_until bit but leaves the "
+             "previous window in the bytes. A decoder MUST report held_until absent on "
+             "the strength of the bit alone.",
+             canonical=False,
+             note="Not byte-canonical, so the round-trip also asserts that a "
+                  "conforming encoder normalises the field to zero. This is the only "
+                  "coverage the gnss_aid_caps encoder gate gets."),
+        case(schema, "gnss_aid_caps", "caps-unknown-format",
+             dict(validity=0, format=9, max_bytes=131_072),
+             "A format from a later minor version. A decoder MUST report it unknown, "
+             "and a client MUST NOT open a transfer it cannot fill (SPEC.md 14.1)."),
+        case(schema, "gnss_aid_caps", "caps-reserved-bytes-set",
+             dict(validity=AV["held_until"], format=1,
+                  reserved_2=0x5A5A, max_bytes=131_072,
+                  held_until=1_766_000_000_000),
+             "A later minor assigned gnss_aid_caps.reserved_2 -- the bytes that held "
+             "aid_flags in a pre-1.0 draft. A decoder MUST read them and report them, "
+             "MUST NOT reject the record, and MUST decode every known field normally; "
+             "a VTP/1.0 encoder MUST normalise them to zero.",
+             canonical=False,
+             note="A decoder that omits a reserved field from its output while "
+                  "another reads it has two references disagreeing about the same "
+                  "payload -- the defect class this corpus exists to prevent."),
+        {"name": "caps-short-payload",
+         "desc": "15 bytes. A truncated control response MUST be rejected whole.",
+         "record": "gnss_aid_caps",
+         "hex": encode(schema, "gnss_aid_caps", dict(format=1))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "caps-long-payload",
+         "desc": "17 bytes. gnss_aid_caps is fixed-size with no extension mechanism, "
+                 "so trailing bytes MUST be rejected.",
+         "record": "gnss_aid_caps",
+         "hex": (encode(schema, "gnss_aid_caps", dict(format=1)) + b"\x00").hex(),
+         "must_reject": "length"},
+
+        case(schema, "aid_begin_result", "begin-at-full-mtu",
+             dict(session=7, chunk_bytes=241),
+             "A transfer opened at a 247-byte ATT MTU: 247 - 3 bytes of Write Command "
+             "header - 3 bytes of chunk header (SPEC.md 14.3).",
+             note="chunk_bytes is fixed for the transfer because index-to-offset must "
+                  "be arithmetic; SPEC.md 14.3 gives the reason."),
+        case(schema, "aid_begin_result", "begin-at-minimum-mtu",
+             dict(session=1, chunk_bytes=94),
+             "The same transfer at the 100-byte minimum ATT MTU this protocol requires. "
+             "A device MUST NOT return a chunk_bytes a client cannot write."),
+
+        case(schema, "aid_begin_result", "begin-reserved-byte-set",
+             dict(session=7, chunk_bytes=241, reserved_3=0xA5),
+             "The same for aid_begin_result.reserved_3: read, reported, and "
+             "normalised away by a VTP/1.0 encoder on transmit.",
+             canonical=False),
+        {"name": "begin-short-payload",
+         "desc": "3 bytes. A truncated begin result MUST be rejected whole.",
+         "record": "aid_begin_result",
+         "hex": encode(schema, "aid_begin_result", dict(session=7, chunk_bytes=241))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "begin-long-payload",
+         "desc": "5 bytes. aid_begin_result is fixed-size, so trailing bytes MUST be "
+                 "rejected.",
+         "record": "aid_begin_result",
+         "hex": (encode(schema, "aid_begin_result", dict(session=7, chunk_bytes=241))
+                 + b"\x00").hex(),
+         "must_reject": "length"},
+
+        case(schema, "aid_commit_result", "commit-applied",
+             dict(validity=0, result=1, first_missing=0),
+             "Every chunk arrived, the CRC matched, and the receiver took the data. The "
+             "first_missing bit is clear, so a decoder MUST report the field absent "
+             "rather than reading chunk 0 as missing."),
+        case(schema, "aid_commit_result", "commit-incomplete",
+             dict(validity=CV["first_missing"], result=2, first_missing=113),
+             "Chunks were lost on a write-without-response path. The client resends "
+             "from index 113 and commits again; the transfer stays open (SPEC.md 14.4)."),
+        case(schema, "aid_commit_result", "commit-bad-crc",
+             dict(validity=0, result=3, first_missing=0),
+             "Every chunk arrived and the CRC-32 does not match. Nothing is missing, so "
+             "there is no index to resend from and the transfer closes."),
+        case(schema, "aid_commit_result", "commit-rejected",
+             dict(validity=0, result=4, first_missing=0),
+             "The transfer was intact and the receiver refused it -- the client sent "
+             "well-formed bytes that this receiver will not take."),
+        case(schema, "aid_commit_result", "commit-stale-index-behind-cleared-bit",
+             dict(validity=0, result=1, first_missing=113),
+             "A non-conforming device reporting `applied` while leaving the previous "
+             "commit's missing index in the bytes. A decoder MUST report first_missing "
+             "absent, and MUST NOT tell a user that chunk 113 was lost from a transfer "
+             "that succeeded.",
+             canonical=False,
+             note="The only coverage the aid_commit_result encoder gate gets."),
+        case(schema, "aid_commit_result", "commit-unknown-result",
+             dict(validity=0, result=9, first_missing=0),
+             "A result from a later minor version. A decoder MUST report it unknown and "
+             "MUST NOT coerce it to `applied` (SPEC.md 11.4)."),
+        {"name": "commit-short-payload",
+         "desc": "3 bytes. A truncated commit result MUST be rejected whole.",
+         "record": "aid_commit_result",
+         "hex": encode(schema, "aid_commit_result", dict(result=1))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "commit-long-payload",
+         "desc": "5 bytes. aid_commit_result is fixed-size, so trailing bytes MUST be "
+                 "rejected.",
+         "record": "aid_commit_result",
+         "hex": (encode(schema, "aid_commit_result", dict(result=1)) + b"\x00").hex(),
+         "must_reject": "length"},
+    ]
+
     # ---- Control response envelope ---------------------------------------
     def resp(opcode, tag, status, detail=b""):
         return bytes([opcode, tag, status]) + detail
@@ -1984,6 +2276,35 @@ def vectors(schema):
     # emit a perfectly valid frame for a DIFFERENT one, and no decode input
     # reaches that.
     files["encoders.json"] = [
+        {"name": "power-percent-above-full",
+         "record": "power_state", "must_refuse": True,
+         "desc": "SPEC.md 9.7 -- a percent of 200 with its validity bit set. "
+                 "The device-side half of the range rule: the decode corpus "
+                 "carries the same bytes and requires a receiver to decode "
+                 "and flag them, so the refusal lives here.",
+         "input": dict(validity=2, source=0, percent=200)},
+        {"name": "aid-begin-zero-chunk-size",
+         "record": "aid_begin_result", "must_refuse": True,
+         "desc": "A chunk size of zero. SPEC.md 14.3 forbids it, and a client "
+                 "cannot tell it from a device that will not say: it writes "
+                 "chunks carrying nothing until the commit reports every one "
+                 "of them missing.",
+         "input": dict(chunk_bytes=0)},
+        {"name": "aid-commit-index-without-incomplete",
+         "record": "aid_commit_result", "must_refuse": True,
+         "desc": "first_missing named beside `applied`. SPEC.md 14.4 sets the "
+                 "bit if and only if the result is `incomplete`, so this "
+                 "reports a chunk lost from a transfer that lost none -- a "
+                 "plausible wrong value a client will show a user.",
+         "input": dict(validity=1, result=1, first_missing=7)},
+        {"name": "aid-commit-incomplete-without-index",
+         "record": "aid_commit_result", "must_refuse": True,
+         "desc": "`incomplete` with the first_missing bit clear. The device "
+                 "says something is missing and refuses to say what, so the "
+                 "client has no index to resend from -- the one thing that "
+                 "makes a write-without-response path recoverable (SPEC.md "
+                 "14.4).",
+         "input": dict(validity=0, result=2, first_missing=0)},
         {"name": "can-id-above-arbitration-field",
          "record": "can_batch", "must_refuse": True,
          "desc": "An identifier of 0x3FFFFFFF. MUST be refused, not masked: "

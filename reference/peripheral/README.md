@@ -351,6 +351,32 @@ a device is allowed to present. This peripheral can present all three:
 | `control` | Control only | The common-but-incoherent arrangement §10.2 warns about |
 | `none` | Nothing | The client does not *require* encryption either |
 
+### What the posture actually enforces
+
+**The table above is what this peripheral asks for, not everywhere what it
+gets.** bless 0.3.0 — the pinned backend, and the newest that exists —
+translates the encryption permission only for some characteristics, and the
+rest are served in clear with no error anywhere in the sequence. The peripheral
+names the gap in a `NOT ENCRYPTED on this backend` warning at startup; these
+are the facts behind it, read from the backend sources:
+
+| Backend | Encryption is applied to | So `--encrypt all` leaves in clear |
+| --- | --- | --- |
+| CoreBluetooth (macOS) | reads and both write forms | `gps`, `can`, `imu` — CB permissions do not govern notification delivery |
+| BlueZ (Linux) | `read` and `write` only | `gps`, `can`, `imu`, `aiding` — notify and write-without-response keep their plain flags |
+| WinRT (Windows) | nothing | everything — its permission word is shifted past the bit it tests |
+
+`--encrypt control` is fully enforced on macOS and Linux, because Control
+carries the one property both translate.
+
+This does not change what SPEC.md §10 permits or what a client must support; it
+changes what this peripheral can be used to demonstrate. Treat `--encrypt all`
+here as a statement of intent rather than as a control, and do not use it to
+conclude anything about a client's behaviour against a genuinely encrypted
+device. `reference/peripheral/selftest.py` asserts the table above, so if a
+future bless closes the gap the assertions fail rather than the documentation
+going quietly stale.
+
 A client that passes all three supports encryption without requiring it, which
 is what §10 asks of it. Info stays readable in every posture (§10.2) so a
 client that cannot pair can still identify the device rather than reporting it
