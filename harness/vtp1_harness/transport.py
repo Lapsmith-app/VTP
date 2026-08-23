@@ -468,25 +468,33 @@ class LoopbackTransport(Transport):
                                            -ks[1]["order"]))[1]
             dev._governing = latest_wins
         if "can_duplicate_across_batches" in self.faults:
-            # SPEC.md §9.2 -- a forwarded frame is emitted again in a LATER
-            # batch, bus-arrival timestamp and all. The held frame is only
-            # replayed once a flush has closed its own batch, so the copy is
-            # guaranteed cross-batch -- the shape a per-notification dedup
-            # set cannot see, and passed for exactly that reason. Replayed
-            # while the new batch is still empty, so it becomes that batch's
-            # t_base and keeps its original timestamp on the wire.
+            # SPEC.md §9.2 -- a forwarded frame is emitted again in the NEXT
+            # batch, bus-arrival timestamp and all: cross-batch by
+            # construction, which is the shape a per-notification dedup set
+            # cannot see, and passed for exactly that reason.
+            #
+            # Seeded at the RECORD level, after dt quantisation, not by
+            # replaying the frame through the batching path. dt is 10 us
+            # ticks, so a mid-batch original loses (t - t_base) mod 10 us in
+            # encoding while a replayed copy opening its own batch decodes at
+            # exactly t -- the two copies then agree on t_device_us only when
+            # that remainder happens to be zero, and the fault was caught or
+            # missed on a coin toss. Seeding the copy as the next batch's
+            # t_base, at the original's DECODED time with dt 0, makes the
+            # duplicate byte-provable on every flush.
             dev = self.device
-            orig_frames = dev._due_can_frames
-            state = {"held": None}
-            def duplicating(now, _dev=dev, _orig=orig_frames, _st=state):
-                if _st["held"] is not None and _dev._can_batch_t0 is None:
-                    yield _st["held"]
-                    _st["held"] = None
-                frames = list(_orig(now))
-                yield from frames
-                if frames and _st["held"] is None:
-                    _st["held"] = dict(frames[-1])
-            dev._due_can_frames = duplicating
+            orig_flush = dev._flush_can
+            def duplicating_flush(now, _dev=dev, _orig=orig_flush):
+                t0 = _dev._can_batch_t0
+                last = (dict(_dev._can_pending[-1])
+                        if _dev._can_pending else None)
+                payload = _orig(now)
+                if payload is not None and last is not None and t0 is not None:
+                    _dev._can_batch_t0 = t0 + last["dt"] * 10
+                    last["dt"] = 0
+                    _dev._can_pending.append(last)
+                return payload
+            dev._flush_can = duplicating_flush
         self._connected = True
         self._owed = False
         self._pump = asyncio.create_task(self._run())
