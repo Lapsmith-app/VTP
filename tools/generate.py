@@ -2078,6 +2078,19 @@ def vectors(schema):
              "bit and decode every known field normally, and a VTP/1.0 encoder MUST "
              "normalise it away on transmit (SPEC.md 2).",
              canonical=False),
+        case(schema, "gnss_aid_caps", "caps-reserved-byte-set",
+             dict(validity=AV["held_until"], format=1, flags=AF["persists"],
+                  reserved_3=0x5A, max_bytes=131_072,
+                  held_until=1_766_000_000_000),
+             "A later minor assigned gnss_aid_caps.reserved_3. A decoder MUST read "
+             "the byte and report it, MUST NOT reject the record, and MUST decode "
+             "every known field normally.",
+             canonical=False,
+             note="The C decoder used to omit this field from its struct and print a "
+                  "literal zero while the Python decoder read the byte, so the two "
+                  "references disagreed about the same payload -- the defect class "
+                  "this corpus exists to prevent. No vector carried a non-zero "
+                  "reserved byte, so nothing noticed."),
         {"name": "caps-short-payload",
          "desc": "15 bytes. A truncated control response MUST be rejected whole.",
          "record": "gnss_aid_caps",
@@ -2101,6 +2114,11 @@ def vectors(schema):
              "The same transfer at the 100-byte minimum ATT MTU this protocol requires. "
              "A device MUST NOT return a chunk_bytes a client cannot write."),
 
+        case(schema, "aid_begin_result", "begin-reserved-byte-set",
+             dict(session=7, chunk_bytes=241, reserved_3=0xA5),
+             "The same for aid_begin_result.reserved_3: read, reported, and "
+             "normalised away by a VTP/1.0 encoder on transmit.",
+             canonical=False),
         {"name": "begin-short-payload",
          "desc": "3 bytes. A truncated begin result MUST be rejected whole.",
          "record": "aid_begin_result",

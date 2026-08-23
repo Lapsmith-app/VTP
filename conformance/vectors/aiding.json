@@ -112,6 +112,25 @@
       "expect_roundtrip_hex": "0101010000000200007ccd2d9b010000"
     },
     {
+      "name": "caps-reserved-byte-set",
+      "desc": "A later minor assigned gnss_aid_caps.reserved_3. A decoder MUST read the byte and report it, MUST NOT reject the record, and MUST decode every known field normally.",
+      "record": "gnss_aid_caps",
+      "hex": "0101015a00000200007ccd2d9b010000",
+      "expect": {
+        "validity": 1,
+        "format": 1,
+        "flags": 1,
+        "reserved_3": 90,
+        "max_bytes": 131072,
+        "held_until": 1766000000000,
+        "format_known": true
+      },
+      "expect_absent": [],
+      "note": "The C decoder used to omit this field from its struct and print a literal zero while the Python decoder read the byte, so the two references disagreed about the same payload -- the defect class this corpus exists to prevent. No vector carried a non-zero reserved byte, so nothing noticed.",
+      "canonical": false,
+      "expect_roundtrip_hex": "0101010000000200007ccd2d9b010000"
+    },
+    {
       "name": "caps-short-payload",
       "desc": "15 bytes. A truncated control response MUST be rejected whole.",
       "record": "gnss_aid_caps",
@@ -147,6 +166,19 @@
         "chunk_bytes": 94,
         "reserved_3": 0
       }
+    },
+    {
+      "name": "begin-reserved-byte-set",
+      "desc": "The same for aid_begin_result.reserved_3: read, reported, and normalised away by a VTP/1.0 encoder on transmit.",
+      "record": "aid_begin_result",
+      "hex": "07f100a5",
+      "expect": {
+        "session": 7,
+        "chunk_bytes": 241,
+        "reserved_3": 165
+      },
+      "canonical": false,
+      "expect_roundtrip_hex": "07f10000"
     },
     {
       "name": "begin-short-payload",

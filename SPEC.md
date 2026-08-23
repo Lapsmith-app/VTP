@@ -2388,6 +2388,20 @@ Total: **4 bytes**. All fields little-endian.
 A device MUST set the `first_missing` validity bit if and only if `result` is
 `incomplete`, and MUST report the **lowest** index it did not receive.
 
+`chunks` is redundant with the transfer's own shape — the device already knows
+`⌈total_bytes ÷ chunk_bytes⌉` from the `GNSS_AID_BEGIN` it answered — and it is
+carried so that a disagreement is caught rather than acted on. **A device MUST
+answer `bad_params` to a commit whose `chunks` is not that number**, and MUST
+NOT apply it; the transfer stays open, so a client that miscounted may commit
+again.
+
+It cannot be reported as `incomplete`. A device that has every chunk has no
+index it did not receive, so the `first_missing` it would have to send names a
+chunk it holds — and a client obeying the paragraph above resends that chunk,
+commits again with the same wrong count, and receives the same answer forever.
+The refusal has to be a status, because the disagreement is about a parameter
+rather than about the transfer.
+
 **A result of `incomplete` leaves the transfer open.** The client writes the
 chunks it is missing and commits again, and the exchange terminates because
 `first_missing` strictly advances each time. Every other result closes the

@@ -324,7 +324,11 @@ class VtpDevice:
         # it holds nothing, which is the cleared validity bit rather than a
         # zero -- "valid until the Unix epoch" is a different claim.
         self._aid_held_until = None
-        self._aid_applied = []
+        # A COUNT, not the payloads. Retaining each applied transfer kept up to
+        # AID_MAX_BYTES per commit for the life of the process, with nothing
+        # reading it -- and a client re-pushing aiding on every reconnect is
+        # the normal pattern, not an unusual one.
+        self._aid_applied = 0
 
     # -- clock ------------------------------------------------------------
 
@@ -1058,7 +1062,14 @@ class VtpDevice:
             # is bad_params and not a result: there is no transfer to report on.
             if not self._aid or session != self._aid["session"]:
                 return reply(ST_BAD_PARAMS)
-            return reply(ST_OK, self._aid_commit(chunks, crc))
+            # SPEC.md §14.4 -- `chunks` disagreeing with the transfer's own
+            # shape is a bad parameter, not an incomplete transfer. Reporting
+            # it as `incomplete` means naming a first_missing the device
+            # actually holds, and a client that resends from it commits again
+            # with the same wrong count and never converges.
+            if chunks != self._aid_expected_chunks(self._aid):
+                return reply(ST_BAD_PARAMS)
+            return reply(ST_OK, self._aid_commit(crc))
 
         if opcode == GNSS_AID_ABORT:
             if len(params) != 1:
@@ -1180,7 +1191,7 @@ class VtpDevice:
         t["chunks"][index] = bytes(body)
         return None
 
-    def _aid_commit(self, chunks, crc):
+    def _aid_commit(self, crc):
         """SPEC.md §14.4 — what became of the transfer.
 
         The status of the RESPONSE is ok throughout: the request named an open
@@ -1199,16 +1210,14 @@ class VtpDevice:
                 "first_missing": first_missing or 0,
             })
 
-        # The client's own count disagreeing with the transfer's shape is a
-        # client that lost track, and it is reported as incomplete from the
-        # first index rather than argued about.
         missing = [i for i in range(expected) if i not in t["chunks"]]
-        if chunks != expected or missing:
+        if missing:
             # SPEC.md §14.4 -- the LOWEST index, and the transfer stays open so
             # the client can resend just the gap. That is the whole reason a
-            # write-without-response path is safe to use for this.
-            first = missing[0] if missing else 0
-            return result(AID_RESULT_INCOMPLETE, first)
+            # write-without-response path is safe to use for this. The index is
+            # always one the device genuinely does not hold, so a client
+            # resending from it makes progress on every round.
+            return result(AID_RESULT_INCOMPLETE, missing[0])
 
         data = b"".join(t["chunks"][i] for i in range(expected))
         # SPEC.md §14.4 -- CRC-32 over the reassembled payload, not the chunks.
@@ -1225,8 +1234,13 @@ class VtpDevice:
         applied = self.apply_aiding(data)
         if not applied:
             return result(AID_RESULT_REJECTED)
-        self._aid_applied.append(data)
+        self._aid_applied += 1
         return result(AID_RESULT_APPLIED)
+
+    @property
+    def aid_transfers_applied(self):
+        """Transfers handed to the receiver since this device started."""
+        return self._aid_applied
 
     def apply_aiding(self, data):
         """Hand a completed transfer to the receiver. Overridable.

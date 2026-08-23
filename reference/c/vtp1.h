@@ -258,6 +258,7 @@ typedef struct {
     uint8_t  validity;
     uint8_t  format;
     uint8_t  flags;
+    uint8_t  reserved_3;   /* Appendix A holds it; MUST be ignored on receive */
     uint32_t max_bytes;
     int64_t  held_until;   /* ms, Unix epoch -- same as gps_fix.t_utc */
 } vtp_gnss_aid_caps_t;
@@ -272,6 +273,7 @@ static inline int vtp_aid_valid(const vtp_gnss_aid_caps_t *c, uint8_t bit) {
 typedef struct {
     uint8_t  session;
     uint16_t chunk_bytes;
+    uint8_t  reserved_3;   /* Appendix A holds it; MUST be ignored on receive */
 } vtp_aid_begin_result_t;
 
 /* SPEC.md §14.4 -- the detail of GNSS_AID_COMMIT. `first_missing` is gated:

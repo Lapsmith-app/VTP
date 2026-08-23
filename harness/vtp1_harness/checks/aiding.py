@@ -163,9 +163,12 @@ async def aiding_format(s):
             else f"holds data until {caps['held_until']} ms Unix")
     persists = ("survives a power cycle" if caps["flags"] & _PERSISTS
                 else "does not survive a power cycle")
-    return Observe(f"{name}, ceiling {caps['max_bytes']} bytes, {held}, "
-                   f"{persists}",
-                   format=name, max_bytes=caps["max_bytes"])
+    # RAISED, not returned. Observe is an exception the runner collects; a
+    # returned one is discarded and the check reports PASS with no message, so
+    # the most useful line the role produces never reaches the report.
+    raise Observe(f"{name}, ceiling {caps['max_bytes']} bytes, {held}, "
+                  f"{persists}",
+                  format=name, max_bytes=caps["max_bytes"])
 
 
 @check(id="aiding.chunk_size", section="14.3", phase="aiding", severity="MUST",
@@ -291,6 +294,56 @@ async def aiding_transfer(s):
                    "chunk in a transfer that succeeded",
                    detail=response.detail.hex())
     s.state["aiding_applied"] = True
+
+
+@check(id="aiding.rejects_count_mismatch", section="14.4", phase="aiding",
+       severity="MUST", requires=("gnss_aiding",), adversarial=True,
+       title="A commit whose chunk count contradicts the transfer is refused")
+async def aiding_rejects_count_mismatch(s):
+    session, blob, chunks = await _open_transfer(s)
+    for index, body in enumerate(chunks):
+        await _write_chunk(s, session, index, body)
+
+    # Every chunk arrived; the count says otherwise. SPEC.md §14.4 -- this is
+    # a bad parameter and not an incomplete transfer, and the distinction is
+    # not pedantry: a device that answers `incomplete` has to name a
+    # first_missing it actually holds, and a client resending from it commits
+    # again with the same wrong count and never converges.
+    response = await _control(s).request(
+        refdec.OPCODE["GNSS_AID_COMMIT"],
+        struct.pack("<BHI", session, len(chunks) + 1, zlib.crc32(blob)))
+    if response.ok:
+        result = _detail(response, "aid_commit_result")
+        name = _RESULT.get(result["result"], result["result"])
+        if result["result"] == _RESULT_VALUE["incomplete"]:
+            raise Fail(f"a commit claiming {len(chunks) + 1} chunks against a "
+                       f"{len(chunks)}-chunk transfer was answered incomplete "
+                       f"from index {result['first_missing']}, which the device "
+                       f"holds. A client resends it, commits again with the "
+                       f"same count, and gets the same answer forever",
+                       detail=response.detail.hex())
+        raise Fail(f"a commit whose chunk count contradicts the transfer was "
+                   f"answered ok/{name}. The count is carried so a "
+                   f"disagreement is caught rather than acted on",
+                   detail=response.detail.hex())
+    if response.status_name != "bad_params":
+        raise Fail(f"a contradictory chunk count was answered "
+                   f"{response.status_name}, not bad_params",
+                   response=response.raw.hex())
+
+    # SPEC.md §14.4 -- refused, so nothing was applied and the transfer is
+    # still open. A client that miscounted gets to commit again.
+    response = await _commit(s, session, len(chunks), blob)
+    if not response.ok:
+        raise Fail(f"the corrected commit was answered {response.status_name}. "
+                   f"A refused request MUST NOT have changed the transfer",
+                   response=response.raw.hex())
+    result = _detail(response, "aid_commit_result")
+    if result["result"] == _RESULT_VALUE["incomplete"]:
+        raise Fail(f"the corrected commit reports chunk "
+                   f"{result['first_missing']} missing, so the refused commit "
+                   f"discarded chunks it should not have touched",
+                   detail=response.detail.hex())
 
 
 @check(id="aiding.reports_missing_chunk", section="14.4", phase="aiding",

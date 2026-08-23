@@ -321,9 +321,9 @@ int main(void) {
             vtp_gnss_aid_caps_t c;
             if (vtp_decode_gnss_aid_caps(buf, len, &c, &err)) { reject(err); continue; }
             printf("{\"ok\":true,\"validity\":%u,\"format\":%u,\"flags\":%u,"
-                   "\"reserved_3\":0,\"max_bytes\":%u,\"held_until\":%lld,"
+                   "\"reserved_3\":%u,\"max_bytes\":%u,\"held_until\":%lld,"
                    "\"format_known\":%s,\"absent\":[%s]",
-                   c.validity, c.format, c.flags, c.max_bytes,
+                   c.validity, c.format, c.flags, c.reserved_3, c.max_bytes,
                    (long long)c.held_until,
                    vtp_aid_format_known(c.format) ? "true" : "false",
                    vtp_aid_valid(&c, VTP_AID_VALIDITY_HELD_UNTIL)
@@ -334,8 +334,8 @@ int main(void) {
             vtp_aid_begin_result_t b;
             if (vtp_decode_aid_begin_result(buf, len, &b, &err)) { reject(err); continue; }
             printf("{\"ok\":true,\"session\":%u,\"chunk_bytes\":%u,"
-                   "\"reserved_3\":0",
-                   b.session, b.chunk_bytes);
+                   "\"reserved_3\":%u",
+                   b.session, b.chunk_bytes, b.reserved_3);
             finish(enc, vtp_encode_aid_begin_result(&b, enc, sizeof enc));
 
         } else if (!strcmp(record, "aid_commit_result")) {

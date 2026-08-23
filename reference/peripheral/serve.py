@@ -1000,6 +1000,15 @@ class Peripheral:
                 if self._paints:
                     log.info("  display: paint %.1f ms, pump %.1f ms, %d paints",
                              self._paint_ms, self._pump_ms, self._paints)
+                # Both counters were being maintained and never printed, so a
+                # client whose every chunk was discarded looked identical to
+                # one that sent none -- the same pair of opposite faults the
+                # monitor line below exists to separate.
+                if self.device.aid_transfers_applied or self._aiding_discarded:
+                    log.info("  aiding: transfers applied=%d | chunks "
+                             "discarded=%d",
+                             self.device.aid_transfers_applied,
+                             self._aiding_discarded)
                 monitor_state = self.device.monitor_state()
                 if monitor_state or self._monitor_rejected:
                     supplied = sum(1 for *_, present in monitor_state if present)

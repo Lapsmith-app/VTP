@@ -559,6 +559,12 @@ int vtp_decode_gnss_aid_caps(const uint8_t *b, size_t len,
     o->validity   = b[VTP_GNSS_AID_CAPS_OFF_VALIDITY];
     o->format     = b[VTP_GNSS_AID_CAPS_OFF_FORMAT];
     o->flags      = b[VTP_GNSS_AID_CAPS_OFF_FLAGS];
+    /* Reserved, and READ rather than assumed. A decoder that hard-codes zero
+     * disagrees with one that reads the byte the moment a payload carries a
+     * non-zero value -- which SPEC.md Appendix A explicitly permits a later
+     * minor to send, and which every other reserved field here already
+     * survives (see info.reserved_20). */
+    o->reserved_3 = b[VTP_GNSS_AID_CAPS_OFF_RESERVED_3];
     o->max_bytes  = rd32(b + VTP_GNSS_AID_CAPS_OFF_MAX_BYTES);
     o->held_until = (int64_t)rd64(b + VTP_GNSS_AID_CAPS_OFF_HELD_UNTIL);
     return 0;
@@ -570,6 +576,7 @@ int vtp_decode_aid_begin_result(const uint8_t *b, size_t len,
 
     o->session     = b[VTP_AID_BEGIN_RESULT_OFF_SESSION];
     o->chunk_bytes = rd16(b + VTP_AID_BEGIN_RESULT_OFF_CHUNK_BYTES);
+    o->reserved_3  = b[VTP_AID_BEGIN_RESULT_OFF_RESERVED_3];
     return 0;
 }
 

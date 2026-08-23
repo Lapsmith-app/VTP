@@ -70,6 +70,38 @@ Also in this change:
   The harness is the only mechanical coverage the role has, which is the same
   position Monitor is in and worth stating rather than discovering.
 
+Four defects found by reviewing the above, all in code added by it:
+
+- **A commit whose `chunks` contradicted the transfer never terminated.** With
+  every chunk received but a wrong count, the device answered `incomplete`
+  naming `first_missing` 0 — an index it holds. A client following §14.4
+  resends that chunk, commits again with the same count and gets the same
+  answer forever. §14.4 now says the count is redundant with the transfer's own
+  shape, is carried so a disagreement is caught rather than acted on, and MUST
+  be refused `bad_params` with the transfer left open. It cannot be a result:
+  a device holding everything has no index it did not receive, so the one it
+  would have to send is a falsehood a client acts on. Neither transfer check
+  caught it, because both sent the correct count; `aiding.rejects_count_mismatch`
+  and a seeded fault close that.
+- **The C decoders dropped `reserved_3`.** The structs omitted the field and
+  the CLI printed a literal zero, while the Python decoder read the byte — the
+  two references disagreeing about one payload, which is the defect class this
+  repository exists to prevent. No vector carried a non-zero reserved byte, so
+  nothing noticed. Decoded from the bytes now, as `info.reserved_20` always
+  was, with two vectors that would have caught it.
+- **`aiding.format` returned its `Observe` instead of raising it.** `Observe`
+  is an exception the runner collects, so the observation was constructed and
+  discarded and the check reported PASS with an empty message — losing the one
+  line that tells an implementer the format, the ceiling, what the device holds
+  and whether that survives a power cycle.
+- **The peripheral retained every applied transfer.** `_aid_applied` kept the
+  payload of each commit for the life of the process with nothing reading it,
+  and re-pushing aiding on reconnect is the normal client pattern, not an
+  unusual one. It is a count now, and that count and the discarded-chunk
+  counter both reach the status line — where they separate "this client sent
+  nothing" from "every chunk it sent was discarded", the same pair of opposite
+  faults the monitor line already distinguishes.
+
 Three places where a list had been written out twice, each found by adding the
 seventh characteristic rather than by review:
 

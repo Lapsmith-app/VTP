@@ -324,6 +324,7 @@ FAULTS = {
     "aid_reports_first_chunk_missing": "SPEC.md §14.4 — the gap is always reported as chunk 0",
     "aid_ignores_crc": "SPEC.md §14.4 — a transfer whose CRC does not match is applied anyway",
     "aid_abort_keeps_session": "SPEC.md §14.4 — an aborted transfer is still committable",
+    "aid_accepts_count_mismatch": "SPEC.md §14.4 — a commit whose chunk count contradicts the transfer is applied instead of refused",
 }
 
 
@@ -678,16 +679,23 @@ class LoopbackTransport(Transport):
         return bytes(request[:2]) + params
 
     def _indulge_aiding(self, request):
-        """SPEC.md §14 — a device that takes a GNSS_AID_BEGIN it should refuse.
+        """SPEC.md §14 — a device that takes an aiding request it should refuse.
 
-        Seeded on the REQUEST rather than the response, because both defects
-        are the device agreeing to something: a response-side rewrite would
+        Seeded on the REQUEST rather than the response, because every defect
+        here is the device agreeing to something: a response-side rewrite would
         report `ok` while the device held no session, and the checks would then
         pass or fail on the follow-up rather than on the refusal.
         """
-        if len(request) != 2 + refdec.OPCODE_PARAM_SIZE["GNSS_AID_BEGIN"]:
+        if len(request) < 2:
             return request
-        if request[0] != refdec.OPCODE["GNSS_AID_BEGIN"]:
+        if request[0] == refdec.OPCODE["GNSS_AID_BEGIN"]:
+            return self._indulge_begin(request)
+        if request[0] == refdec.OPCODE["GNSS_AID_COMMIT"]:
+            return self._indulge_commit(request)
+        return request
+
+    def _indulge_begin(self, request):
+        if len(request) != 2 + refdec.OPCODE_PARAM_SIZE["GNSS_AID_BEGIN"]:
             return request
         fmt, total = struct.unpack_from("<BI", request, 2)
         declared = getattr(self.device, "AID_FORMAT", 1)
@@ -701,6 +709,27 @@ class LoopbackTransport(Transport):
             if ceiling is not None and total > ceiling:
                 total = ceiling
         return bytes(request[:2]) + struct.pack("<BI", fmt, total)
+
+    def _indulge_commit(self, request):
+        """SPEC.md §14.4 — the count that contradicts the transfer, taken anyway.
+
+        The device is handed the number it was going to compute for itself, so
+        it never sees the disagreement `chunks` exists to surface. A client
+        that miscounted is told its transfer succeeded.
+        """
+        if "aid_accepts_count_mismatch" not in self.faults:
+            return request
+        if len(request) != 2 + refdec.OPCODE_PARAM_SIZE["GNSS_AID_COMMIT"]:
+            return request
+        transfer = getattr(self.device, "_aid", None)
+        if not transfer:
+            # No open transfer, so the refusal on the way is about the session
+            # and not the count. Left alone, or this fault would also break
+            # the check that asserts an aborted session cannot be committed.
+            return request
+        session, _chunks, crc = struct.unpack_from("<BHI", request, 2)
+        expected = self.device._aid_expected_chunks(transfer)
+        return bytes(request[:2]) + struct.pack("<BHI", session, expected, crc)
 
     def _corrupt_response(self, response, request):
         opcode, status = response[0], response[2]

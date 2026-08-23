@@ -52,6 +52,7 @@ CAUGHT_BY = {
     "aid_reports_first_chunk_missing": "aiding.reports_missing_chunk",
     "aid_ignores_crc": "aiding.detects_corruption",
     "aid_abort_keeps_session": "aiding.abort",
+    "aid_accepts_count_mismatch": "aiding.rejects_count_mismatch",
     "rate_not_applied": "control.rate_readback",
     "info_reserved_nonzero": "info.reserved_fields",
     "seq_starts_at_one": "seq.first_is_zero",
