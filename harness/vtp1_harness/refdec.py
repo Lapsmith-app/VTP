@@ -143,6 +143,9 @@ STATUS = enum_values("status")
 STATUS_VALUE = {name: value for value, name in STATUS.items()}
 CAPABILITIES = bits("capabilities")
 CHANNELS = enum_values("channel")
+AID_FORMATS = enum_values("aid_format")
+AID_RESULT = enum_values("aid_result")
+AID_RESULT_VALUE = {name: value for value, name in AID_RESULT.items()}
 
 # SPEC.md §9.2 — CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK with this mask.
 MASK_EXACT = 0x3FFFFFFF

@@ -3,6 +3,38 @@
   "generated_by": "tools/generate.py",
   "cases": [
     {
+      "name": "aid-begin-zero-chunk-size",
+      "record": "aid_begin_result",
+      "must_refuse": true,
+      "desc": "A chunk size of zero. SPEC.md 14.3 forbids it, and a client cannot tell it from a device that will not say: it writes chunks carrying nothing until the commit reports every one of them missing.",
+      "input": {
+        "session": 1,
+        "chunk_bytes": 0
+      }
+    },
+    {
+      "name": "aid-commit-index-without-incomplete",
+      "record": "aid_commit_result",
+      "must_refuse": true,
+      "desc": "first_missing named beside `applied`. SPEC.md 14.4 sets the bit if and only if the result is `incomplete`, so this reports a chunk lost from a transfer that lost none -- a plausible wrong value a client will show a user.",
+      "input": {
+        "validity": 1,
+        "result": 1,
+        "first_missing": 7
+      }
+    },
+    {
+      "name": "aid-commit-incomplete-without-index",
+      "record": "aid_commit_result",
+      "must_refuse": true,
+      "desc": "`incomplete` with the first_missing bit clear. The device says something is missing and refuses to say what, so the client has no index to resend from -- the one thing that makes a write-without-response path recoverable (SPEC.md 14.4).",
+      "input": {
+        "validity": 0,
+        "result": 2,
+        "first_missing": 0
+      }
+    },
+    {
       "name": "can-id-above-arbitration-field",
       "record": "can_batch",
       "must_refuse": true,
@@ -606,16 +638,16 @@
       "name": "reserved-bits-info-capabilities",
       "record": "info",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- info.capabilities bits 9-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "desc": "SPEC.md 2 -- info.capabilities bits 10-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
         "protocol_major": 1,
         "protocol_minor": 0,
-        "capabilities": 2147484159,
+        "capabilities": 2147484671,
         "gps_rate_hz": 10,
         "gps_max_rate_hz": 10,
         "max_notify_bytes": 244
       },
-      "expect_hex": "0100ff0100000a000a00000000000000000000000000f400"
+      "expect_hex": "0100ff0300000a000a00000000000000000000000000f400"
     },
     {
       "name": "reserved-bits-info-clock-flags",
@@ -758,6 +790,44 @@
         "validity": 131
       },
       "expect_hex": "03000000"
+    },
+    {
+      "name": "reserved-bits-gnss-aid-caps-validity",
+      "record": "gnss_aid_caps",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- gnss_aid_caps.validity bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "format": 1,
+        "max_bytes": 65536,
+        "held_until": 0,
+        "validity": 129
+      },
+      "expect_hex": "01010000000001000000000000000000"
+    },
+    {
+      "name": "reserved-bits-gnss-aid-caps-flags",
+      "record": "gnss_aid_caps",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- gnss_aid_caps.flags bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "format": 1,
+        "max_bytes": 65536,
+        "held_until": 0,
+        "flags": 129
+      },
+      "expect_hex": "00010100000001000000000000000000"
+    },
+    {
+      "name": "reserved-bits-aid-commit-result-validity",
+      "record": "aid_commit_result",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- aid_commit_result.validity bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "result": 2,
+        "first_missing": 7,
+        "validity": 129
+      },
+      "expect_hex": "01020700"
     },
     {
       "name": "control-detail-on-ok",

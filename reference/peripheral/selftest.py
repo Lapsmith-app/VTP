@@ -311,7 +311,13 @@ def main():
     # than only at startup: a posture that leaves something unencrypted took a
     # different path through the permission arithmetic than one that does not,
     # and only the encrypt-everything path had been exercised.
-    streams = {"gps", "can", "imu", "monitor_values"}
+    # Derived from the profile rather than listed again. This was a written-out
+    # set of six names, so a seventh characteristic was conforming, served,
+    # documented -- and left out of the encrypt-everything posture by a
+    # constant nobody thinks to revisit. SPEC.md §10 protects what a device
+    # exposes, and the schema is what says what that is.
+    protectable = {c["name"] for c in dev.enc.SCHEMA["profile"]["characteristics"]
+                   if c["name"] != "info"}
     postures = {p: serve.encrypted_characteristics(p)
                 for p in serve.ENCRYPTION_POSTURES}
     check(postures["none"] == set(),
@@ -319,9 +325,43 @@ def main():
     check(postures["control"] == {"control"},
           f"the control posture MUST protect Control alone, protects "
           f"{postures['control']}")
-    check(postures["all"] == streams | {"control"},
-          f"the all posture MUST protect every stream and Control, protects "
-          f"{postures['all']}")
+    check(postures["all"] == protectable,
+          f"the all posture MUST protect every characteristic but Info, "
+          f"protects {postures['all']} and the profile declares {protectable}")
+    # SPEC.md §10 says what a device may REQUIRE; bless 0.3.0 is what can
+    # actually be required. The gap is invisible at runtime -- the permission
+    # is accepted, the server starts, and the characteristic is writable in
+    # clear -- so it is asserted here or nowhere. If a future bless closes it,
+    # these expectations fail and the warning in serve.py comes out.
+    aiding_props = {c["name"]: set(c["properties"])
+                    for c in dev.enc.SCHEMA["profile"]["characteristics"]}["aiding"]
+    check(aiding_props == {"write-without-response"},
+          f"aiding declares {aiding_props}; the backend expectations below are "
+          f"written against write-without-response alone")
+    check(serve.unenforced_characteristics("all", "winrt") == protectable,
+          "winrt shifts the permission word past the bit it is testing, so it "
+          "enforces nothing; unenforced_characteristics must say so")
+    check(serve.unenforced_characteristics("all", "bluezdbus")
+          == {"gps", "can", "imu", "aiding"},
+          f"bluezdbus converts only READ and WRITE, so the notify streams and "
+          f"aiding go unprotected; got "
+          f"{serve.unenforced_characteristics('all', 'bluezdbus')}")
+    check(serve.unenforced_characteristics("all", "corebluetooth")
+          == {"gps", "can", "imu"},
+          f"corebluetooth covers both write forms but not notification "
+          f"delivery; got "
+          f"{serve.unenforced_characteristics('all', 'corebluetooth')}")
+    check(serve.unenforced_characteristics("none", "bluezdbus") == set(),
+          "a posture that protects nothing cannot leave anything unprotected")
+    check(serve.unenforced_characteristics("control", "bluezdbus") == set(),
+          "Control carries `write`, which is the one flag bluezdbus does "
+          "convert, so the control posture is fully enforced there")
+    check(serve.backend_for("darwin") == "corebluetooth"
+          and serve.backend_for("linux") == "bluezdbus"
+          and serve.backend_for("win32") == "winrt"
+          and serve.backend_for("freebsd13") is None,
+          "backend_for does not map the platforms bless supports")
+
     for name, protected in postures.items():
         # SPEC.md §10.2 — Info stays readable in every posture, so a client
         # that cannot pair can still identify what it found.

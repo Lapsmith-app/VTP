@@ -879,6 +879,22 @@ def _reserved_case(schema, record, field, value):
                 + encode(schema, "monitor_value", gated))
     if record in ("link_params", "power_state"):
         return ({field: value}, encode(schema, record, {field: value}))
+    if record == "gnss_aid_caps":
+        # `format` has no zero member (SPEC.md 14.1), so a case about the
+        # reserved bits of another field still has to name a real format.
+        clean = dict(format=1, max_bytes=65536, held_until=0)
+        return (dict(clean, **{field: value}),
+                encode(schema, "gnss_aid_caps", dict(clean, **{field: value})))
+    if record == "aid_commit_result":
+        # `incomplete`, because the reserved-bit case sets every ASSIGNED bit
+        # of the mask alongside the reserved one -- and SPEC.md 14.4 sets
+        # first_missing if and only if the result is incomplete. With `applied`
+        # here the corpus required a conforming encoder to emit a record the
+        # specification forbids: a chunk reported lost from a transfer that
+        # succeeded, which is the §1.1 failure this record is shaped against.
+        clean = dict(result=2, first_missing=7)
+        return (dict(clean, **{field: value}),
+                encode(schema, "aid_commit_result", dict(clean, **{field: value})))
     sys.exit(f"reserved_bit_cases: no builder for record {record!r}; a bitmask "
              f"field was added and its producer case cannot be generated")
 
@@ -2127,6 +2143,151 @@ def vectors(schema):
          "must_reject": "length"},
     ]
 
+    # ---- Aiding ----------------------------------------------------------
+    # SPEC.md 14. Three records reach the wire: what the device declares, what
+    # opening a transfer returns, and what closing one reports.
+    AV = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["aid_validity"]["bits"]}
+    AF = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["aid_flags"]["bits"]}
+    CV = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["commit_validity"]["bits"]}
+    files["aiding.json"] = [
+        case(schema, "gnss_aid_caps", "caps-holding-a-window",
+             dict(validity=AV["held_until"], format=1, flags=AF["persists"],
+                  max_bytes=131_072, held_until=1_766_000_000_000),
+             "A device that accepts UBX-MGA, keeps it across a power cycle, and is "
+             "already holding orbit data valid to a stated instant.",
+             note="held_until uses the same type and units as gps_fix.t_utc, so a "
+                  "client comparing the two converts nothing."),
+        case(schema, "gnss_aid_caps", "caps-holding-nothing",
+             dict(validity=0, format=1, flags=0, max_bytes=131_072),
+             "A device with no aiding loaded. held_until is zero AND its validity bit "
+             "is clear; a client MUST conclude 'holds nothing', never 'valid until the "
+             "Unix epoch'.",
+             note="validity, format and flags all differ from each other across this "
+                  "file's three caps vectors. Without that a decoder reading any one "
+                  "of the three from another's offset passes the whole corpus -- the "
+                  "hole mutation testing found in link_params' tx/rx pair."),
+        case(schema, "gnss_aid_caps", "caps-without-persistence",
+             dict(validity=AV["held_until"], format=1, flags=0,
+                  max_bytes=65_536, held_until=1_766_000_000_000),
+             "A device holding a window that will not survive a power cycle. A client "
+             "MUST NOT carry held_until forward to the next connection (SPEC.md 14.2)."),
+        case(schema, "gnss_aid_caps", "caps-stale-value-behind-cleared-bit",
+             dict(validity=0, format=1, flags=AF["persists"],
+                  max_bytes=131_072, held_until=1_766_000_000_000),
+             "A non-conforming device that clears the held_until bit but leaves the "
+             "previous window in the bytes. A decoder MUST report held_until absent on "
+             "the strength of the bit alone.",
+             canonical=False,
+             note="Not byte-canonical, so the round-trip also asserts that a "
+                  "conforming encoder normalises the field to zero. This is the only "
+                  "coverage the gnss_aid_caps encoder gate gets."),
+        case(schema, "gnss_aid_caps", "caps-unknown-format",
+             dict(validity=0, format=9, flags=0, max_bytes=131_072),
+             "A format from a later minor version. A decoder MUST report it unknown, "
+             "and a client MUST NOT open a transfer it cannot fill (SPEC.md 14.1)."),
+        case(schema, "gnss_aid_caps", "caps-reserved-flag-set",
+             dict(validity=AV["held_until"], format=1, flags=AF["persists"] | (1 << 4),
+                  max_bytes=131_072, held_until=1_766_000_000_000),
+             "A later minor assigned aid_flags bit 4. A decoder MUST ignore the unknown "
+             "bit and decode every known field normally, and a VTP/1.0 encoder MUST "
+             "normalise it away on transmit (SPEC.md 2).",
+             canonical=False),
+        case(schema, "gnss_aid_caps", "caps-reserved-byte-set",
+             dict(validity=AV["held_until"], format=1, flags=AF["persists"],
+                  reserved_3=0x5A, max_bytes=131_072,
+                  held_until=1_766_000_000_000),
+             "A later minor assigned gnss_aid_caps.reserved_3. A decoder MUST read "
+             "the byte and report it, MUST NOT reject the record, and MUST decode "
+             "every known field normally.",
+             canonical=False,
+             note="The C decoder used to omit this field from its struct and print a "
+                  "literal zero while the Python decoder read the byte, so the two "
+                  "references disagreed about the same payload -- the defect class "
+                  "this corpus exists to prevent. No vector carried a non-zero "
+                  "reserved byte, so nothing noticed."),
+        {"name": "caps-short-payload",
+         "desc": "15 bytes. A truncated control response MUST be rejected whole.",
+         "record": "gnss_aid_caps",
+         "hex": encode(schema, "gnss_aid_caps", dict(format=1))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "caps-long-payload",
+         "desc": "17 bytes. gnss_aid_caps is fixed-size with no extension mechanism, "
+                 "so trailing bytes MUST be rejected.",
+         "record": "gnss_aid_caps",
+         "hex": (encode(schema, "gnss_aid_caps", dict(format=1)) + b"\x00").hex(),
+         "must_reject": "length"},
+
+        case(schema, "aid_begin_result", "begin-at-full-mtu",
+             dict(session=7, chunk_bytes=241),
+             "A transfer opened at a 247-byte ATT MTU: 247 - 3 bytes of Write Command "
+             "header - 3 bytes of chunk header (SPEC.md 14.3).",
+             note="chunk_bytes is fixed for the transfer because index-to-offset must "
+                  "be arithmetic; SPEC.md 14.3 gives the reason."),
+        case(schema, "aid_begin_result", "begin-at-minimum-mtu",
+             dict(session=1, chunk_bytes=94),
+             "The same transfer at the 100-byte minimum ATT MTU this protocol requires. "
+             "A device MUST NOT return a chunk_bytes a client cannot write."),
+
+        case(schema, "aid_begin_result", "begin-reserved-byte-set",
+             dict(session=7, chunk_bytes=241, reserved_3=0xA5),
+             "The same for aid_begin_result.reserved_3: read, reported, and "
+             "normalised away by a VTP/1.0 encoder on transmit.",
+             canonical=False),
+        {"name": "begin-short-payload",
+         "desc": "3 bytes. A truncated begin result MUST be rejected whole.",
+         "record": "aid_begin_result",
+         "hex": encode(schema, "aid_begin_result", dict(session=7, chunk_bytes=241))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "begin-long-payload",
+         "desc": "5 bytes. aid_begin_result is fixed-size, so trailing bytes MUST be "
+                 "rejected.",
+         "record": "aid_begin_result",
+         "hex": (encode(schema, "aid_begin_result", dict(session=7, chunk_bytes=241))
+                 + b"\x00").hex(),
+         "must_reject": "length"},
+
+        case(schema, "aid_commit_result", "commit-applied",
+             dict(validity=0, result=1, first_missing=0),
+             "Every chunk arrived, the CRC matched, and the receiver took the data. The "
+             "first_missing bit is clear, so a decoder MUST report the field absent "
+             "rather than reading chunk 0 as missing."),
+        case(schema, "aid_commit_result", "commit-incomplete",
+             dict(validity=CV["first_missing"], result=2, first_missing=113),
+             "Chunks were lost on a write-without-response path. The client resends "
+             "from index 113 and commits again; the transfer stays open (SPEC.md 14.4)."),
+        case(schema, "aid_commit_result", "commit-bad-crc",
+             dict(validity=0, result=3, first_missing=0),
+             "Every chunk arrived and the CRC-32 does not match. Nothing is missing, so "
+             "there is no index to resend from and the transfer closes."),
+        case(schema, "aid_commit_result", "commit-rejected",
+             dict(validity=0, result=4, first_missing=0),
+             "The transfer was intact and the receiver refused it -- the client sent "
+             "well-formed bytes that this receiver will not take."),
+        case(schema, "aid_commit_result", "commit-stale-index-behind-cleared-bit",
+             dict(validity=0, result=1, first_missing=113),
+             "A non-conforming device reporting `applied` while leaving the previous "
+             "commit's missing index in the bytes. A decoder MUST report first_missing "
+             "absent, and MUST NOT tell a user that chunk 113 was lost from a transfer "
+             "that succeeded.",
+             canonical=False,
+             note="The only coverage the aid_commit_result encoder gate gets."),
+        case(schema, "aid_commit_result", "commit-unknown-result",
+             dict(validity=0, result=9, first_missing=0),
+             "A result from a later minor version. A decoder MUST report it unknown and "
+             "MUST NOT coerce it to `applied` (SPEC.md 11.4)."),
+        {"name": "commit-short-payload",
+         "desc": "3 bytes. A truncated commit result MUST be rejected whole.",
+         "record": "aid_commit_result",
+         "hex": encode(schema, "aid_commit_result", dict(result=1))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "commit-long-payload",
+         "desc": "5 bytes. aid_commit_result is fixed-size, so trailing bytes MUST be "
+                 "rejected.",
+         "record": "aid_commit_result",
+         "hex": (encode(schema, "aid_commit_result", dict(result=1)) + b"\x00").hex(),
+         "must_reject": "length"},
+    ]
+
     # ---- Control response envelope ---------------------------------------
     def resp(opcode, tag, status, detail=b""):
         return bytes([opcode, tag, status]) + detail
@@ -2241,6 +2402,28 @@ def vectors(schema):
     # emit a perfectly valid frame for a DIFFERENT one, and no decode input
     # reaches that.
     files["encoders.json"] = [
+        {"name": "aid-begin-zero-chunk-size",
+         "record": "aid_begin_result", "must_refuse": True,
+         "desc": "A chunk size of zero. SPEC.md 14.3 forbids it, and a client "
+                 "cannot tell it from a device that will not say: it writes "
+                 "chunks carrying nothing until the commit reports every one "
+                 "of them missing.",
+         "input": dict(session=1, chunk_bytes=0)},
+        {"name": "aid-commit-index-without-incomplete",
+         "record": "aid_commit_result", "must_refuse": True,
+         "desc": "first_missing named beside `applied`. SPEC.md 14.4 sets the "
+                 "bit if and only if the result is `incomplete`, so this "
+                 "reports a chunk lost from a transfer that lost none -- a "
+                 "plausible wrong value a client will show a user.",
+         "input": dict(validity=1, result=1, first_missing=7)},
+        {"name": "aid-commit-incomplete-without-index",
+         "record": "aid_commit_result", "must_refuse": True,
+         "desc": "`incomplete` with the first_missing bit clear. The device "
+                 "says something is missing and refuses to say what, so the "
+                 "client has no index to resend from -- the one thing that "
+                 "makes a write-without-response path recoverable (SPEC.md "
+                 "14.4).",
+         "input": dict(validity=0, result=2, first_missing=0)},
         {"name": "can-id-above-arbitration-field",
          "record": "can_batch", "must_refuse": True,
          "desc": "An identifier of 0x3FFFFFFF. MUST be refused, not masked: "

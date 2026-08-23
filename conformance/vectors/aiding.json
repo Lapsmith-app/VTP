@@ -1,0 +1,303 @@
+{
+  "protocol": "VTP/1",
+  "generated_by": "tools/generate.py",
+  "cases": [
+    {
+      "name": "caps-holding-a-window",
+      "desc": "A device that accepts UBX-MGA, keeps it across a power cycle, and is already holding orbit data valid to a stated instant.",
+      "record": "gnss_aid_caps",
+      "hex": "0101010000000200007ccd2d9b010000",
+      "expect": {
+        "validity": 1,
+        "format": 1,
+        "flags": 1,
+        "reserved_3": 0,
+        "max_bytes": 131072,
+        "held_until": 1766000000000,
+        "format_known": true
+      },
+      "expect_absent": [],
+      "note": "held_until uses the same type and units as gps_fix.t_utc, so a client comparing the two converts nothing."
+    },
+    {
+      "name": "caps-holding-nothing",
+      "desc": "A device with no aiding loaded. held_until is zero AND its validity bit is clear; a client MUST conclude 'holds nothing', never 'valid until the Unix epoch'.",
+      "record": "gnss_aid_caps",
+      "hex": "00010000000002000000000000000000",
+      "expect": {
+        "validity": 0,
+        "format": 1,
+        "flags": 0,
+        "reserved_3": 0,
+        "max_bytes": 131072,
+        "held_until": 0,
+        "format_known": true
+      },
+      "expect_absent": [
+        "held_until"
+      ],
+      "note": "validity, format and flags all differ from each other across this file's three caps vectors. Without that a decoder reading any one of the three from another's offset passes the whole corpus -- the hole mutation testing found in link_params' tx/rx pair."
+    },
+    {
+      "name": "caps-without-persistence",
+      "desc": "A device holding a window that will not survive a power cycle. A client MUST NOT carry held_until forward to the next connection (SPEC.md 14.2).",
+      "record": "gnss_aid_caps",
+      "hex": "0101000000000100007ccd2d9b010000",
+      "expect": {
+        "validity": 1,
+        "format": 1,
+        "flags": 0,
+        "reserved_3": 0,
+        "max_bytes": 65536,
+        "held_until": 1766000000000,
+        "format_known": true
+      },
+      "expect_absent": []
+    },
+    {
+      "name": "caps-stale-value-behind-cleared-bit",
+      "desc": "A non-conforming device that clears the held_until bit but leaves the previous window in the bytes. A decoder MUST report held_until absent on the strength of the bit alone.",
+      "record": "gnss_aid_caps",
+      "hex": "0001010000000200007ccd2d9b010000",
+      "expect": {
+        "validity": 0,
+        "format": 1,
+        "flags": 1,
+        "reserved_3": 0,
+        "max_bytes": 131072,
+        "held_until": 1766000000000,
+        "format_known": true
+      },
+      "expect_absent": [
+        "held_until"
+      ],
+      "note": "Not byte-canonical, so the round-trip also asserts that a conforming encoder normalises the field to zero. This is the only coverage the gnss_aid_caps encoder gate gets.",
+      "canonical": false,
+      "expect_roundtrip_hex": "00010100000002000000000000000000"
+    },
+    {
+      "name": "caps-unknown-format",
+      "desc": "A format from a later minor version. A decoder MUST report it unknown, and a client MUST NOT open a transfer it cannot fill (SPEC.md 14.1).",
+      "record": "gnss_aid_caps",
+      "hex": "00090000000002000000000000000000",
+      "expect": {
+        "validity": 0,
+        "format": 9,
+        "flags": 0,
+        "reserved_3": 0,
+        "max_bytes": 131072,
+        "held_until": 0,
+        "format_known": false
+      },
+      "expect_absent": [
+        "held_until"
+      ]
+    },
+    {
+      "name": "caps-reserved-flag-set",
+      "desc": "A later minor assigned aid_flags bit 4. A decoder MUST ignore the unknown bit and decode every known field normally, and a VTP/1.0 encoder MUST normalise it away on transmit (SPEC.md 2).",
+      "record": "gnss_aid_caps",
+      "hex": "0101110000000200007ccd2d9b010000",
+      "expect": {
+        "validity": 1,
+        "format": 1,
+        "flags": 17,
+        "reserved_3": 0,
+        "max_bytes": 131072,
+        "held_until": 1766000000000,
+        "format_known": true
+      },
+      "expect_absent": [],
+      "canonical": false,
+      "expect_roundtrip_hex": "0101010000000200007ccd2d9b010000"
+    },
+    {
+      "name": "caps-reserved-byte-set",
+      "desc": "A later minor assigned gnss_aid_caps.reserved_3. A decoder MUST read the byte and report it, MUST NOT reject the record, and MUST decode every known field normally.",
+      "record": "gnss_aid_caps",
+      "hex": "0101015a00000200007ccd2d9b010000",
+      "expect": {
+        "validity": 1,
+        "format": 1,
+        "flags": 1,
+        "reserved_3": 90,
+        "max_bytes": 131072,
+        "held_until": 1766000000000,
+        "format_known": true
+      },
+      "expect_absent": [],
+      "note": "The C decoder used to omit this field from its struct and print a literal zero while the Python decoder read the byte, so the two references disagreed about the same payload -- the defect class this corpus exists to prevent. No vector carried a non-zero reserved byte, so nothing noticed.",
+      "canonical": false,
+      "expect_roundtrip_hex": "0101010000000200007ccd2d9b010000"
+    },
+    {
+      "name": "caps-short-payload",
+      "desc": "15 bytes. A truncated control response MUST be rejected whole.",
+      "record": "gnss_aid_caps",
+      "hex": "000100000000000000000000000000",
+      "must_reject": "length"
+    },
+    {
+      "name": "caps-long-payload",
+      "desc": "17 bytes. gnss_aid_caps is fixed-size with no extension mechanism, so trailing bytes MUST be rejected.",
+      "record": "gnss_aid_caps",
+      "hex": "0001000000000000000000000000000000",
+      "must_reject": "length"
+    },
+    {
+      "name": "begin-at-full-mtu",
+      "desc": "A transfer opened at a 247-byte ATT MTU: 247 - 3 bytes of Write Command header - 3 bytes of chunk header (SPEC.md 14.3).",
+      "record": "aid_begin_result",
+      "hex": "07f10000",
+      "expect": {
+        "session": 7,
+        "chunk_bytes": 241,
+        "reserved_3": 0
+      },
+      "note": "chunk_bytes is fixed for the transfer because index-to-offset must be arithmetic; SPEC.md 14.3 gives the reason."
+    },
+    {
+      "name": "begin-at-minimum-mtu",
+      "desc": "The same transfer at the 100-byte minimum ATT MTU this protocol requires. A device MUST NOT return a chunk_bytes a client cannot write.",
+      "record": "aid_begin_result",
+      "hex": "015e0000",
+      "expect": {
+        "session": 1,
+        "chunk_bytes": 94,
+        "reserved_3": 0
+      }
+    },
+    {
+      "name": "begin-reserved-byte-set",
+      "desc": "The same for aid_begin_result.reserved_3: read, reported, and normalised away by a VTP/1.0 encoder on transmit.",
+      "record": "aid_begin_result",
+      "hex": "07f100a5",
+      "expect": {
+        "session": 7,
+        "chunk_bytes": 241,
+        "reserved_3": 165
+      },
+      "canonical": false,
+      "expect_roundtrip_hex": "07f10000"
+    },
+    {
+      "name": "begin-short-payload",
+      "desc": "3 bytes. A truncated begin result MUST be rejected whole.",
+      "record": "aid_begin_result",
+      "hex": "07f100",
+      "must_reject": "length"
+    },
+    {
+      "name": "begin-long-payload",
+      "desc": "5 bytes. aid_begin_result is fixed-size, so trailing bytes MUST be rejected.",
+      "record": "aid_begin_result",
+      "hex": "07f1000000",
+      "must_reject": "length"
+    },
+    {
+      "name": "commit-applied",
+      "desc": "Every chunk arrived, the CRC matched, and the receiver took the data. The first_missing bit is clear, so a decoder MUST report the field absent rather than reading chunk 0 as missing.",
+      "record": "aid_commit_result",
+      "hex": "00010000",
+      "expect": {
+        "validity": 0,
+        "result": 1,
+        "first_missing": 0,
+        "result_known": true
+      },
+      "expect_absent": [
+        "first_missing"
+      ]
+    },
+    {
+      "name": "commit-incomplete",
+      "desc": "Chunks were lost on a write-without-response path. The client resends from index 113 and commits again; the transfer stays open (SPEC.md 14.4).",
+      "record": "aid_commit_result",
+      "hex": "01027100",
+      "expect": {
+        "validity": 1,
+        "result": 2,
+        "first_missing": 113,
+        "result_known": true
+      },
+      "expect_absent": []
+    },
+    {
+      "name": "commit-bad-crc",
+      "desc": "Every chunk arrived and the CRC-32 does not match. Nothing is missing, so there is no index to resend from and the transfer closes.",
+      "record": "aid_commit_result",
+      "hex": "00030000",
+      "expect": {
+        "validity": 0,
+        "result": 3,
+        "first_missing": 0,
+        "result_known": true
+      },
+      "expect_absent": [
+        "first_missing"
+      ]
+    },
+    {
+      "name": "commit-rejected",
+      "desc": "The transfer was intact and the receiver refused it -- the client sent well-formed bytes that this receiver will not take.",
+      "record": "aid_commit_result",
+      "hex": "00040000",
+      "expect": {
+        "validity": 0,
+        "result": 4,
+        "first_missing": 0,
+        "result_known": true
+      },
+      "expect_absent": [
+        "first_missing"
+      ]
+    },
+    {
+      "name": "commit-stale-index-behind-cleared-bit",
+      "desc": "A non-conforming device reporting `applied` while leaving the previous commit's missing index in the bytes. A decoder MUST report first_missing absent, and MUST NOT tell a user that chunk 113 was lost from a transfer that succeeded.",
+      "record": "aid_commit_result",
+      "hex": "00017100",
+      "expect": {
+        "validity": 0,
+        "result": 1,
+        "first_missing": 113,
+        "result_known": true
+      },
+      "expect_absent": [
+        "first_missing"
+      ],
+      "note": "The only coverage the aid_commit_result encoder gate gets.",
+      "canonical": false,
+      "expect_roundtrip_hex": "00010000"
+    },
+    {
+      "name": "commit-unknown-result",
+      "desc": "A result from a later minor version. A decoder MUST report it unknown and MUST NOT coerce it to `applied` (SPEC.md 11.4).",
+      "record": "aid_commit_result",
+      "hex": "00090000",
+      "expect": {
+        "validity": 0,
+        "result": 9,
+        "first_missing": 0,
+        "result_known": false
+      },
+      "expect_absent": [
+        "first_missing"
+      ]
+    },
+    {
+      "name": "commit-short-payload",
+      "desc": "3 bytes. A truncated commit result MUST be rejected whole.",
+      "record": "aid_commit_result",
+      "hex": "000100",
+      "must_reject": "length"
+    },
+    {
+      "name": "commit-long-payload",
+      "desc": "5 bytes. aid_commit_result is fixed-size, so trailing bytes MUST be rejected.",
+      "record": "aid_commit_result",
+      "hex": "0001000000",
+      "must_reject": "length"
+    }
+  ]
+}

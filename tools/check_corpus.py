@@ -55,7 +55,8 @@ COMPOSITE = {"can_batch": ("can_header", "can_record"),
              "monitor_list": ("monitor_declaration", "monitor_channel"),
              "monitor_update": ("monitor_header", "monitor_value")}
 STANDALONE = ("gps_fix", "info", "link_params", "control_response",
-              "time_sync", "power_state")
+              "time_sync", "power_state", "gnss_aid_caps",
+              "aid_begin_result", "aid_commit_result")
 
 
 def cases():

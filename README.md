@@ -77,7 +77,7 @@ commitments follow:
 A rationale that only lists benefits is marketing, so: a fix is 74 bytes instead
 of 23. Hardware that cannot negotiate an ATT MTU of 100 cannot implement VTP/1
 at all, which deliberately excludes pre-2014 silicon. Batching trades a little
-first-byte latency for throughput and timestamp accuracy. Six characteristics
+first-byte latency for throughput and timestamp accuracy. Seven characteristics
 and three batch formats is more surface to get wrong than one 20-byte struct,
 which is why the conformance corpus exists. And there are zero deployed devices,
 which is the largest cost by a wide margin.
@@ -99,7 +99,7 @@ framing.
 | --- | --- |
 | Specification | Believed internally consistent; §4.1 fixes the profile |
 | UUID allocation | Frozen |
-| Conformance corpus | 138 vectors across 10 record types, and 36 producer cases |
+| Conformance corpus | 160 vectors across 11 record types, and 42 producer cases |
 | Reference decoders | C and Python, both passing every vector |
 | Reference encoders | C and Python, both passing every producer case |
 | Software peripheral | A synthetic device, verified against the reference decoder |

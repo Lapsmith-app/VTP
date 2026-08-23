@@ -43,6 +43,11 @@ ROLES = {
     # §9.9 — the GET_POWER detail. A role like any other: a device without a
     # battery never declares the bit and is never handed these.
     "power":   {"power_state"},
+    # §14 — the aiding role's three control-detail records. Named after the
+    # capability bit, like every other role here, so `--roles gnss_aiding`
+    # works and IMPLIES picks up its `gps` and `control` requirement from the
+    # schema without another hard-coded table.
+    "gnss_aiding": {"gnss_aid_caps", "aid_begin_result", "aid_commit_result"},
 }
 
 # A role whose records only exist if another one does. This is not the runner's

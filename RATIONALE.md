@@ -485,7 +485,7 @@ Stating these plainly, because a rationale that only lists benefits is marketing
   timer. Flushing once per connection interval makes this a wash, but for a
   single slow signal on an idle bus, VTP/1 delivers marginally later. The win is
   throughput and timestamp accuracy, not first-byte latency.
-- **More surface to get wrong.** Six characteristics, three batch formats and an
+- **More surface to get wrong.** Seven characteristics, three batch formats and an
   extension mechanism is more specification than a single 20-byte struct. The
   conformance corpus exists because that is a real cost and it needs paying down
   with tests rather than with prose.
@@ -552,6 +552,93 @@ current draw, a time-to-empty estimate — is a later opcode rather than a later
 field; and there is deliberately no way to ask "tell me when it gets low",
 because that is a threshold, a hysteresis and a subscription for a question
 `GET_POWER` answers in one round trip.
+
+---
+
+## 9. Why aiding is a transfer, and why it is not on Control
+
+A GNSS receiver with no current orbit data reads it from the satellites, at
+50 bits per second, and takes tens of seconds to finish. Under a grandstand or
+between two transporters it may never finish. The phone in the driver's pocket
+can fetch the same data over the network in a moment, so the only question was
+how it reaches the device.
+
+### 9.1 Control could carry it, and should not
+
+SPEC.md §11.3 names new control opcodes as this protocol's general-purpose extension
+point, and by that reading aiding is four opcodes and nothing else. The
+arithmetic is what rules it out. A predicted-orbit product runs to tens of
+kilobytes; SPEC.md §9 allows a client one outstanding request; so a 40 kB transfer is
+about 164 write-and-wait round trips, several seconds of wall clock, and a
+control plane that can answer nothing else while it runs — no `TIME_SYNC`, no
+subscription change, no rate change.
+
+Written without a response on its own characteristic, the same transfer is a
+few hundred milliseconds and blocks nothing.
+
+That is a new attribute in a table SPEC.md §4.1 calls fixed, which would be a VTP/2
+change after 1.0 and is an ordinary one before it. It is being made now
+because it cannot be made later.
+
+### 9.2 Dropping the per-write response costs nothing
+
+A Write Command has no reply, so the obvious objection is that the device
+cannot say "that chunk was malformed". It never needed to. A chunk is
+legitimate only after `GNSS_AID_BEGIN` answered `ok`, which fixed the session
+and the chunk size, so the device can tell a chunk it cannot place from one it
+can without being asked — and every outcome a client acts on arrives at
+`GNSS_AID_COMMIT`, on the plane that already has tags, typed failures and a
+lifecycle.
+
+This is the same division SPEC.md §9.1 draws for `GET_LINK_PARAMS`, one layer down: the
+fast path carries bytes and the control plane carries meaning.
+
+### 9.3 Loss becomes a number, as it does everywhere else
+
+Without acknowledgement per chunk, a lost write is invisible until the whole
+transfer is wrong — the failure mode SPEC.md §8.3 exists to prevent on the outbound
+streams. So commit reports the lowest index the device did not receive, the
+client resends from there, and the exchange terminates because that index
+strictly advances.
+
+It only works because `chunk_bytes` is fixed for the transfer. With
+variable-length chunks a device cannot place chunk 7 without having received 0
+through 6, and there is no gap to resend — only a transfer to start again.
+
+### 9.4 The bytes are opaque, and that is a real cost
+
+SPEC.md §1.1 says no receiver may produce a plausible wrong value, and this
+specification has otherwise refused every opportunity to carry something it
+does not understand: equations rather than DBC, enumerated channels rather than
+an expression language, no vendor namespace anywhere. An aiding payload is a
+vendor blob, and pretending otherwise would be worse than admitting it.
+
+Three things bound the damage. The bytes travel client to device, so they enter
+no recording. A wrong payload costs time to first fix, not a corrupted lap. And
+the one thing a client could get wrong without noticing — which format the
+receiver speaks — is the one thing the protocol does carry, as an enumeration
+the device declares rather than a string the client guesses.
+
+What is not bounded by any of that is a device treating aiding as measurement,
+which is why SPEC.md §14.6 forbids it in those words. Aiding is a plausible position
+arriving from something that is not a sensor; a fix built from one would be
+wrong, plausible, and indistinguishable from a real one.
+
+### 9.5 Nothing is reserved for corrections
+
+Differential corrections were the obvious neighbour: same direction, same
+opacity, same reason the phone has the data and the logger does not. They are
+out of scope, and no slot is held for them.
+
+Holding one would have bought nothing. SPEC.md §11.4 lets a minor version add an
+`aid_format` member whenever it likes, so there is no collision to get ahead of
+and no compatibility cliff — an allocated value for a format nobody implements
+is a line in a table that means nothing, and a device could declare it and be
+conforming while doing anything at all. The lifecycle is the actual work:
+corrections are continuous for a session rather than one transfer at connect,
+which needs an inbound rate ceiling and rules about airtime against CAN. That
+work is what a future minor version would do, and reserving a number now does
+none of it.
 
 ---
 

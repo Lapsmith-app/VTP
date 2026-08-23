@@ -177,6 +177,7 @@ interval, and MUST respect the `dt` bound of §6.1 in every case.
 | Characteristic `imu` | `56544304-5f05-5b56-af87-dcab2baf2522` |
 | Characteristic `control` | `56544305-5f05-5b56-af87-dcab2baf2522` |
 | Characteristic `monitor_values` | `56544306-5f05-5b56-af87-dcab2baf2522` |
+| Characteristic `aiding` | `56544307-5f05-5b56-af87-dcab2baf2522` |
 <!-- END GENERATED: uuids -->
 
 These values are **frozen** for the life of major version 1.
@@ -273,7 +274,8 @@ Total: **24 bytes**. All fields little-endian.
 | 6 | `masked_subscriptions` | **Requires `can`.** |
 | 7 | `on_change_subscriptions` | **Requires `can`.** |
 | 8 | `power` | Device reports its own power state (§9.9) **Requires `control`.** |
-| 9+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+| 9 | `gnss_aiding` | Client supplies orbit data to the device's receiver (§14) **Requires `gps`, `control`.** |
+| 10+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:capabilities -->
 
 A client MUST read this characteristic on every connection and MUST NOT cache it
@@ -307,6 +309,7 @@ last column says exactly what inert means for it.
 | `imu` | bit 2 (`imu`) | `notify` | always present; client enables it for a set bit | device | client | the CCCD exists; no notification is ever sent on it |
 | `control` | bit 4 (`control`) | `write`, `indicate` (write with-response) | always present; client enables it for a set bit | client | client | the CCCD exists; writes are rejected with an ATT error and no opcode is parsed |
 | `monitor_values` | bit 3 (`monitor`) | `write` (write with-response) | — | client | device | writes are rejected with an ATT error and change nothing |
+| `aiding` | bit 9 (`gnss_aiding`) | `write-without-response` (write without-response) | — | client | device | writes are silently discarded; a client cannot reach this characteristic legitimately without GNSS_AID_BEGIN having answered ok first |
 <!-- END GENERATED: profile:attributes -->
 
 A device MUST NOT add a characteristic to the VTP/1 service beyond these, and
@@ -319,8 +322,14 @@ the point of requiring one. A device without the `control` bit exposes the
 Control characteristic and **rejects every write with an ATT error**; it does
 not parse opcodes, does not implement indications, and never answers
 `unsupported_opcode`, because answering requires the response path it does not
-have. The same goes for `monitor_values`. A GPS-only build is a service
-declaration, four inert attributes and one notify path.
+have. The same goes for `monitor_values`.
+
+`aiding` is the one exception, and only because ATT gives it no choice: a Write
+Command carries no response of any kind, so an inert `aiding` discards silently
+and §14 puts every refusal a client needs on Control instead.
+
+A GPS-only build is a service declaration, five inert attributes and one notify
+path.
 
 **A CCCD is an attribute, so it is part of the fixed table too.** Every
 notifying and indicating characteristic above carries its Client Characteristic
@@ -359,6 +368,7 @@ VTP/1?", Info answers "what does it do?", and neither half-answers the other.
 | 6 | `masked_subscriptions` | bit 1 (`can`) | — |
 | 7 | `on_change_subscriptions` | bit 1 (`can`) | — |
 | 8 | `power` | bit 4 (`control`) | — |
+| 9 | `gnss_aiding` | bit 0 (`gps`), bit 4 (`control`) | — |
 <!-- END GENERATED: profile:capabilities -->
 
 **The largest CAN payload follows from the bits and is not a field.** A client
@@ -1311,6 +1321,10 @@ Control characteristic is live.
 | `0x04` | `CAN_UNSUBSCRIBE` | `can` | `handle:u16` | — | Removes one subscription by the handle its install returned |
 | `0x05` | `CAN_LIST` | `can` | `start:u16` | `can_list_page record` | One page of the table, starting at index `start` |
 | `0x10` | `GPS_SET_RATE` | `gps` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
+| `0x11` | `GNSS_AID_INFO` | `gnss_aiding` | — | `gnss_aid_caps record` | What aiding this device accepts, and what it already holds (SPEC.md 14.2) |
+| `0x12` | `GNSS_AID_BEGIN` | `gnss_aiding` | `format:u8, total_bytes:u32` | `aid_begin_result record` | Open a transfer; the response fixes the session and the chunk size (SPEC.md 14.3) |
+| `0x13` | `GNSS_AID_COMMIT` | `gnss_aiding` | `session:u8, chunks:u16, crc32:u32` | `aid_commit_result record` | Close a transfer and report what became of it (SPEC.md 14.4) |
+| `0x14` | `GNSS_AID_ABORT` | `gnss_aiding` | `session:u8` | — | Discard a transfer in progress and free the session |
 | `0x20` | `IMU_SET_RATE` | `imu` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
 | `0x30` | `TIME_SYNC` | — | — | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
 | `0x31` | `GET_LINK_PARAMS` | — | — | `link_params record` | — |
@@ -1957,6 +1971,10 @@ all.
 | `time_sync` | No — closed for major version 1 | — |
 | `link_params` | No — closed for major version 1 | On request |
 | `power_state` | No — closed for major version 1 | On request |
+| `gnss_aid_caps` | No — closed for major version 1 | — |
+| `aid_begin_result` | No — closed for major version 1 | — |
+| `aid_chunk` | No — closed for major version 1 | — |
+| `aid_commit_result` | No — closed for major version 1 | — |
 <!-- END GENERATED: extensibility -->
 
 **Reserved space**, for flags and small values. Appendix A lists it. This is
@@ -2276,6 +2294,299 @@ anything it records. Monitor drives a display; the recording is the client's.
 
 ---
 
+## 14. Aiding characteristic — WRITE
+
+Aiding runs the same direction as Monitor (§13) — client to device — but
+carries bulk data rather than values for a display. A GNSS receiver starting
+without valid orbit data must read it from the satellites themselves, which
+takes tens of seconds under an open sky and may not complete at all in a
+paddock or under a grandstand. A client has a network connection and can
+supply the same data in about a second.
+
+A device implementing this role MUST set `capabilities` bit 9, which §4.1
+requires it to set `gps` and `control` alongside. The `aiding` characteristic
+is present on every VTP/1 device whether or not the role is implemented
+(§4.1).
+
+This is the only attribute written **without a response**, and the only one
+whose inert form discards writes silently rather than answering an ATT error.
+Both follow from the same fact: a chunk is only ever legitimate after
+`GNSS_AID_BEGIN` has answered `ok`, so a chunk arriving at a device that never
+answered one is a client that broke §14.3, not a condition needing a reply. Every
+outcome a client acts on is reported by `GNSS_AID_COMMIT` on the Control plane,
+which has tagged responses and typed failures already.
+
+Chunks are not control requests. A client MAY write them while a control
+request is outstanding, and §9's one-outstanding-request rule does not apply to
+them.
+
+### 14.1 The device declares; the client supplies
+
+The bytes of a transfer are **opaque to this specification**. A device forwards
+them to its receiver without interpreting them, and no requirement here
+constrains their content.
+
+What the protocol does carry is which format those bytes are in, and that is
+the device's declaration rather than the client's choice — the format belongs
+to the receiver, and the client cannot derive it:
+
+<!-- BEGIN GENERATED: enum:aid_format -->
+| Value | Name | Meaning |
+| --- | --- | --- |
+| 1 | `ubx_mga` | A concatenated sequence of UBX-MGA messages, as served by u-blox AssistNow |
+| *other* | *unknown* | MUST decode as unknown, never as a default |
+<!-- END GENERATED: enum:aid_format -->
+
+It is an enumeration for §13.2's reason. A device names a format; it does not
+describe one. A client therefore cannot fail to understand a declaration in any
+way except not implementing it, and there is no vendor string namespace on
+either side.
+
+A client MUST read `GNSS_AID_INFO` before opening a transfer, and MUST NOT open
+one naming a format the device did not declare. A device MUST answer
+`bad_params` to a `GNSS_AID_BEGIN` naming any other format.
+
+New formats MAY be added in a minor version, so a client MUST treat an
+unrecognised format value as unknown and MUST NOT substitute another.
+
+### 14.2 What the device already holds
+
+The detail of a successful `GNSS_AID_INFO` response is one `gnss_aid_caps`
+record:
+
+<!-- BEGIN GENERATED: gnss_aid_caps -->
+*What aiding this device accepts, and what it already holds.*
+
+Total: **16 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `validity` | bitmask `aid_validity` |
+| 1 | 1 | `u8` | `format` | The one format this device accepts; enum `aid_format` |
+| 2 | 1 | `u8` | `flags` | bitmask `aid_flags` |
+| 3 | 1 | `u8` | `reserved_3` | Aiding metadata; **reserved — MUST be zero** |
+| 4 | 4 | `u32` | `max_bytes` | `bytes`; Largest total_bytes this device will accept in one transfer |
+| 8 | 8 | `i64` | `held_until` | `ms`; Unix epoch; the end of the validity window this device already holds (SPEC.md 14.2); valid when `validity` bit 0 (`held_until`) is set |
+<!-- END GENERATED: gnss_aid_caps -->
+
+<!-- BEGIN GENERATED: bitmask:aid_validity -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `held_until` | held_until carries the end of a window the device already holds |
+| 1+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:aid_validity -->
+
+<!-- BEGIN GENERATED: bitmask:aid_flags -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `persists` | Aiding survives a power cycle, so held_until still applies on the next connection |
+| 1+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:aid_flags -->
+
+`max_bytes` is a device ceiling. A `GNSS_AID_BEGIN` whose `total_bytes` exceeds
+it MUST be answered `bad_params`.
+
+`held_until` describes what the device holds **now**. A client SHOULD NOT send
+data whose validity the device already covers; predicted-orbit products run to
+tens of kilobytes, and re-sending one the device is still holding costs a
+phone's radio that much for nothing. With the `held_until` validity bit clear
+the device holds nothing, or does not know what it holds; either way the client
+sends.
+
+`persists` says whether that window survives a power cycle. A client MUST NOT
+infer from a `held_until` on one connection that the device will still hold it
+on the next unless `persists` is set.
+
+### 14.3 Opening a transfer, and filling it
+
+`GNSS_AID_BEGIN` carries the format and the total byte count. Its response
+detail is one `aid_begin_result` record:
+
+<!-- BEGIN GENERATED: aid_begin_result -->
+*The detail of a GNSS_AID_BEGIN response. Opens a transfer and fixes its chunking.*
+
+Total: **4 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `session` | Identifies this transfer; quoted in every chunk and at commit |
+| 1 | 2 | `u16` | `chunk_bytes` | `bytes`; Payload bytes in every chunk but the last; byte offset is index x chunk_bytes (SPEC.md 14.3) |
+| 3 | 1 | `u8` | `reserved_3` | Transfer metadata; **reserved — MUST be zero** |
+<!-- END GENERATED: aid_begin_result -->
+
+`chunk_bytes` MUST NOT be zero and MUST NOT exceed `ATT_MTU - 6` — three bytes
+of ATT Write Command header and the three-byte chunk header below.
+
+**A transfer MUST NOT require more than 65535 chunks.** `chunks` in
+`GNSS_AID_COMMIT` and `first_missing` in §14.4 are both `u16`, so a transfer
+needing more than that has a count no client can commit and a gap no device can
+name. `total_bytes` is `u32` and nothing else bounds the pair, so the device
+enforces it where both numbers are first known: a device MUST answer
+`bad_params` to a `GNSS_AID_BEGIN` whose `total_bytes` would need more chunks
+than that at the `chunk_bytes` it would have chosen.
+
+**A device holds at most one transfer open.** A `GNSS_AID_BEGIN` arriving while
+one is open MUST discard the open transfer and start a new one, and the new
+`session` MUST differ from the discarded one so that a chunk still in flight
+for the old transfer is rejected by §14.3's session rule rather than landing in
+the new one.
+
+Chunks are written to the `aiding` characteristic:
+
+<!-- BEGIN GENERATED: aid_chunk -->
+*One chunk of an aiding transfer, written without a response.*
+
+Total: **3 bytes + `payload`**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `session` | Echoed from the GNSS_AID_BEGIN that opened this transfer |
+| 1 | 2 | `u16` | `index` | 0-based; the payload belongs at index x chunk_bytes |
+<!-- END GENERATED: aid_chunk -->
+
+A chunk's payload belongs at byte offset `index × chunk_bytes`. **Every chunk
+but the last MUST carry exactly `chunk_bytes`**, and the last MUST carry the
+remainder of `total_bytes`. The mapping from index to offset is therefore
+arithmetic, which is what makes resending part of a transfer possible at all: a
+device that had to place variable-length chunks could not place chunk 7 without
+having received 0 through 6, and §14.4's missing-chunk report would have
+nothing to offer.
+
+A device MUST ignore, without any response, a chunk that:
+
+- names a `session` other than the open transfer's,
+- carries an `index` at or beyond `⌈total_bytes ÷ chunk_bytes⌉`, or
+- carries a payload of the wrong length for its index.
+
+A client MAY write chunks in any order and MAY write the same chunk more than
+once; a device MUST accept a repeat and MUST NOT treat it as an error.
+
+**A device MUST NOT hand any part of a transfer to its receiver before
+`GNSS_AID_COMMIT`.** A transfer is applied whole or not at all, which is what
+makes the CRC in §14.4 worth checking and what stops a receiver being fed the
+first half of something.
+
+### 14.4 Closing it
+
+`GNSS_AID_COMMIT` carries the session, the number of chunks the client wrote
+and a CRC-32 over the reassembled `total_bytes` — **not** over the chunks, and
+not over the chunk headers.
+
+The CRC-32 is the one used by IEEE 802.3 and zlib: polynomial `0x04C11DB7`,
+reflected input and output, initial value `0xFFFFFFFF`, final XOR
+`0xFFFFFFFF`. It is stated exactly because two implementations that each say
+"CRC-32" and disagree about reflection produce a mismatch on every transfer and
+a bug report that reads as data corruption.
+
+The response detail is one `aid_commit_result` record:
+
+<!-- BEGIN GENERATED: aid_commit_result -->
+*The detail of a GNSS_AID_COMMIT response. What became of the transfer.*
+
+Total: **4 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `validity` | bitmask `commit_validity` |
+| 1 | 1 | `u8` | `result` | enum `aid_result` |
+| 2 | 2 | `u16` | `first_missing` | Lowest chunk index the device did not receive; the client resends from here (SPEC.md 14.4); valid when `validity` bit 0 (`first_missing`) is set |
+<!-- END GENERATED: aid_commit_result -->
+
+<!-- BEGIN GENERATED: bitmask:commit_validity -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `first_missing` | first_missing names a chunk the device did not receive |
+| 1+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:commit_validity -->
+
+<!-- BEGIN GENERATED: enum:aid_result -->
+| Value | Name | Meaning |
+| --- | --- | --- |
+| 1 | `applied` | Every chunk arrived, the CRC matched, and the data went to the receiver |
+| 2 | `incomplete` | One or more chunks are missing; first_missing names the lowest |
+| 3 | `bad_crc` | Every chunk arrived and the CRC-32 does not match |
+| 4 | `rejected` | The transfer was intact and the receiver refused it |
+| *other* | *unknown* | MUST decode as unknown, never as a default |
+<!-- END GENERATED: enum:aid_result -->
+
+A device MUST set the `first_missing` validity bit if and only if `result` is
+`incomplete`, and MUST report the **lowest** index it did not receive.
+
+`chunks` is redundant with the transfer's own shape — the device already knows
+`⌈total_bytes ÷ chunk_bytes⌉` from the `GNSS_AID_BEGIN` it answered — and it is
+carried so that a disagreement is caught rather than acted on. **A device MUST
+answer `bad_params` to a commit whose `chunks` is not that number**, and MUST
+NOT apply it; the transfer stays open, so a client that miscounted may commit
+again.
+
+It cannot be reported as `incomplete`. A device that has every chunk has no
+index it did not receive, so the `first_missing` it would have to send names a
+chunk it holds — and a client obeying the paragraph above resends that chunk,
+commits again with the same wrong count, and receives the same answer forever.
+The refusal has to be a status, because the disagreement is about a parameter
+rather than about the transfer.
+
+**A result of `incomplete` leaves the transfer open.** The client writes the
+chunks it is missing and commits again, and the exchange terminates because
+`first_missing` strictly advances each time. Every other result closes the
+transfer and frees the session; a client wanting to retry after `bad_crc` or
+`rejected` MUST open a new one.
+
+`GNSS_AID_ABORT` discards an open transfer and frees its session. A device MUST
+answer `bad_params` to an abort or a commit naming a session it does not hold.
+
+### 14.5 A refused transfer is not a refused request
+
+`GNSS_AID_COMMIT` names an open session with well-formed parameters, so the
+device applies it and answers `ok` — including when the transfer it reports on
+was incomplete, failed its CRC or was refused by the receiver. Those outcomes
+are in `result`, not in `status`.
+
+They cannot be in `status`. §9 makes `detail` present if and only if `status` is
+`ok`, so an `incomplete` expressed as a status would carry no `first_missing`
+with it, and the client would have nothing to resend from — the report and the
+refusal cannot be the same byte. The division is the one §9.1 already draws for
+`GET_LINK_PARAMS`: `status` answers whether the device could act on the
+request, and the detail carries what it found.
+
+### 14.6 What aiding is not
+
+**It is not a source of position.** Aiding MAY seed a receiver's search. A
+device MUST NOT report any part of a transfer as measurement: it MUST NOT
+appear in a `gps_fix`, and a device MUST NOT set a fix's validity bits on the
+strength of it. Aiding is a plausible position arriving from something that is
+not a measurement, which makes this the sharpest case of §1.1 in the
+specification — a fix built from it would be wrong, plausible, and indistinguishable
+from a real one.
+
+Where a format carries time initialisation, a client SHOULD account for the
+transfer's own latency in whatever accuracy that format declares. A device
+applies a transfer at commit, not as it arrives, so a timestamp written into
+the first chunk is already as old as the transfer took.
+
+**It is not a corrections channel.** Differential corrections — the continuous
+stream behind the `rtk_float` and `rtk_fixed` solutions §5.3 reports — are the
+same shape as orbit data and a different lifecycle: continuous for a session
+rather than one transfer at connect. Carrying them needs an inbound rate ceiling
+and rules about airtime against CAN that this version does not define, and
+§11.3 makes a new opcode the place to define them if a device ever wants one.
+Nothing is reserved for them here, and nothing needs to be: §11.4 lets a minor
+version add an `aid_format` member at any time.
+
+**It is not a general transport.** A device MUST NOT accept anything but aiding
+in the format it declared on this characteristic, and in particular MUST NOT
+use it to carry firmware.
+
+A client SHOULD complete a transfer before it enables notifications on any
+stream, and SHOULD NOT begin one while streams are running. Tens of kilobytes
+of aiding and a busy CAN bus want the same connection events.
+
+Encryption is not stated separately here. §10 governs this characteristic as it
+governs Control, and for the same reason: a write that changes what the device
+does is worth protecting whether it carries a subscription or an orbit.
+
+---
+
 ## Appendix A — Reserved space
 
 Generated from `schema/vtp1.yaml`, so it cannot disagree with the bitmask and
@@ -2286,13 +2597,16 @@ record tables above.
 | --- | --- | --- |
 | `gps_fix.validity` | bits 12–31 | Validity for fields added in a later minor |
 | `gps_fix.fix_flags` | bits 5–7 | Additional solution-quality flags |
-| `info.capabilities` | bits 9–31 | Roles and features added in a later minor |
+| `info.capabilities` | bits 10–31 | Roles and features added in a later minor |
 | `can_header.flags` | bits 1–7 | Additional batch-level CAN status |
 | `imu_header.flags` | bits 3–7 | Additional sensor groups |
 | `info.clock_flags` | bits 2–7 | Additional clock properties |
 | `monitor_value.validity` | bits 1–7 | Validity for values added in a later minor |
 | `link_params.validity` | bits 4–15 | Validity for link parameters added in a later minor |
 | `power_state.validity` | bits 2–7 | Validity for power fields added in a later minor |
+| `gnss_aid_caps.flags` | bits 1–7 | Additional aiding properties |
+| `gnss_aid_caps.validity` | bits 1–7 | Validity for aiding capabilities added in a later minor |
+| `aid_commit_result.validity` | bits 1–7 | Validity for commit results added in a later minor |
 | `info.reserved_20` | 1 byte | Was can_max_payload; derived from the capability bits since (SPEC.md 4.2) |
 | `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
@@ -2300,5 +2614,7 @@ record tables above.
 | `monitor_header.reserved` | 1 byte | Update metadata |
 | `can_list_page.reserved` | 1 byte | Paging metadata |
 | `power_state.reserved` | 1 byte | Power metadata |
+| `gnss_aid_caps.reserved_3` | 1 byte | Aiding metadata |
+| `aid_begin_result.reserved_3` | 1 byte | Transfer metadata |
 | Extension types | `0x80`–`0xFF` | Vendor-private; this specification MUST NOT assign them (§5.5) |
 <!-- END GENERATED: reserved_space -->

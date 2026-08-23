@@ -9,6 +9,7 @@
     "can": "56544303-5f05-5b56-af87-dcab2baf2522",
     "imu": "56544304-5f05-5b56-af87-dcab2baf2522",
     "control": "56544305-5f05-5b56-af87-dcab2baf2522",
-    "monitor_values": "56544306-5f05-5b56-af87-dcab2baf2522"
+    "monitor_values": "56544306-5f05-5b56-af87-dcab2baf2522",
+    "aiding": "56544307-5f05-5b56-af87-dcab2baf2522"
   }
 }
