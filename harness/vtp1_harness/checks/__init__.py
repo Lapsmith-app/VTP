@@ -26,11 +26,12 @@ class Status(enum.Enum):
 class Fail(Exception):
     """The device did not do what the section requires.
 
-    `severity` overrides the check's own for this one finding. A check can have
-    a failure mode more serious than the rule it is mainly about: implementing
-    GET_LINK_PARAMS is a SHOULD, but not ANSWERING it breaks the MUST in §9 that
-    every request gets a response, and reporting that as a warning because of
-    which check happened to notice would be reporting the wrong thing.
+    `severity` overrides the check's own for this one finding. A check can
+    have a failure mode more serious than the rule it is mainly about: a
+    SHOULD-level check that writes a request still relies on the MUST in §9
+    that every request gets a response, and reporting a missing response as a
+    warning because of which check happened to notice would be reporting the
+    wrong thing.
     """
 
     def __init__(self, message, severity=None, **evidence):

@@ -357,18 +357,6 @@ def encode_info(info):
     return _pack("info", info)
 
 
-def encode_can_list(page, entries):
-    """SPEC.md §9.5. One page header followed by `count` subscription entries."""
-    if len(entries) != page.get("count", 0):
-        raise EncodeError(
-            f"can_list_page.count is {page.get('count', 0)} but "
-            f"{len(entries)} entr(ies) were supplied")
-    out = bytearray(_pack("can_list_page", _zero_reserved("can_list_page", page)))
-    for e in entries:
-        out += _pack("can_subscription", e)
-    return bytes(out)
-
-
 MONITOR_MAX_CHANNELS = (
     (SCHEMA["protocol"]["min_att_mtu"] - 3
      - SCHEMA["records"]["monitor_header"]["size"])
@@ -438,17 +426,12 @@ def encode_control_response(resp):
 
 
 def encode_time_sync(ts):
-    """SPEC.md §9.7. An encoder must not emit what its own decoder rejects."""
+    """SPEC.md §9.5. An encoder must not emit what its own decoder rejects."""
     if ts.get("t_device_tx", 0) < ts.get("t_device_rx", 0):
         raise EncodeError(
             "time_sync: t_device_tx precedes t_device_rx, so the device "
             "answered before it was asked")
     return _pack("time_sync", ts)
-
-
-def encode_link_params(link_params):
-    """SPEC.md §9.1. The detail of a GET_LINK_PARAMS response."""
-    return _pack("link_params", _gate("link_params", link_params))
 
 
 # Keyed by the runner-contract record name, so a harness can round-trip a
@@ -458,8 +441,6 @@ ENCODERS = {
     "can_batch": lambda d: encode_can_batch(d["header"], d["records"]),
     "imu_batch": lambda d: encode_imu_batch(d["header"], d["samples"]),
     "info": encode_info,
-    "link_params": encode_link_params,
-    "can_list": lambda d: encode_can_list(d["page"], d["entries"]),
     "monitor_list": lambda d: encode_monitor_list(d["declaration"], d["entries"]),
     "monitor_update": lambda d: encode_monitor_update(d["header"], d["values"]),
     "control_response": encode_control_response,

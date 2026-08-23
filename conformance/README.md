@@ -31,9 +31,9 @@ python3 conformance/run.py --impl "./my-decoder" --roles gps
 | Role | Records |
 | --- | --- |
 | `core` | `info` — always included, never optional (§4) |
-| `control` | `control_response`, `link_params`, `time_sync` |
+| `control` | `control_response`, `time_sync` |
 | `gps` | `gps_fix` |
-| `can` | `can_batch`, `can_list` — implies `control` |
+| `can` | `can_batch` — implies `control` |
 | `imu` | `imu_batch` |
 | `monitor` | `monitor_list`, `monitor_update` — implies `control` |
 

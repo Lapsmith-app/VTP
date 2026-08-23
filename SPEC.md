@@ -19,8 +19,11 @@ RECOMMENDED, MAY and OPTIONAL are to be interpreted as described in
 [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174), and only when they appear in
 all capitals.
 
-Rationale, trade-offs and comparisons belong in [RATIONALE.md](RATIONALE.md).
-This document is normative and deliberately terse.
+This document states the rules and stops. The reasoning behind them —
+trade-offs, history, and the failures each rule exists to prevent — lives in
+[RATIONALE.md](RATIONALE.md), whose §8 is organised to mirror the sections
+below. [Appendix B](#appendix-b--a-minimal-device) sketches the smallest
+conforming device.
 
 ---
 
@@ -53,6 +56,14 @@ implementation MUST honour all three:
 - Anything malformed — a short payload, a truncated record — is rejected whole.
   A receiver MUST NOT decode the prefix of a malformed payload.
 
+Malformed means the receiver cannot know where the payload's fields are: a
+wrong length, a count the buffer does not hold, a record boundary the reader
+and writer disagree about. A payload whose layout is sound but whose *content*
+breaks a device-side rule — an out-of-range coordinate (§5), contradictory
+flags (§5.3), an Info that breaks the capability matrix (§4.1) — is decoded,
+and the violation is surfaced rather than repaired. The device MUST NOT emit
+it; the receiver MUST NOT paper over it.
+
 ### 1.2 Roles and terms
 
 | Term | Meaning |
@@ -72,8 +83,7 @@ the receiver uses. The name is not a claim about GPS in particular.
 Two words describing counters are used precisely throughout. A counter that
 **wraps** resumes at zero after its maximum, so a step backwards is ordinary
 and means nothing was lost. A counter that **saturates** stops at its maximum
-and stays there. `seq` wraps, `dropped` saturates, and §8 says why each does
-what it does.
+and stays there. `seq` wraps and `dropped` saturates (§8).
 
 ### 1.3 The shape of the streams
 
@@ -89,14 +99,10 @@ between notifications:
 | `control` | client → device, write; answered by indication | One request, or its response | §9 |
 | `monitor_values` | client → device, write | A 4-byte header, then `count` values | §13 |
 
-A fix is never batched, and a CAN frame never travels without a batch header
-even when it is the only frame in the notification. The asymmetry follows the
-rates rather than a preference: a GNSS receiver produces at most a few tens of
-complete solutions a second, while a busy chassis bus produces some four
-thousand frames a second, which no one-frame-per-notification framing can carry
-(RATIONALE §2.4). The IMU is batched for the same reason as CAN but timestamped
-differently — its samples are evenly spaced, so one interval in the header
-describes all of them (§7).
+A fix is never batched; a CAN frame never travels without a batch header, even
+alone. The asymmetry follows the data rates (RATIONALE §2.4). The IMU is
+batched like CAN but timestamped differently: its samples are evenly spaced,
+so one interval in the header describes all of them (§7).
 
 Three properties are common to all three streams and are specified once, in §8.
 Every payload begins with `seq` and `dropped`. Every timestamp in every stream
@@ -118,35 +124,29 @@ and no stream carries a clock of its own.
 | Connection interval | Device SHOULD request 15 ms, peripheral latency 0, while streaming |
 
 A device MUST function correctly at an ATT MTU of 100 and MUST use up to the
-negotiated maximum when batching (§6, §7).
-
-The Device Information Service is a SHOULD, specified in §3.4.
+negotiated maximum when batching (§6, §7). A notification never exceeds the
+negotiated ATT payload, which the client's own stack already knows; a client
+sizes its receive buffer from that and from nothing in this protocol.
 
 Signed integers are two's complement. Reserved fields MUST be written as zero
 and MUST be ignored on receive.
 
-The three subsections below are the only requirements in this specification that
-the conformance corpus cannot test, because none of them appears in any payload.
-§12.1 says what follows from that; `GET_LINK_PARAMS` (§9.1) is how a client
-checks them at run time.
+The Device Information Service is a SHOULD, specified in §3.4. The three
+subsections below cannot be tested by the conformance corpus, because none of
+them appears in any payload; §12.1 says what follows from that.
 
 ### 2.1 Link-layer payload
 
 A device MUST negotiate the largest link-layer payload its controller supports,
-up to `max_tx_octets` and `max_rx_octets` of 251.
-
-A large ATT MTU is not by itself a throughput figure. Sent over the 27-byte
-default link-layer payload, a 247-byte notification is fragmented across ten or
-more packets, each carrying its own header, inter-frame spacing and
-acknowledgement — roughly three times the radio airtime for the same bytes. A
-device that negotiates a large MTU without extending the link-layer payload has
-not gained the throughput the MTU implies, and takes that airtime from every
-other peripheral sharing the central's radio.
+up to `max_tx_octets` and `max_rx_octets` of 251. A large ATT MTU over the
+27-octet default link-layer payload costs roughly three times the radio
+airtime per byte delivered, at every other radio user's expense
+(RATIONALE §8.1).
 
 ### 2.2 PHY
 
 A device SHOULD request the LE 2M PHY and MUST function correctly on the LE 1M
-PHY. The 2M PHY halves the airtime of a given payload; no other part of this
+PHY. The 2M PHY halves the airtime of a given payload; nothing else in this
 specification changes with it.
 
 ### 2.3 Connection parameters
@@ -154,12 +154,10 @@ specification changes with it.
 The connection interval and peripheral latency are granted by the central, not
 chosen by the device. A device MUST function correctly at whatever values the
 central applies, including values it did not request and values that change
-during a connection.
-
-A device MUST NOT assume it received the interval it requested; a central
-serving several peripherals commonly grants 30 ms or more. Batch flush timing
-(§6.1, §7) MUST therefore follow the device's own clock rather than an assumed
-interval, and MUST respect the `dt` bound of §6.1 in every case.
+during a connection, and MUST NOT assume it received the interval it requested.
+Batch flush timing (§6.1, §7) MUST therefore follow the device's own clock
+rather than an assumed interval, and MUST respect the `dt` bound of §6.1 in
+every case.
 
 ---
 
@@ -211,18 +209,9 @@ what the advertisement said.
 
 A device SHOULD expose the standard Bluetooth Device Information Service
 (`0x180A`) with at least a manufacturer name, model number and firmware
-revision.
-
-Nothing in VTP/1 reads it, which is the point: it is where every generic
-Bluetooth tool already looks, so it is what answers "which firmware is on the
-logger that is misbehaving" without the asker needing to know anything about
-this protocol. Info (§4) is the protocol's own self-description and remains the
-only thing a client parses; the two do not overlap and neither substitutes for
-the other.
-
-It is a SHOULD rather than a MUST because it carries no protocol meaning: a
-device that omits it is fully usable, and requiring it would add a conformance
-surface that no client behaviour depends on.
+revision. Nothing in VTP/1 reads it: it is what answers "which firmware is on
+this logger" to generic Bluetooth tools, and Info (§4) remains the only thing
+a client parses (RATIONALE §8.2).
 
 ---
 
@@ -244,9 +233,9 @@ Total: **24 bytes**. All fields little-endian.
 | 12 | 4 | `u32` | `can_max_frames_per_s` | `frames/s` |
 | 16 | 2 | `u16` | `imu_rate_hz` | `Hz` |
 | 18 | 2 | `u16` | `imu_max_rate_hz` | `Hz` |
-| 20 | 1 | `u8` | `reserved_20` | Was can_max_payload; derived from the capability bits since (SPEC.md 4.2); **reserved — MUST be zero** |
+| 20 | 1 | `u8` | `reserved_20` | Was can_max_payload; derived from the capability bits since (SPEC.md 4.1); **reserved — MUST be zero** |
 | 21 | 1 | `u8` | `clock_flags` | bitmask `clock_flags` |
-| 22 | 2 | `u16` | `max_notify_bytes` | `bytes`; Largest notification this device will ever send; a fixed device ceiling, NOT the negotiated ATT payload (SPEC.md 4.2) |
+| 22 | 2 | `u16` | `reserved_22` | Was max_notify_bytes; a notification is bounded by the negotiated ATT payload, which the client's stack already knows (SPEC.md 2); **reserved — MUST be zero** |
 <!-- END GENERATED: info -->
 
 `clock_flags` bits:
@@ -271,14 +260,13 @@ Total: **24 bytes**. All fields little-endian.
 | 4 | `control` | — |
 | 5 | `can_fd` | **Requires `can`.** |
 | 6 | `masked_subscriptions` | **Requires `can`.** |
-| 7 | `on_change_subscriptions` | **Requires `can`.** |
-| 8+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+| 7+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:capabilities -->
 
-A client MUST read this characteristic on every connection and MUST NOT cache it
-across connections. A DIY device is reflashed by its owner: its minor version,
-capability set and rate ceilings can all change while its Bluetooth address does
-not.
+A client MUST read this characteristic on every connection and MUST NOT cache
+it across connections: a DIY device is reflashed by its owner, so its minor
+version, capability set and rate ceilings can all change while its Bluetooth
+address does not.
 
 If `protocol_major` does not match the major version implied by the discovered
 service UUID, the client MUST treat the device as non-conforming and disconnect.
@@ -295,7 +283,9 @@ runner and this section cannot disagree about what a bit requires.
 **The attribute table is fixed.** A VTP/1 device MUST expose the service and
 **every** characteristic in the first table, whatever its capabilities say. A
 characteristic whose capability bit is clear is **inert**, not absent, and the
-last column says exactly what inert means for it.
+last column says exactly what inert means for it. The table is fixed because
+central stacks cache the attribute table across connections; a table that
+changes between connections hands the client a stale handle (RATIONALE §8.2).
 
 <!-- BEGIN GENERATED: profile:attributes -->
 | Characteristic | Capability | Properties | CCCD | Written by | Read by | When the capability bit is clear |
@@ -313,36 +303,17 @@ MUST expose at least the properties listed. It MAY expose more — making `gps`
 readable is a common convenience — and a client MUST NOT rely on any property
 the table does not list, so it MUST NOT read `gps` in place of subscribing.
 
-**An inert characteristic costs its implementer almost nothing**, and that is
-the point of requiring one. A device without the `control` bit exposes the
-Control characteristic and **rejects every write with an ATT error**; it does
-not parse opcodes, does not implement indications, and never answers
-`unsupported_opcode`, because answering requires the response path it does not
-have. The same goes for `monitor_values`. A GPS-only build is a service
-declaration, four inert attributes and one notify path.
+An inert characteristic costs its implementer almost nothing. A device without
+the `control` bit exposes the Control characteristic and rejects every write
+with an ATT error; it does not parse opcodes, implement indications, or answer
+`unsupported_opcode`. The same goes for `monitor_values`.
 
-**A CCCD is an attribute, so it is part of the fixed table too.** Every
-notifying and indicating characteristic above carries its Client Characteristic
-Configuration descriptor whatever the capability bit says, for exactly the
-reason the characteristics themselves are always present: removing one changes
-the attribute table a central has cached.
-
-A client enables the CCCD for a role whose bit is set, and leaves the others
-alone. A device MUST accept a CCCD write on an inert stream — it costs a
-two-byte descriptor and a stored value nothing reads — and then simply never
-notifies, which is what "inert" already means. A device MUST NOT reject a CCCD
-write on the grounds that the capability is absent.
-
-The alternative — omitting the characteristics a device does not implement —
-fails for a reason that has nothing to do with elegance. Central stacks
-**cache the attribute table** across connections, and
-several cache it across reboots of the phone. A device whose table changes
-between connections, because a capability was switched off in firmware or
-because a build shipped without a role, hands the client a stale handle. The
-client then reads or writes the wrong attribute rather than discovering a
-missing one, which is precisely the plausible-wrong-value failure §1.1 exists
-to prevent. A fixed table cannot produce it: discovery answers "is this
-VTP/1?", Info answers "what does it do?", and neither half-answers the other.
+Every notifying and indicating characteristic carries its Client
+Characteristic Configuration descriptor whatever the capability bit says. A
+device MUST accept a CCCD write on an inert stream — and then simply never
+notifies — and MUST NOT reject one on the grounds that the capability is
+absent. A client enables the CCCD for a role whose bit is set, and leaves the
+others alone.
 
 **Capability implications are normative.**
 
@@ -356,7 +327,6 @@ VTP/1?", Info answers "what does it do?", and neither half-answers the other.
 | 4 | `control` | — | — |
 | 5 | `can_fd` | bit 1 (`can`) | — |
 | 6 | `masked_subscriptions` | bit 1 (`can`) | — |
-| 7 | `on_change_subscriptions` | bit 1 (`can`) | — |
 <!-- END GENERATED: profile:capabilities -->
 
 **The largest CAN payload follows from the bits and is not a field.** A client
@@ -368,87 +338,44 @@ computes it:
 | set | clear | 8 — Classic CAN |
 | set | set | 64 — CAN FD |
 
-`set`/`set` is the only combination `can_fd` permits, because §4.1 makes
-`can_fd` require `can`. Info carried a `can_max_payload` byte for this until it
-turned out that every value it could hold was already decided here — so two
-statements of one fact existed, an implementation could publish them
-disagreeing, and neither reference checked. Byte 20 of Info is now reserved.
+`set`/`set` is the only combination `can_fd` permits, because `can_fd`
+requires `can`. Byte 20 of Info once carried this value and is now reserved:
+a field whose every value is derivable is a field two implementations can
+disagree about.
 
 A device MUST NOT set a capability bit without also setting every bit the
-second column names. A client MUST treat an Info whose capabilities break an
-implication as non-conforming, exactly as it treats a `protocol_major`
-mismatch, and MUST NOT guess which half was meant.
+second column names, and MUST NOT publish a non-zero value in a capacity field
+whose capability bit is clear. This is the device-side half of "a capacity of
+zero means none": a device reporting `can_max_frames_per_s` of 4000 with the
+`can` bit clear has published a capability it does not have.
+
+A client MUST decode an Info that breaks either rule — the record is
+well-formed — but MUST NOT use a role whose required bit is missing, MUST NOT
+rely on a capacity published behind a cleared bit, and SHOULD surface the
+contradiction to the user as a device defect. It MUST NOT guess which half was
+meant.
 
 `can` and `monitor` require `control` because neither role is reachable
-without it. A CAN device forwards nothing until a client has sent
-`CAN_SUBSCRIBE` (§9.2), and a Monitor device cannot say which channels it wants
-except through `MONITOR_LIST` (§13.3). A device advertising either without
-Control is advertising a role no client can use.
+without it: a CAN device forwards nothing until a client has sent
+`CAN_SUBSCRIBE` (§9.1), and a Monitor device can only name its channels
+through `MONITOR_LIST` (§13.3). `can_fd` and `masked_subscriptions` require
+`can` because each qualifies how CAN subscriptions behave.
 
-`can_fd`, `masked_subscriptions` and `on_change_subscriptions` require `can`
-for the same reason: each qualifies how CAN subscriptions behave, and qualifies
-nothing at all on a device with no CAN.
-
-**Each of the three says what a device does when it is clear**, because a
-capability bit that only says "supported" leaves the other half to the reader
-and a client cannot plan around it:
+**Each qualifier bit says what a device does when it is clear:**
 
 | Bit | Set | Clear |
 | --- | --- | --- |
 | `can_fd` | The device MAY emit records with the FD bit set, carrying up to 64 payload bytes | The device MUST NOT emit a record with the FD bit set, and no record carries more than 8 payload bytes |
 | `masked_subscriptions` | `CAN_SUBSCRIBE_MASK` is accepted | `CAN_SUBSCRIBE_MASK` MUST answer `unsupported_opcode` |
-| `on_change_subscriptions` | `on_change` is accepted as a subscription mode | A subscription naming `on_change` MUST be refused with `bad_params` |
 
-`CAN_SUBSCRIBE` is unaffected by `masked_subscriptions`: §9.2 defines it as
+`CAN_SUBSCRIBE` is unaffected by `masked_subscriptions`: §9.1 defines it as
 `CAN_SUBSCRIBE_MASK` with a full mask, but it is a separate opcode and every
 CAN device implements it. The capability governs whether a client may choose
 the mask, not whether masking exists.
 
-A device without `on_change_subscriptions` refuses the mode rather than
-silently substituting `every_frame`. Quietly forwarding every frame where a
-client asked for changes only is the difference between a channel that updates
-on an event and one that floods, and the client would have no way to find out.
-
-**Capacity fields follow the bit.** Every field in the third column MUST be
-zero when its capability bit is clear. This is what makes "a capacity of zero
-means none" checkable rather than a promise: a device reporting
-`can_max_frames_per_s` of 4000 with the `can` bit clear has published a
-capability it does not have, and a client sizing a buffer from it has been told
-something false.
-
-**Direction.** The "written by" and "read by" columns say which end produces
-each record. Two of the six run client-to-device — `control` requests and
-`monitor_values` — and everything else runs device-to-client. A conformance
-role covers both directions of the records it names (`conformance/README.md`).
-
-### 4.2 `max_notify_bytes` is a device ceiling
-
-`max_notify_bytes` is the largest notification the **device** will ever send,
-on any link. It is a property of the device, fixed for the connection, and it
-is **not** the negotiated ATT payload.
-
-Those two readings look interchangeable and are not, because of when each
-becomes available. A client reads Info as its first act after connecting. A
-peripheral commonly does not learn the negotiated maximum until a central
-subscribes, which is strictly later — on CoreBluetooth the only object that
-knows it arrives in the subscribe callback. A `max_notify_bytes` defined as the
-negotiated value is therefore a field whose correct value does not exist yet at
-the only moment anyone reads it, and a device answering it can only report the
-previous link's number or a configured guess.
-
-Defined as a ceiling, it has an answer at every instant: a client sizes its
-receive buffer once, from a number that cannot change underneath it, and a
-device that would exceed the ceiling on a generous link simply does not.
-
-A device MUST NOT send a notification larger than the `max_notify_bytes` it
-published, and MUST size batches to the negotiated ATT payload when that is
-**smaller** — the ceiling bounds the device, the link bounds the notification,
-and the smaller of the two always wins.
-
-A client that wants the negotiated value asks for it with `GET_LINK_PARAMS`
-(§9.1), which is a request made after subscribing rather than a value read
-before it, and which reports `att_mtu` with a validity bit that is clear when
-the device genuinely cannot see it.
+The "written by" and "read by" columns say which end produces each record. A
+conformance role covers both directions of the records it names
+(`conformance/README.md`).
 
 ---
 
@@ -503,30 +430,22 @@ letter.
 | `head_mot` | `12345678` | `4e 61 bc 00` | 123.45678° from true north |
 | `p_dop` | `145` | `91 00` | PDOP 1.45 |
 
-A receiver that reads those two negative rows as unsigned gets 395.7099296° and
-307.1019296° — numbers no coordinate can hold, and the reason the southern and
-western hemispheres are a sign rather than a flag somebody has to remember to
-apply.
+A receiver that reads the two negative rows as unsigned gets 395.7° and
+307.1° — numbers no coordinate can hold, which is why hemisphere is a sign
+rather than a flag somebody has to remember to apply.
 
 **Ranges.** When its validity bit is set, `lat` MUST lie within ±90°, `lon`
-within ±180°, and `head_mot` within 0° to 360° exclusive of 360. A receiver
-MUST reject a fix that breaks any of these.
+within ±180°, and `head_mot` within 0° to 360° exclusive of 360. These bounds
+bind the device: it MUST NOT emit a fix that breaks them. A receiver MUST
+decode such a fix — the payload is well-formed — but MUST NOT clamp the value,
+SHOULD NOT use the affected fields, and SHOULD surface the violation to the
+user as a device defect. Clamping is forbidden under §1.1: 91° is not a place
+a clamp could move closer to, and clamping to 90° puts the vehicle at the pole
+and lets the client draw it there.
 
-Rejected rather than clamped, under §1.1. A latitude of 91° is not a place a
-clamp could move it closer to; it is a field that has been corrupted, and every
-other field in the same record came from the same bytes. Clamping to 90° would
-put the vehicle at the north pole and let the client draw it there.
-
-**Datum.** `lat`, `lon` and `alt_ellipsoid` MUST be referenced to WGS-84. A
-position is plotted against a map the device knows nothing about, and a
-coordinate in an unstated datum is metres of silent error: a plausible wrong
-value of exactly the kind §1.1 exists to prevent.
-
+**Datum.** `lat`, `lon` and `alt_ellipsoid` MUST be referenced to WGS-84.
 `alt_msl` is height above mean sea level as the receiver computes it, from
-whatever geoid model it carries; this specification does not name one. The
-difference between the two altitude fields is the geoid separation at that
-position, and a client needing to know which model produced it needs the
-receiver's documentation rather than a protocol field.
+whatever geoid model it carries; this specification does not name one.
 
 ### 5.1 Validity
 
@@ -584,17 +503,16 @@ measurement of zero. No field value anywhere in VTP/1 signals absence.
 | 5+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:fix_flags -->
 
-`rtk_float` and `rtk_fixed` are **mutually exclusive**: a carrier-phase
-solution has either resolved its integer ambiguities or it has not. Either RTK
-bit also implies `differential`, since an RTK solution is by definition a
+`rtk_float` and `rtk_fixed` are **mutually exclusive** — a carrier-phase
+solution has either resolved its integer ambiguities or it has not — and
+either implies `differential`, since an RTK solution is by definition a
 differentially corrected one.
 
 A device MUST NOT set both RTK bits, and MUST set `differential` whenever it
-sets either. A receiver MUST reject a fix that breaks either rule, as it
-rejects any other self-contradictory record (§1.1) — the flags and the position
-came from the same bytes, and the natural client reading of both-RTK-set is
-"fixed wins", which would upgrade a device's accuracy claim on the strength of
-a bug.
+sets either. A receiver MUST decode a fix that breaks either rule and SHOULD
+surface the contradiction; it MUST NOT resolve the pair by guessing — in
+particular it MUST NOT read both-set as `rtk_fixed`, which upgrades a device's
+accuracy claim on the strength of a bug.
 
 ### 5.4 Reference frames and derived quantities
 
@@ -608,12 +526,9 @@ representation.
 
 `head_mot` is measured clockwise from **true** north — never magnetic north,
 and never a grid bearing. VTP/1 carries no magnetic declination and no magnetic
-heading, so a client that wants either derives it from the position with a
-model of its own.
-
-`head_mot` is the receiver's filtered heading of motion and MAY differ from
-`atan2(vel_e, vel_n)`. A client SHOULD prefer `head_mot` when its validity bit
-is set.
+heading. `head_mot` is the receiver's filtered heading of motion and MAY differ
+from `atan2(vel_e, vel_n)`; a client SHOULD prefer `head_mot` when its validity
+bit is set.
 
 ### 5.5 Extension records
 
@@ -635,8 +550,6 @@ The notification length MUST equal the base record plus exactly the bytes
 accounted for by `ext_count` extension records. Any other length MUST be
 rejected.
 
----
-
 ### 5.6 When a fix is timestamped
 
 **`fix_flags` bit 4 (`solution_epoch`) says which instant `t_device` names**:
@@ -651,33 +564,11 @@ clear it otherwise. `t_utc`, when its validity bit is set, always refers to the
 epoch of the solution whichever way bit 4 reads — it comes from the receiver's
 own solution and is not a reading of the device clock at all.
 
-An earlier draft stated the epoch as an unconditional requirement *and* gave
-the fallback, which are two rules that cannot both hold. The conditional form
-is the one that was meant: the flag exists precisely because the requirement
-cannot be unconditional.
-
-The two are far apart. A GNSS receiver computes a solution for a specific
-instant and delivers it over a serial link some tens to some hundreds of
-milliseconds later, depending on the receiver, its output rate and how busy the
-link is. A device that stamps delivery therefore reports a position that was
-true at one time with a timestamp naming another, and every GPS sample is late
-against CAN and IMU by that latency. Cross-channel alignment is what §8.1's
-single shared clock exists to provide, and a systematic offset on one of the
-three channels removes it while leaving every number looking entirely
-plausible.
-
-Whether the receiver exposes the epoch — through a timing message, or a PPS
-edge the device can latch — is a property of the hardware, not of this
-protocol, and a specification that required what some hardware cannot do would
-be met by devices setting a timestamp they cannot justify.
-
-The flag exists so a client can tell which it has. §1.1 applies exactly as it
-does to a validity bit: the honest answer to "when was this true?" is either a
-measured epoch or an admission that the device does not know, and never a
-delivery time presented as a measurement. A client aligning GPS against CAN
-below the tens of milliseconds SHOULD check this bit, and SHOULD NOT assume the
-offset is constant when it is clear — receiver latency varies with the number
-of satellites and the solution type.
+The two instants are tens to hundreds of milliseconds apart, so a device that
+stamps delivery reports every GPS sample late against CAN and IMU by a latency
+that varies with the receiver's load (RATIONALE §8.3). A client aligning GPS
+against CAN below the tens of milliseconds SHOULD check this bit, and SHOULD
+NOT assume the offset is constant when it is clear.
 
 ---
 
@@ -747,22 +638,12 @@ How many frames go in one is bounded by the negotiated ATT MTU (§2) and by the
 `t_base + dt × 10` microseconds on the device clock (§8).
 
 `t_base` MUST be the bus-arrival time of record 0, measured by the device, not
-the time the notification was queued or sent.
-
-`t_base` is an absolute reading of that clock. It is not an offset from
-anything: it does not start at zero when the connection opens, and it does not
-accumulate from batch to batch. Every notification carries its own `t_base`,
-and every `dt` is measured from the `t_base` in the same notification — not
-from the record before it, and not from the previous batch. **Record 0's `dt`
-MUST be zero**, `t_base` being its arrival time by definition, and a receiver
-MUST reject a batch whose first record says otherwise.
-
-The rule follows from `t_base`'s own definition, so a non-zero first `dt` means
-the sender and the receiver disagree about what `t_base` is — and a receiver
-that accepts it has no way to tell which of the two readings it should trust.
-Four vectors in this repository carried non-zero first offsets while this
-sentence said they could not, and both reference decoders accepted them, which
-is how a definitional rule survives as prose without ever becoming a rule.
+the time the notification was queued or sent. It is an absolute reading of the
+device clock, not an offset from anything, and every `dt` is measured from the
+`t_base` in the same notification — never from the record before it or the
+previous batch. **Record 0's `dt` MUST be zero**, `t_base` being its arrival
+time by definition, and a receiver MUST reject a batch whose first record says
+otherwise.
 
 A batch whose `t_base` is 12 345 678 000 and whose `count` is 3:
 
@@ -779,16 +660,10 @@ flush far more frequently — once per connection interval is RECOMMENDED.
 ### 6.2 Batches
 
 **`count` MUST NOT be zero**, and a receiver MUST reject a batch that carries
-no records. `t_base` is defined as the bus-arrival time of record 0, so a batch
-with no record 0 carries a timestamp naming a frame that does not exist — the
-same reason §7 forbids an empty IMU batch.
-
-A quiet bus is reported by sending nothing. There is no empty-batch heartbeat
-and none is needed: a client learns the device is alive from any of the streams
-it subscribed to, and a device with a genuinely silent bus and nothing else to
-send has nothing to say. `dropped` and the shedding flag ride on the next batch
-that has content, which §8.3 already permits — they are a best-effort
-diagnostic, not a delivery obligation.
+no records: `t_base` is defined as the bus-arrival time of record 0, so a batch
+with no record 0 timestamps a frame that does not exist. A quiet bus is
+reported by sending nothing — there is no empty-batch heartbeat. `dropped` and
+the shedding flag ride on the next batch that has content, which §8.3 permits.
 
 A receiver MUST reject a notification whose length does not exactly match the
 header plus `count` complete records.
@@ -802,13 +677,10 @@ neither of those was ever accepted. A client SHOULD surface a non-zero
 `dropped` to the user.
 
 `flags` bit 0 indicates the device is actively **shedding load**: discarding
-frames it accepted and cannot forward, because the bus is producing them faster
-than the device can pack them or the link can carry them. The bit reports that
-the condition is current; `dropped` counts what it has cost since the previous
-notification. A device sheds rather than stalls because a bus does not wait,
-and §9.4 is why the condition is reachable at all — an `every_frame` or
-`on_change` subscription cannot be refused on rate grounds, because the load it
-will produce is not knowable when it is installed.
+frames it accepted and cannot forward. The bit reports that the condition is
+current; `dropped` counts what it has cost since the previous notification. A
+device sheds rather than stalls because a bus does not wait; §9.3 is why the
+condition is reachable at all.
 
 ### 6.4 Identifier validity
 
@@ -819,10 +691,9 @@ identifier that does not fit in eleven bits is malformed, and the only
 alternative is to truncate it to a different identifier that looks entirely
 valid.
 
-Bit 30 (CAN FD) and bit 31 (RTR) MUST NOT both be set. CAN FD has no remote
-frames, so the combination describes a frame that cannot exist.
-
-A remote frame carries no data. If bit 31 is set, `len` MUST be zero.
+Bit 30 (CAN FD) and bit 31 (RTR) MUST NOT both be set: CAN FD has no remote
+frames. A remote frame carries no data: if bit 31 is set, `len` MUST be zero.
+A receiver MUST reject the whole batch on either violation.
 
 Each of these is rejected rather than repaired, under §1.1: a repaired frame is
 a plausible wrong value with a correct-looking identifier.
@@ -830,90 +701,63 @@ a plausible wrong value with a correct-looking identifier.
 ### 6.5 What a remote frame does not carry
 
 The data length a remote frame *requests* is not represented in major version
-1. `len` is the payload length, and the batch's length arithmetic depends on it
-being exactly that, so it cannot also carry a requested size.
-
-A logger therefore records that a remote frame for an identifier occurred, and
-not how many bytes it asked for. This is a deliberate limitation and not an
-oversight: remote frames are rare on the vehicle buses this protocol targets,
-and the alternative is a second length field on the highest-volume record in
-the specification.
+1: `len` is the payload length, and the batch's length arithmetic depends on
+it being exactly that. A logger records that a remote frame for an identifier
+occurred, and not how many bytes it asked for.
 
 ### 6.6 CAN FD flags not carried
 
-Bit Rate Switch and Error State Indicator are not represented. Both are
-per-frame, so carrying them costs a byte on `can_record` — at 4000 frames per
-second that is 4 kB/s on the one stream that can saturate a link, which is the
-finding in RATIONALE §4.1.
-
-They are bus diagnostics rather than vehicle telemetry, and no device
-implements this specification yet, so nothing is known to need them. Record
-sizes are frozen for the life of a major version (§11.4), which means adding
-them later is a VTP/2 change rather than a minor one. That is the cost of this
-decision and it is stated plainly rather than discovered.
+Bit Rate Switch and Error State Indicator are not represented: both are
+per-frame, and a byte on `can_record` costs 4 kB/s at 4000 frames per second
+on the one stream that can saturate a link (RATIONALE §4.1). Record sizes are
+frozen for the life of a major version (§11.4), so adding them later is a
+VTP/2 change. That cost is stated plainly rather than discovered.
 
 ### 6.7 When a timestamp is taken
 
 `t_base` and every `dt` are bus-arrival times measured at the **end of the
 frame** — the point at which the controller signals a completed reception.
-
-Not start-of-frame. A device cannot generally know a frame's time on air
-without knowing the bit timing and the number of stuffed bits, so a
-start-of-frame timestamp would be back-computed rather than measured, and this
-specification prefers a measurement it can defend to an estimate it cannot.
-
-The consequence is that a long frame is stamped later than a short one relative
-to the moment it began, by its own transmission time. At 500 kbit/s a 64-byte
-CAN FD frame is roughly a millisecond of that; at 1 Mbit/s an 8-byte classic
-frame is well under a tenth. A client aligning below a millisecond should know
-which end of the frame it is aligning to.
+Not start-of-frame, which a device cannot generally measure (RATIONALE §8.4).
+A long frame is therefore stamped later than a short one relative to the
+moment it began, by its own transmission time; a client aligning below a
+millisecond should know which end of the frame it is aligning to.
 
 ### 6.8 Subscription modes and the first frame
 
-The first matching frame is forwarded in every mode. A client that installs a
-subscription and then waits for a value it can display should not have to wait
-for a second frame to arrive.
+The first matching frame is forwarded in every mode, so a client that installs
+a subscription and waits for a value to display never waits for a second frame.
 
 | Mode | `arg` | Behaviour after the first frame |
 | --- | --- | --- |
 | `every_frame` | ignored | Every matching frame. |
 | `periodic` | minimum interval, ms | At most one frame per `arg` ms. `arg` 0 means no limit. |
-| `on_change` | debounce, ms | Forwarded when the payload differs from the last one forwarded, and not within `arg` ms of it. `arg` 0 means no debounce. |
-| `every_nth` | N | Every Nth frame after the first. N MUST be at least 1; a device MUST answer `bad_params` to N of 0. |
 
-`on_change` compares the payload only. A frame whose payload is unchanged is
-not forwarded even though its arrival time differs, which is the point of the
-mode; a client that needs arrival times needs `every_frame`.
+Mode values 2 and 3 were assigned by pre-1.0 drafts and remain unassigned; a
+receiver treats them as unknown (§11.4), and a device MUST answer `bad_params`
+to a subscription naming one.
 
-A masked subscription may match several identifiers, and each of them is a
-different signal from a different sender. A device MUST therefore keep the
-state these modes need — the `periodic` interval, the `every_nth` counter, the
-`on_change` comparison payload, and "the first matching frame" — **per matching
-identifier**, not per subscription.
+A masked subscription may match several identifiers, and each is a different
+signal from a different sender. A device MUST therefore keep `periodic` state —
+the interval, and "the first matching frame" — **per matching identifier**,
+not per subscription: a shared interval lets whichever identifier arrives
+first consume it, so a client sees one signal out of a group it subscribed to
+as a group, and the failure looks like a quiet bus rather than a bug.
 
-Sharing that state across a mask makes each mode wrong in a different way, and
-all three failures look like a quiet bus rather than a bug. A shared `periodic`
-interval lets whichever identifier arrives first consume it, so the others are
-suppressed and a client sees one signal out of a group it subscribed to as a
-group. A shared `every_nth` counter forwards every Nth *frame of the group*
-rather than every Nth frame of each identifier, so which signal a client
-receives depends on the interleaving of the bus. A shared `on_change`
-comparison compares the payload of one identifier against the payload of
-another, where "changed" carries no meaning at all.
+Per-identifier state is bounded by the identifiers actually seen, which a
+device cannot know when the subscription is installed. A device MAY bound the
+state it keeps; when the bound is reached it shed, exactly as for load (§6.3):
+frames it can no longer schedule are discarded, counted in `dropped`, and the
+shedding flag is set. A device MUST NOT silently forward such frames
+unscheduled, and MUST NOT drop the subscription.
 
 ### 6.9 One bus
 
 Major version 1 addresses a single CAN bus. A device with more than one
 transceiver cannot say which bus a frame arrived on, and the subscription
-commands have no bus parameter.
-
-The low byte of `can_header.reserved` is earmarked for a bus index so a later
-minor version may add one. Until then it MUST be written as zero and MUST be
-ignored on receive. Subscribing per bus would need a new opcode, which a minor
-version may add (§11.2), so this is a gap that can be closed without a major
-version.
-
----
+commands have no bus parameter. The low byte of `can_header.reserved` is
+earmarked for a bus index, and subscribing per bus would be a new opcode, so a
+later minor version can close this gap (§11.2). Until then the byte MUST be
+written as zero and MUST be ignored on receive.
 
 ### 6.10 Payload length
 
@@ -929,15 +773,11 @@ which above eight is a fixed ladder:
     0  1  2  3  4  5  6  7  8  12  16  20  24  32  48  64
 
 A receiver MUST reject the whole batch if a CAN FD `len` is not one of these.
-Nine, ten and eleven are not short payloads; they are lengths no CAN FD
-controller can produce.
 
-Rejection rather than repair follows §1.1. A `len` off the ladder means the
+Rejection rather than repair follows §1.1: a `len` off the ladder means the
 reader and the writer disagree about where this record ends, so every byte
 after it is suspect — including the identifier of the next frame, which will
-still look like a valid identifier. Rounding the length up to the next rung
-would produce a frame with plausible padding and a correct-looking identifier,
-which is precisely the outcome the batch-level reject exists to avoid.
+still look valid.
 
 ## 7. IMU characteristic — NOTIFY
 
@@ -985,74 +825,47 @@ Total: **12 bytes**. All fields little-endian.
 
 Samples are evenly spaced: sample *i* is at `t_base + i × period` microseconds.
 
-**`count` MUST NOT be zero.** `t_base` is defined as the acquisition time of
-sample 0, so a batch with no sample 0 has a timestamp naming a sample that does
-not exist. A device with nothing to report sends nothing; there is no empty-IMU
-notification and a receiver MUST reject one. §6's CAN batch says the same, for
-the same reason.
+**`count` MUST NOT be zero**, and a receiver MUST reject an empty batch:
+`t_base` is defined as the acquisition time of sample 0, so a batch with no
+sample 0 timestamps a sample that does not exist. A device with nothing to
+report sends nothing. §6.2 says the same of CAN, for the same reason.
 
 `t_base` MUST be the acquisition time of sample 0 — the instant the sensor
-took that reading — and not the instant the device read it out.
+took that reading — and not the instant the device read it out. A device
+draining a FIFO knows its own sampling schedule, so sample 0's time is the
+drain time less the samples behind it; no flag or exception applies
+(RATIONALE §8.5).
 
-**Every sample in one batch MUST be evenly spaced by `period`.** That is what
-lets a client derive each timestamp arithmetically, and it is a real constraint
-on a device draining a FIFO: if the FIFO overflowed, or the sensor was
-reconfigured, or a read was missed, the samples either side of the gap are no
-longer `period` apart and every timestamp the client derives after the gap is
-wrong by the size of it — silently, and increasingly, because the error is
-carried by `i × period` rather than announced.
+**Every sample in one batch MUST be evenly spaced by `period`.** If the FIFO
+overflowed, the sensor was reconfigured, or a read was missed, the samples
+either side of the gap are no longer `period` apart, and every derived
+timestamp after it would be silently wrong. A device MUST end the batch at the
+discontinuity and start the next one with a fresh `t_base` taken from the
+first sample after it, counting the samples lost across the gap in `dropped`
+(§8.3).
 
-A device MUST therefore **end the batch at the discontinuity** and start the
-next one with a fresh `t_base` taken from the first sample after it. The
-samples lost across the gap are counted in `dropped` (§8.3) exactly as any
-other loss. Splitting costs one extra notification at the moment a device is
-already in trouble, which is the cheapest possible price for not shipping a
-timeline that is quietly wrong from that point on.
+`period` is an interval rather than a rate because real sensor output data
+rates are not integer hertz. A device MUST report its actual sample interval,
+rounded to the nearest microsecond — the one approximate value in VTP/1. The
+error re-anchors at every batch's measured `t_base`, so it accumulates only
+within a batch: at 833 Hz over nineteen samples the worst case is about 9 µs,
+below the 10 µs resolution of a CAN timestamp (§6.1).
 
-Samples are commonly drained from a sensor's FIFO in bursts, so the read
-happens well after the earliest sample in the burst was taken: at 833 Hz a
-sixteen-deep FIFO is nearly twenty milliseconds. A device stamping the drain
-reports the whole batch late by the depth of its own buffer, and the error
-changes with the buffer's occupancy, so it is not even a constant a client
-could calibrate away.
+A device MUST NOT report a `period` of zero, and a receiver MUST reject a
+batch that does: zero says every sample was taken at the same instant, which
+describes no measurement, and a client dividing by it to recover a rate
+divides by zero.
 
-Unlike a GNSS solution epoch (§5.6) this needs no flag and admits no exception.
-The device sets the sampling schedule itself, so it knows the interval and how
-many samples it drained; sample 0's time is the drain time less the samples
-behind it. A device that cannot work that out is not measuring what it claims
-to measure.
-
-A CAN record carries its own `dt` (§6.1) because bus frames arrive when the bus
-decides. IMU samples do not: the device reads its sensor on a schedule it sets,
-so one interval describes the whole batch and a per-sample offset would carry
-nothing the header does not already say. The two forms differ because what is
-being timestamped differs, not because they are two conventions for one thing.
-
-`period` is expressed as an interval rather than a rate because real sensor
-output data rates are not integer hertz. A device MUST report its actual sample
-interval, rounded to the nearest microsecond.
-
-That rounding is the one place in VTP/1 where a value is approximate, so its
-bound is stated rather than left to be discovered. An output data rate whose
-true interval is not a whole number of microseconds is misrepresented by up to
-0.5 µs per sample, and the error accumulates only *within* a batch: sample
-timing is derived from that batch's own `t_base`, which the device measures, so
-each notification re-anchors and nothing accumulates across a stream. At 833 Hz
-in a batch of nineteen samples the worst case is about 9 µs, which is below the
-10 µs resolution of a CAN frame timestamp (§6.1) and therefore cannot be the
-limiting term in any cross-channel alignment.
-
-`period` is a `u32`, so representable intervals run from 1 µs to about 4295
-seconds. A device MUST NOT report a period of zero, and a receiver MUST reject
-a batch that does: zero says every sample in the batch was taken at the same
-instant, which describes no measurement, and a client dividing by it to recover
-a rate divides by zero.
+`flags` declares which sensor groups are populated. If a group's flag is clear,
+its fields MUST be zero and the receiver MUST report them absent — not as a
+measurement of zero.
 
 ### 7.1 Axes and signs
 
-The sensor frame is the device's own. **Vehicle alignment is the client's job**
-— this specification does not say where the device is mounted or which way it
-faces, because it cannot know.
+The sensor frame is the device's own. **Vehicle alignment is the client's
+job** — this specification does not say where the device is mounted or which
+way it faces, because it cannot know. A device MUST NOT rotate samples into a
+vehicle frame; mounting orientation is outside the scope of major version 1.
 
 What it must say is how to read the numbers, because a client cannot infer any
 of it and getting it wrong produces a plausible result rather than an obvious
@@ -1068,46 +881,26 @@ one:
   that carries *y* toward *z*. Viewed from the positive end of an axis looking
   back at the origin, positive is counter-clockwise.
 
-The accelerometer convention is the one worth stating twice. Both signs are in
-use in the wild — some parts and some libraries report the gravity vector
-instead, which is the exact negative — and a client that assumes the wrong one
-sees a car braking when it is accelerating. The mistake survives every
-plausible sanity check, because the magnitudes are right.
+The accelerometer convention is the one worth stating twice: both signs are in
+use in the wild, and a client that assumes the wrong one sees a car braking
+when it is accelerating — a mistake that survives every plausible sanity
+check, because the magnitudes are right.
 
 ### 7.2 Saturation
 
-A sample beyond the sensor's range is a measurement the device did not make.
-`i16` at these scales gives ±32.767 g and ±1638.35 °/s, and a real part
-saturates well before either — but whatever the limit, the reading at it is
-"at least this much", not "this much".
+A sample beyond the sensor's range is a measurement the device did not make:
+the reading at the rail is "at least this much", not "this much".
 
 A device MUST set `imu_header.flags` bit 2 when any sample in the batch is at
 or beyond the range of the sensor that produced it. A client MUST treat every
 sample in a batch so marked as a lower bound on the magnitude rather than a
 measurement, and SHOULD NOT integrate one.
 
-The flag is per batch rather than per sample because `imu_sample` has no room
-for one and is deliberately closed (§11.3): twelve bytes at up to 833 Hz is the
-one stream where a per-sample byte costs real airtime. A batch is a short
-enough window — nineteen samples at 833 Hz is 23 ms — that "something in here
-clipped" is enough for a client to distrust the batch and say so.
-
-Saturation is not absence. A saturated axis still has its presence flag set,
-because the sensor is fitted and did report: what is in doubt is the value's
-magnitude, not whether there is one. That is why this is a flag of its own
-rather than a cleared presence bit — §1.1 asks for the honest state, and
-"present but railed" is a different state from "not fitted".
-
-`flags` declares which sensor groups are populated. If a group's flag is clear,
-its fields MUST be zero and the receiver MUST report them absent — not as a
-measurement of zero.
-
-Samples are in the **sensor frame**. A device MUST NOT attempt to rotate them
-into a vehicle frame; it cannot know its mounting. Mounting orientation is
-outside the scope of major version 1: there is no extension mechanism on this
-characteristic to carry it, and inventing one for a single field would be worse
-than leaving the question to the client, which has to solve it for every other
-sensor anyway.
+The flag is per batch rather than per sample because `imu_sample` is
+deliberately closed (§11.3) and a batch is a short window — nineteen samples
+at 833 Hz is 23 ms. Saturation is not absence: a saturated axis keeps its
+presence flag set, because the sensor is fitted and did report. "Present but
+railed" is a different state from "not fitted".
 
 ---
 
@@ -1123,97 +916,61 @@ fixes, CAN frames and IMU samples against it. This single shared time base is
 what makes cross-channel alignment possible and is REQUIRED even when only one
 role is implemented.
 
-The clock MUST NOT jump backwards while connected. A device that disciplines its
-clock to GNSS MUST set `clock_flags` bit 0 and MUST apply corrections as a
+The clock MUST NOT jump backwards while connected. A device that disciplines
+its clock to GNSS MUST set `clock_flags` bit 0 and MUST apply corrections as a
 frequency adjustment, not as a step.
 
-`t_utc` in a GPS fix and `TIME_SYNC` (§9) are the two ways a client maps this
+`t_utc` in a GPS fix and `TIME_SYNC` (§9.5) are the two ways a client maps this
 clock to wall time.
 
 Timestamps derived from the clock — `t_base + dt × 10` for a CAN frame (§6.1)
 and `t_base + i × period` for an IMU sample (§7) — are computed modulo 2^64,
-the width of the field they derive from. A device will not reach that wrap: at
-one microsecond per tick it is over half a million years away. The arithmetic is
-specified so that two conforming implementations agree bit for bit rather than
-by accident, which they otherwise do not — a decoder in a language with
-arbitrary-precision integers produces a different answer from one in C for the
-same bytes.
+the width of the field they derive from. A device will not reach that wrap; the
+arithmetic is specified so that two conforming implementations agree bit for
+bit rather than by accident.
 
 ### 8.2 Sequence
 
 `seq` counts **notifications sent on its own characteristic**. It increments by
 exactly one per notification, on all three streams, and wraps at 65535.
 
-A gap therefore means one thing and one thing only: notifications the device
-sent that the client did not receive. A receiver MUST NOT treat a wrap from
-65535 to 0 as a gap.
+A gap therefore means one thing only: notifications the device sent that the
+client did not receive. A receiver MUST NOT treat a wrap from 65535 to 0 as a
+gap.
 
 **The first notification sent on a characteristic after a connection is
 established carries `seq` 0**, and the second carries 1. A client consequently
 never has to distinguish a reconnection from a wrap, and the protocol needs no
-session or boot identifier to make that distinction for it.
-
-Stated as a property of the notification rather than of the counter because
-the counter phrasing is ambiguous, and the ambiguity has already cost
-something: "restarts at 0" can be read as the counter being zeroed and the
-first notification then taking the next value, which puts 1 on the wire. A
-device did exactly that, and its own conformance check was written to match —
-asserting the first notification carried 1 — so the test agreed with the bug it
-existed to catch.
-
-Counting notifications rather than source items is what makes the field uniform.
-A CAN batch header cannot count frames the device never accepted, and an IMU
-header cannot count samples without jumping by `count` each time; only the
-notification is a thing all three streams have exactly one of.
+session or boot identifier. The rule is stated as a property of the
+notification, not of a counter, because "restarts at 0" has already been read
+as putting 1 on the wire (RATIONALE §8.6).
 
 ### 8.3 Loss
 
 `dropped` counts items the device **accepted and then discarded**, since the
 previous notification on that characteristic.
 
-Accepted is the load-bearing word. A CAN frame that matched no subscription was
-never accepted, and a device MUST NOT count it. `dropped` is a report of
-capacity that was exceeded, not of filtering that worked as instructed, and
-conflating the two would make the field useless for the only thing it is for.
+Accepted is the load-bearing word. A CAN frame that matched no subscription
+was never accepted, and a frame the governing subscription's mode did not
+select (§6.8) was filtered as instructed; a device MUST NOT count either.
+`dropped` reports capacity that was exceeded, not filtering that worked.
 
-A subscription mode that forwards less than every frame is filtering as well. A
-frame the governing subscription's mode did not select — outside a `periodic`
-interval, inside an `on_change` debounce, or not the Nth under `every_nth`
-(§6.8) — MUST NOT be counted in `dropped` either. A client that asked for one
-frame in ten has not lost the other nine; the device did exactly what it
-installed, and a counter that says otherwise sends a client hunting a fault
-that does not exist.
+`dropped` **saturates** at 65535 and MUST NOT wrap: a wrapping drop counter
+reads 0 after exactly 65536 discards — perfect health at the precise moment
+the device is losing data fastest. A receiver MUST read 65535 as "at least
+65535", never as exactly that many.
 
-`dropped` **saturates** at 65535. It MUST NOT wrap.
-
-This is the one counter in VTP/1 that saturates, and the reason is §1.1. A
-wrapping drop counter reads 0 after exactly 65536 discards — reporting perfect
-health at the precise moment the device is losing data fastest. That is a
-plausible wrong value, and the specification spends the ceiling rather than
-allow one. A receiver MUST read 65535 as "at least 65535", never as exactly
-that many.
-
-Together the two fields separate the two ways data goes missing, and neither can
-mask the other: `seq` gaps are the transport losing what the device sent, and
+Together the two fields separate the two ways data goes missing, and neither
+can mask the other: `seq` gaps are the transport losing what the device sent;
 `dropped` is the device losing what the source produced.
 
-**`dropped` is a best-effort diagnostic.** It is there so a client can tell "my
-link is bad" from "the device is overrun", and to put a number on the second.
-It is not an audit trail, and a client MUST NOT use it to reconcile counts.
-
-That is a deliberate limit on how hard a device has to work. Attributing every
-lost item to exactly one notification means owning the counter transactionally
-across encoding, transmit-queue refusal and supersession, and the failure mode
-when a device does not is that a count lands one notification late — which
-still says the device is losing data, at roughly the rate it is losing it, and
-that is the whole question the field exists to answer.
-
-So: a device MUST count every accepted-then-discarded item, MUST saturate
-rather than wrap, and MUST NOT report loss it did not have. A device MAY report
-a discard in the next notification rather than the one it strictly belonged to.
-`seq` is the field with the exact guarantee, and it is exact precisely because
-it is cheap to be: it counts notifications actually sent, and is committed when
-the transport accepts one.
+**`dropped` is a best-effort diagnostic**, not an audit trail, and a client
+MUST NOT use it to reconcile counts. A device MUST count every
+accepted-then-discarded item, MUST saturate rather than wrap, and MUST NOT
+report loss it did not have; it MAY report a discard in the next notification
+rather than the one it strictly belonged to. `seq` is the field with the exact
+guarantee, because it is cheap to be exact about: it counts notifications
+actually sent, committed when the transport accepts one.
 
 ---
 
@@ -1222,48 +979,33 @@ the transport accepts one.
 Requests are `[opcode:u8][tag:u8][params…]`. Responses are
 `[opcode:u8][tag:u8][status:u8][detail…]`.
 
-`tag` is chosen by the client and MUST be echoed in the response so that
-requests and responses can be correlated. A device MUST respond to every
-request it applies.
+`tag` is chosen by the client, is opaque to the device, and MUST be echoed
+unchanged in the response so that requests and responses can be correlated. A
+device MUST respond to every request it applies.
 
 **A client MUST have at most one request outstanding.** It writes a request,
 waits for the indication that answers it, and only then writes the next one.
-
-That is the whole of the control lifecycle, and it is deliberately the
-simplest thing that works. An earlier draft let a client pipeline and required
-a device to accept at least four outstanding requests, which bought one thing —
-installing a subscription table without a round trip per connection interval —
-and cost every implementer a queue, a depth, an ordering guarantee and a
-refusal to hold them together. Nothing in this protocol is latency-critical on
-the control plane: subscriptions are installed once at connect, rates change
-when a user changes them, and `TIME_SYNC` measures the round trip it is
-already waiting for.
+Nothing on the control plane is latency-critical: subscriptions are installed
+once at connect, rates change when a user changes them, and `TIME_SYNC`
+measures the round trip it is already waiting for (RATIONALE §8.7).
 
 A device MUST answer `busy` to a request that arrives while it still owes a
 response, and MUST NOT apply it. A client that receives `busy` has broken the
 rule above; it MUST wait for the outstanding response and MAY then retry, and
 MUST NOT treat the request as refused — `busy` says nothing about the request
-itself. The status exists so that a device meeting a client which pipelines
-anyway has something true to say, rather than a choice between silence and
-applying what it cannot answer.
+itself.
 
-A client MUST NOT reuse a `tag` while a request bearing it is still
-outstanding. It needs no enforcement: with one request outstanding, a second
-written before the answer arrives is refused `busy` whatever tag it carries,
-and one written afterwards has nothing to collide with. **Tag ambiguity is
-therefore not prevented, it is impossible** — and a device needs no table of
-outstanding tags at all. It echoes the tag and forgets it.
-
-A tag becomes reusable as soon as its response has been sent. The rule is "not
-while outstanding", not "never twice".
+A client MUST NOT reuse a `tag` while a request bearing it is outstanding. It
+needs no enforcement: with one request outstanding, a second write is refused
+`busy` whatever tag it carries, so a device keeps no table of tags — it echoes
+the tag and forgets it. A tag becomes reusable as soon as its response has
+been sent.
 
 **`detail` is present if and only if `status` is `ok`.** A refused request is
 answered with exactly three bytes, and a client MUST NOT read the detail of a
-response whose status is anything else. The alternative — a fixed-width
-response with the detail zeroed on failure — puts a well-formed handle 0 or a
-well-formed `link_params` of all zeroes in front of a client that has already
-decided the request succeeded, which is the plausible-wrong-value failure §1.1
-exists to prevent.
+response whose status is anything else: a fixed-width response would put a
+well-formed zero in front of a client that has already decided the request
+succeeded.
 
 <!-- BEGIN GENERATED: control_response -->
 *The envelope of every Control response. Detail follows only when status is ok.*
@@ -1286,34 +1028,31 @@ parameters.** The `Needs` column names it. A device MUST answer
 `unsupported_opcode` to an opcode whose owning capability bit it has not set,
 and MUST do so **without parsing the parameters** — so a malformed
 `GPS_SET_RATE` on a device with no GPS is `unsupported_opcode`, never
-`bad_params`. The order matters because the two refusals mean different things
-to a client: one says "not on this device, ever", the other says "try again
-with better arguments", and a client that gets them the wrong way round either
-retries forever or gives up on a device that would have worked.
+`bad_params`. One refusal says "not on this device, ever"; the other says "try
+again with better arguments"; a client that gets them the wrong way round
+either retries forever or gives up on a device that would have worked.
 
-The same order applies one level down. A subscription mode the device does not
-support (§4.1) is `bad_params`, and it is checked *after* the opcode's own
-capability: `CAN_SUBSCRIBE` with `on_change` on a device with no CAN at all is
-`unsupported_opcode`, because the opcode was never available to carry the mode.
+The same order applies one level down: a subscription mode the device does not
+support is `bad_params`, checked *after* the opcode's own capability.
 
-`TIME_SYNC` and `GET_LINK_PARAMS` have no owning capability. They are about the
-link and the clock, which every device has, and reaching them at all means the
-Control characteristic is live.
+`TIME_SYNC` has no owning capability. It is about the clock, which every
+device has, and reaching it at all means the Control characteristic is live.
 
 <!-- BEGIN GENERATED: control -->
 | Opcode | Command | Needs | Params | Response detail | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `0x01` | `CAN_RESET` | `can` | — | — | Clear all subscriptions and stop the CAN stream |
-| `0x02` | `CAN_SUBSCRIBE` | `can` | `id:u32, mode:u8, arg:u16` | `handle:u16` | Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF |
-| `0x03` | `CAN_SUBSCRIBE_MASK` | `masked_subscriptions` | `id:u32, mask:u32, mode:u8, arg:u16` | `handle:u16` | — |
-| `0x04` | `CAN_UNSUBSCRIBE` | `can` | `handle:u16` | — | Removes one subscription by the handle its install returned |
-| `0x05` | `CAN_LIST` | `can` | `start:u16` | `can_list_page record` | One page of the table, starting at index `start` |
-| `0x10` | `GPS_SET_RATE` | `gps` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
-| `0x20` | `IMU_SET_RATE` | `imu` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8) |
-| `0x30` | `TIME_SYNC` | — | — | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7) |
-| `0x31` | `GET_LINK_PARAMS` | — | — | `link_params record` | — |
+| `0x02` | `CAN_SUBSCRIBE` | `can` | `id:u32, mode:u8, arg:u16` | — | Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF |
+| `0x03` | `CAN_SUBSCRIBE_MASK` | `masked_subscriptions` | `id:u32, mask:u32, mode:u8, arg:u16` | — | — |
+| `0x04` | `CAN_UNSUBSCRIBE` | `can` | `id:u32, mask:u32` | — | Removes the subscription whose id and mask these are (SPEC.md 9.1) |
+| `0x10` | `GPS_SET_RATE` | `gps` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.6) |
+| `0x20` | `IMU_SET_RATE` | `imu` | `hz:u16` | — | 0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.6) |
+| `0x30` | `TIME_SYNC` | — | — | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.5) |
 | `0x40` | `MONITOR_LIST` | `monitor` | — | `monitor_declaration record` | Every channel this device asks the client to supply, in one response (SPEC.md 13.3) |
 <!-- END GENERATED: control -->
+
+Opcode values `0x05` and `0x31` were assigned by pre-1.0 drafts and remain
+unassigned in major version 1.
 
 `status` values:
 
@@ -1324,10 +1063,10 @@ Control characteristic is live.
 | 1 | `unsupported_opcode` | Opcode not implemented |
 | 2 | `bad_params` | Parameters malformed or out of range |
 | 3 | `table_full` | No free subscription slot |
-| 4 | `rate_exceeded` | Requested rate is above gps_max_rate_hz or imu_max_rate_hz (SPEC.md 9.8). Never used for CAN |
+| 4 | `rate_exceeded` | Requested rate is above gps_max_rate_hz or imu_max_rate_hz (SPEC.md 9.6). Never used for CAN |
 | 5 | `busy` | A response is already outstanding; wait for it, then retry (SPEC.md 9) |
 | 6 | `needs_encryption` | Allocated, never sent: encryption is enforced by GATT permission (SPEC.md 10) |
-| 7 | `unknown_handle` | No subscription with that handle |
+| 7 | `unknown_subscription` | No installed subscription with that id and mask |
 | *other* | *unknown* | MUST decode as unknown, never as a default |
 <!-- END GENERATED: enum:status -->
 
@@ -1338,94 +1077,13 @@ Subscription modes:
 | --- | --- | --- |
 | 0 | `every_frame` | Forward every frame |
 | 1 | `periodic` | arg = minimum interval, ms |
-| 2 | `on_change` | arg = debounce interval, ms |
-| 3 | `every_nth` | arg = N |
 | *other* | *unknown* | MUST decode as unknown, never as a default |
 <!-- END GENERATED: enum:sub_mode -->
 
 A device MUST reject a subscription that would exceed `can_subscription_slots`
 with `table_full`, rather than accepting it and silently discarding frames.
 
-`tag` is opaque to the device and MUST be echoed unchanged.
-### 9.1 Link parameters
-
-The detail of a successful `GET_LINK_PARAMS` response is one `link_params`
-record:
-
-<!-- BEGIN GENERATED: link_params -->
-*The device's view of the negotiated link. Reported, never negotiated here.*
-
-Total: **16 bytes**. All fields little-endian.
-
-| Off | Size | Type | Field | Notes |
-| --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `validity` | bitmask `link_validity` |
-| 2 | 2 | `u16` | `att_mtu` | `bytes`; valid when `validity` bit 0 (`att_mtu`) is set |
-| 4 | 2 | `u16` | `ll_max_tx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
-| 6 | 2 | `u16` | `ll_max_rx_octets` | `octets`; valid when `validity` bit 1 (`ll_data_length`) is set |
-| 8 | 2 | `u16` | `conn_interval` | `1.25ms`; valid when `validity` bit 2 (`conn_params`) is set |
-| 10 | 2 | `u16` | `peripheral_latency` | Connection events the device may skip; valid when `validity` bit 2 (`conn_params`) is set |
-| 12 | 2 | `u16` | `supervision_timeout` | `10ms`; valid when `validity` bit 2 (`conn_params`) is set |
-| 14 | 1 | `u8` | `phy_tx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
-| 15 | 1 | `u8` | `phy_rx` | enum `phy`; valid when `validity` bit 3 (`phy`) is set |
-<!-- END GENERATED: link_params -->
-
-<!-- BEGIN GENERATED: bitmask:link_validity -->
-| Bit | Name | Meaning |
-| --- | --- | --- |
-| 0 | `att_mtu` | att_mtu carries the negotiated value |
-| 1 | `ll_data_length` | ll_max_tx_octets and ll_max_rx_octets are valid |
-| 2 | `conn_params` | conn_interval, peripheral_latency and supervision_timeout are all valid |
-| 3 | `phy` | phy_tx and phy_rx are valid |
-| 4+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
-<!-- END GENERATED: bitmask:link_validity -->
-
-`phy_tx` and `phy_rx`:
-
-<!-- BEGIN GENERATED: enum:phy -->
-| Value | Name | Meaning |
-| --- | --- | --- |
-| 1 | `le_1m` | LE 1M |
-| 2 | `le_2m` | LE 2M |
-| 3 | `le_coded` | LE Coded |
-| *other* | *unknown* | MUST decode as unknown, never as a default |
-<!-- END GENERATED: enum:phy -->
-
-This record is **reporting only**. Nothing in it is negotiated through VTP/1,
-and a device MUST NOT change its link configuration in response to this request.
-
-Each validity bit governs the fields listed against it, under the same rule as
-§5.1: if the bit is clear the device MUST write those fields as zero and the
-receiver MUST report them absent.
-
-**A bit governing several fields MUST NOT be set unless every one of them is
-known.** `conn_params` covers three values and `phy` covers two, and a device
-that knows one of a pair has not learned the other: setting the bit and filling
-the remainder with a zero, or with a copy of the field it does have, publishes
-a guess with a validity bit asserting it is a measurement. Half a group is the
-same state as none of it, and the honest encoding of that state is a clear
-bit. A device whose controller does not expose a
-given parameter MUST clear the corresponding bit rather than report a guess.
-There is no PHY value zero, so a zeroed `phy_tx` cannot be mistaken for LE 1M.
-
-A device SHOULD implement this opcode. Its purpose is to let a client verify the
-transport requirements of §2.1-§2.3, none of which a client can observe from its
-own Bluetooth stack: negotiated link-layer payload, PHY and connection interval
-are unavailable to applications on at least one major mobile platform. A client
-that finds a device reporting a link-layer payload well below its ATT MTU SHOULD
-surface that to the user as a device defect, since it costs roughly three times
-the radio airtime per byte delivered and that cost is borne by every other
-device sharing the central.
-
-A client MUST NOT treat a device that answers `unsupported_opcode` as
-non-conforming.
-
-### 9.2 CAN subscriptions
-
-Installing a subscription returns a **handle**. The handle identifies that
-subscription for as long as it is installed; it is assigned by the device,
-opaque to the client, and MUST NOT be reused while the subscription it names
-exists. It MAY be reused once that subscription has been removed.
+### 9.1 CAN subscriptions
 
 A subscription matches a frame when `frame.id & mask == sub.id & mask`, taken
 over **bits 0–29**: the twenty-nine arbitration bits and bit 29, the standard/
@@ -1433,163 +1091,80 @@ extended format bit. A set bit in `mask` is a bit that a frame must match; a
 clear bit is a bit that may hold anything. One entry therefore covers a family
 of identifiers, and a mask of zero covers every frame on the bus. Bits 30 and
 31 — CAN FD and RTR — describe how a frame was transmitted rather than which
-frame it is, and take no part in matching; a device MUST ignore them in both
-`id` and `mask`. Why the table is addressed this way rather than by identifier
-is RATIONALE §6.
+frame it is, and take no part in matching or in identity; a device MUST ignore
+them in both `id` and `mask`. Why the table is addressed by mask is
+RATIONALE §6.
 
 `CAN_SUBSCRIBE` is exactly `CAN_SUBSCRIBE_MASK` with a mask of `0x3FFFFFFF`.
 
 The format bit is part of a frame's identity because standard `0x1A0` and
-extended `0x1A0` are two different frames, carrying two different things, from
-possibly two different ECUs. A mask that stopped at `0x1FFFFFFF` could not tell
-them apart, so a client that subscribed to one would silently receive both and
-decode the wrong payload with the right-looking identifier — the failure §1.1
-exists to prevent. A client that genuinely wants both formats says so by
-clearing bit 29 in its `mask`, which is a request the device can honour because
-it can see that it was asked.
+extended `0x1A0` are two different frames from possibly two different ECUs. A
+client that wants both formats clears bit 29 in its `mask`.
 
-Installing a subscription whose `id` and `mask` equal one already installed
-MUST update that subscription's `mode` and `arg` in place and return its
-existing handle. It MUST NOT consume a second slot. A client that reprograms
-unconditionally on every connection therefore cannot exhaust the table, which
-is the strategy §4 already forces on it.
+**A subscription is identified by its `(id, mask)` pair**, compared over bits
+0–29. Installing a subscription whose `id` and `mask` equal one already
+installed MUST update that subscription's `mode` and `arg` in place, keeping
+its installation order (§9.2); it MUST NOT consume a second slot. A client
+that reprograms unconditionally on every connection therefore cannot exhaust
+the table — which is the strategy §4 already forces on it.
 
-`CAN_UNSUBSCRIBE` takes a handle, not an identifier. An identifier is not a
-unique name for a subscription once masks exist, and a client that cannot say
-precisely which entry it means cannot verify what it removed. A handle that
-names no installed subscription MUST be answered `unknown_handle`.
+`CAN_UNSUBSCRIBE` names the subscription the same way: it removes the one
+whose installed `id` and `mask` equal its parameters, and MUST be answered
+`unknown_subscription` when none does.
 
 Subscriptions do **not** survive disconnection. A device MUST clear its
 subscription table when the link drops, so that a client always finds a known
 state and never inherits one it did not install.
 
-### 9.3 Overlapping subscriptions
+### 9.2 Overlapping subscriptions
 
 A frame matching several subscriptions MUST be forwarded **at most once**, and
 the subscription that governs it is chosen as follows:
 
 1. The match whose `mask` has the most bits set — the most specific.
-2. Among equally specific matches, the lowest handle.
+2. Among equally specific matches, the one installed earliest.
 
-Both terms are visible to the client through `CAN_LIST`, so which subscription
-governs a frame is something a client can determine rather than discover. A
-device MUST NOT forward one frame once per matching subscription: duplicate
-frames on one bus-arrival timestamp are indistinguishable from a bus fault.
+Both terms are known to the client — it installed the table, this connection —
+so which subscription governs a frame is something a client can determine
+rather than discover. A device MUST NOT forward one frame once per matching
+subscription: duplicate frames on one bus-arrival timestamp are
+indistinguishable from a bus fault.
 
-### 9.4 Load
+### 9.3 Load
 
-**A device MUST NOT refuse a CAN subscription on rate grounds.** It admits, and
-if the resulting load exceeds what it can forward it sheds — reporting the loss
-in `dropped` and setting `flags` bit 0 (§6.3). `can_max_frames_per_s` (§4)
-describes what the device can forward; it is not a budget the device polices at
-admission.
+**A device MUST NOT refuse a CAN subscription on rate grounds.** It admits,
+and if the resulting load exceeds what it can forward it sheds — reporting the
+loss in `dropped` and setting `flags` bit 0 (§6.3). `can_max_frames_per_s`
+(§4) describes what the device can forward; it is not a budget the device
+polices at admission. The load a subscription will produce is not knowable
+when it is installed (RATIONALE §8.7), so shedding is the honest mechanism:
+observable, degrading rather than failing, and needing no prediction.
 
-An earlier draft asked a device to predict the load a subscription would add
-and refuse with `rate_exceeded` beyond that budget. The prediction cannot be
-made, in three separate ways, and the rule was removed rather than patched a
-third time:
+`rate_exceeded` remains for `GPS_SET_RATE` and `IMU_SET_RATE`, where the
+device knows its own ceilings and the answer is a fact rather than a forecast.
 
-- It was never decidable for `every_frame` or `on_change`, because the device
-  cannot know what the bus will carry. That was acknowledged from the start and
-  those two modes were exempted, which already left the rule covering half the
-  cases.
-- `every_nth` with N of 1 selects exactly what `every_frame` selects. One was
-  rate-admitted and the other exempt, so the same subscription was accepted or
-  refused according to which way the client spelled it.
-- A masked subscription keeps its schedule per matching identifier (§6.8), so a
-  `periodic` subscription over a mask covering ten identifiers produces ten
-  times the rate its `arg` names. The arithmetic was written for a single
-  identifier and has been wrong for masked subscriptions since masks existed.
-
-Shedding is the honest mechanism and the device has it already: it is
-observable by the client, it degrades rather than fails, and it needs no
-prediction. A subscription that turns out to be too much is discovered by the
-device in the only way it can be — by trying.
-
-`rate_exceeded` remains for `GPS_SET_RATE` and `IMU_SET_RATE`, where the device
-knows its own `gps_max_rate_hz` and `imu_max_rate_hz` and the answer is a fact
-rather than a forecast.
-
-### 9.5 The subscription table
-
-`CAN_LIST` returns one page of the installed table, beginning at index `start`:
-
-<!-- BEGIN GENERATED: can_list_page -->
-*One page of the CAN subscription table. Followed by `count` can_subscription entries.*
-
-Total: **6 bytes**. All fields little-endian.
-
-| Off | Size | Type | Field | Notes |
-| --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `total` | Subscriptions installed, across all pages |
-| 2 | 2 | `u16` | `index` | Table index of the first entry in this page |
-| 4 | 1 | `u8` | `count` | Entries in this page |
-| 5 | 1 | `u8` | `reserved` | Paging metadata; **reserved — MUST be zero** |
-<!-- END GENERATED: can_list_page -->
-
-followed by `count` entries:
-
-<!-- BEGIN GENERATED: can_subscription -->
-*One installed CAN subscription, as the device holds it.*
-
-Total: **13 bytes**. All fields little-endian.
-
-| Off | Size | Type | Field | Notes |
-| --- | --- | --- | --- | --- |
-| 0 | 2 | `u16` | `handle` | Identifies this subscription; assigned by the device |
-| 2 | 4 | `u32` | `id` | bits 0-28 arbitration id; b29 extended; b30/b31 ignored |
-| 6 | 4 | `u32` | `mask` | A set bit is a bit of `id` that must match; bits 0-29 only |
-| 10 | 1 | `u8` | `mode` | enum `sub_mode` |
-| 11 | 2 | `u16` | `arg` | Interpretation depends on `mode` |
-<!-- END GENERATED: can_subscription -->
-
-The table is paged because it does not fit. At the minimum ATT MTU of 100 a
-response carries 97 bytes, of which three are the opcode, tag and status and
-six are the page header, leaving six entries — while `can_subscription_slots`
-may be far larger. A client reads from `start` 0 and repeats with
-`index + count` until that total reaches `total`.
-
-`start` beyond the end of the table is not an error: the device answers `ok`
-with `count` zero and the true `total`. `total` MUST be the number of
-subscriptions installed at the moment the page was produced.
-
-A device MUST report its table exactly as installed. `CAN_LIST` exists so a
-client can verify device state rather than assume it, and a device that
-normalises, reorders or summarises here defeats its only purpose.
-
-### 9.6 The request lifecycle
+### 9.4 The request lifecycle
 
 **A client MUST enable indications on Control before its first write.**
 Responses arrive by indication on that characteristic, so a write that precedes
-enablement is a request whose answer has nowhere to go. Every client subscribes
-to a characteristic before using it, so this costs a client nothing to satisfy
-and removes a state a device would otherwise have to reason about.
+enablement is a request whose answer has nowhere to go.
 
 **A device MUST NOT apply a request it cannot answer.** If the response cannot
 be delivered — indications not enabled, or a response already outstanding — the
 request MUST NOT take effect, and the device MUST NOT count it as received.
-Deliverability is therefore decided *before* dispatch, not after.
+Deliverability is decided *before* dispatch, not after: a device that applies
+a request whose response is then lost leaves the client no way to find out
+what happened.
 
-This is the clause the rest of the lifecycle rests on, and it is the one an
-implementation is most likely to get wrong, because applying first and
-answering second is the natural order to write the code in. A device that
-applies a request whose response is then lost leaves the client with no way to
-find out what happened: the client retries, and for any request that is not
-idempotent the retry applies it a second time. The failure was observed in
-practice before it was specified — a device applied a subscription, dropped the
-refusal it owed for a later one, and the client timed out and dropped the link
-while the device believed itself correctly configured.
-
-**Every opcode in this specification is safe to retry**, which is a property
-worth stating rather than leaving each implementer to derive:
+**Every opcode in this specification is safe to retry:**
 
 | Opcode | Why a retry is safe |
 | --- | --- |
-| `CAN_SUBSCRIBE`, `CAN_SUBSCRIBE_MASK` | §9.2 — the same `id` and `mask` update in place and return the existing handle |
-| `CAN_UNSUBSCRIBE` | A second attempt answers `unknown_handle`; the table is the same either way |
+| `CAN_SUBSCRIBE`, `CAN_SUBSCRIBE_MASK` | §9.1 — the same `id` and `mask` update in place |
+| `CAN_UNSUBSCRIBE` | A second attempt answers `unknown_subscription`; the table is the same either way |
 | `CAN_RESET` | Clearing an empty table is clearing an empty table |
 | `GPS_SET_RATE`, `IMU_SET_RATE` | Setting a rate to the value it already holds |
-| `CAN_LIST`, `MONITOR_LIST`, `GET_LINK_PARAMS` | Reads |
+| `MONITOR_LIST` | A read |
 | `TIME_SYNC` | Each attempt is answered with a fresh reading, never a stale one |
 
 A client MAY therefore retry any request whose response it did not receive. It
@@ -1597,16 +1172,10 @@ MUST NOT assume the original did not take effect — only that repeating it is
 harmless.
 
 **A client MUST discard a response whose tag it is no longer waiting on.** A
-response that arrives after the client has given up on that request is a
-measurement of a moment that has passed. This matters most for `TIME_SYNC`,
-where a late response carries a device clock reading that was true when it was
-taken and is not true now; §9.1's link parameters and the two list opcodes have
-the same property in weaker form.
+late response is a measurement of a moment that has passed — most sharply for
+`TIME_SYNC`, whose readings were true when taken and are not true now.
 
----
-
-
-### 9.7 TIME_SYNC
+### 9.5 TIME_SYNC
 
 The response carries two readings of the device clock:
 
@@ -1622,182 +1191,111 @@ Total: **16 bytes**. All fields little-endian.
 <!-- END GENERATED: time_sync -->
 
 `t_device_rx` is the clock when the write arrived; `t_device_tx` is the clock
-when the device finished preparing this answer. `t_device_tx` MUST NOT be
-earlier than `t_device_rx`.
+when the device finished preparing this answer, and MUST NOT be earlier. A
+device MUST take `t_device_rx` when the write arrives, not when it begins
+composing the reply — the gap between the two is exactly the processing time
+this exchange exists to expose.
 
-**The request carries no parameters.** An earlier draft had it carry the host's
-UTC time in milliseconds, which the equations below then could not use: they
-subtract client timestamps from device ones, and a millisecond count since 1970
-cannot be subtracted from a microsecond count since the device booted. The
-device ignored the field, which was the only thing it could do with it.
+The request carries no parameters.
 
-**Units and clocks.** All four timestamps are **microseconds on a monotonic
-clock**. *t₁* and *t₄* are readings of the **client's** monotonic clock — taken
-as it issues the write and as the indication arrives — and `t_device_rx` and
-`t_device_tx` are readings of the **device's** (§8.1). The two clocks share
-neither an origin nor a rate, which is the entire reason for the exchange; what
-they must share is a unit, and this paragraph is where that is said.
-
-Neither clock is UTC and neither is required to relate to it. Mapping the
-client's monotonic clock to wall time is the client's own problem, solved on
-the client with facilities this protocol does not need to supply; a GPS fix's
-`t_utc` (§5) is the separate mechanism for relating the *device* to wall time.
+**Units and clocks.** All four timestamps below are **microseconds on a
+monotonic clock**. *t₁* and *t₄* are readings of the **client's** monotonic
+clock — taken as it issues the write and as the indication arrives — and
+`t_device_rx` and `t_device_tx` are readings of the **device's** (§8.1).
+Neither clock is UTC and neither is required to relate to it; a GPS fix's
+`t_utc` (§5) is the separate mechanism for relating the device to wall time.
 
     offset ≈ ((t_device_rx − t₁) + (t_device_tx − t₄)) ÷ 2
     delay  ≈ (t₄ − t₁) − (t_device_tx − t_device_rx)
 
 **`offset` is the device clock minus the client clock**, so a device timestamp
 is converted to client time by subtracting it and a client timestamp to device
-time by adding it. The sign is stated because it is the half of this exchange
-an implementer cannot check against reality: a client that has it backwards
-produces timestamps that are wrong by twice the offset and look entirely
-ordinary.
+time by adding it. The sign is stated because a client that has it backwards
+produces timestamps wrong by twice the offset that look entirely ordinary.
 
-This is the exchange NTP uses, for the reason NTP uses it. **One timestamp
-cannot bound its own error.** A client that knows only when it asked, when it
-heard back, and one device reading has no way to separate the outbound delay
-from the inbound one, so its estimate of the device clock is uncertain by the
-whole round trip — and over a link with a 30 ms connection interval that is
-tens of milliseconds, in an exchange whose purpose is to align a microsecond
-clock. Reporting the device's own processing time is what lets the client take
-it out of the arithmetic, and `delay` is a number the client can act on rather
-than a bound it has to assume.
+This is the exchange NTP uses, for the reason NTP uses it: one timestamp
+cannot bound its own error (RATIONALE §8.7). A client SHOULD issue `TIME_SYNC`
+several times and keep the sample with the smallest `delay`. What remains
+unmeasurable is the asymmetry between the two queuing delays — the response is
+queued until the next connection event — so `delay` is a floor, not a total.
 
-A client SHOULD issue `TIME_SYNC` several times and keep the sample with the
-smallest `delay`. The sample that spent least time in flight is the one whose
-outbound and inbound halves have least room to differ, so it is the one whose
-offset is most nearly right. A single sample gives a client no way to tell a
-good exchange from one that happened to sit behind a full transmit queue.
-
-**What this does not remove.** The response travels by indication, so it is
-queued and goes out at the next connection event; `t_device_tx` is when the
-device prepared the answer, not when the radio sent it. The remaining
-uncertainty is therefore the asymmetry between the two queuing delays, which
-neither end can observe. The exchange bounds what it can measure and this
-paragraph states what it cannot, rather than leaving a client to discover that
-`delay` is a floor and not a total.
-
-A device MUST take `t_device_rx` when the write arrives, not when it begins
-composing the reply. The gap between those is exactly the processing time this
-exchange exists to expose, and a device that reads its clock once and reports
-it as both has silently reported the single-timestamp form while appearing to
-implement this one.
-
-### 9.8 Setting a rate
+### 9.6 Setting a rate
 
 `GPS_SET_RATE` and `IMU_SET_RATE` each take one `hz:u16` and answer with no
 detail. Four rules govern them:
 
-**Zero stops the stream.** `hz` of 0 is a valid request meaning "send nothing".
-The device stops producing notifications on that characteristic, keeps the
-client's GATT subscription, and reports `gps_rate_hz` or `imu_rate_hz` as 0 in
-Info. It is not an error and it is not a shorthand for "restore the default" —
-there is no default to restore, because §4 says a client MUST NOT substitute
-one.
+**Zero stops the stream.** The device stops producing notifications on that
+characteristic, keeps the client's GATT subscription, and reports
+`gps_rate_hz` or `imu_rate_hz` as 0 in Info. It is not an error and not a
+shorthand for "restore the default": there is no default (§4).
 
 **A rate the device does not support is `bad_params`.** A device MAY support
-only a discrete set of rates; most GNSS and IMU parts do. It MUST NOT silently
-apply the nearest one it can manage. Answering `ok` for a rate the device did
-not adopt is a plausible wrong value in the sense of §1.1: the client believes
-it is receiving 25 Hz, the timestamps say otherwise, and nothing connects the
-two. A rate above `gps_max_rate_hz` or `imu_max_rate_hz` is `rate_exceeded`
-instead, because that ceiling is a fact the client could have read in advance.
+only a discrete set of rates. It MUST NOT silently apply the nearest one it
+can manage: answering `ok` for a rate it did not adopt is a plausible wrong
+value under §1.1. A rate above `gps_max_rate_hz` or `imu_max_rate_hz` is
+`rate_exceeded` instead, because that ceiling is a fact the client could have
+read in advance. There is deliberately no way to enumerate the supported
+rates: a client asks and finds out, one round trip on a link it already has.
 
-There is no way to enumerate the supported rates, and deliberately so. A client
-that wants a rate asks for it and finds out; that is one round trip against a
-device it is already talking to, and a discovery mechanism for it would be a
-list format, a paging scheme and a second thing to keep in step with Info.
-
-**The applied rate is read back from Info.** The response carries no detail, so
-a client that needs to know what it got re-reads the Info characteristic, where
-`gps_rate_hz` and `imu_rate_hz` are the rate **currently in effect** (§4). This
-is why those fields exist alongside the `_max_` ones. Putting the applied rate
+**The applied rate is read back from Info**, where `gps_rate_hz` and
+`imu_rate_hz` are the rate currently in effect (§4). Putting the applied rate
 in the response as well would create two statements of it that a device could
 let disagree.
 
-**The change takes effect within one notification.** After an `ok`, at most one
-further notification MAY be produced at the old rate — the one already batched
-when the request arrived. Everything after it is at the new rate. A device MUST
-NOT reuse a batch across the change: §7's `period` and §6.1's `t_base` describe
-the batch they are in, so a batch spanning a rate change describes itself
-wrongly. The reference device flushes the batch the change invalidates, which
-is why `VtpDevice.handle_control` produces notifications outside `poll()`.
+**The change takes effect within one notification.** After an `ok`, at most
+one further notification MAY be produced at the old rate — the one already
+batched when the request arrived. A device MUST NOT reuse a batch across the
+change: §7's `period` and §6.1's `t_base` describe the batch they are in, so a
+batch spanning a rate change describes itself wrongly.
 
 Both opcodes are idempotent: setting a rate to the value it already holds is
-`ok` and changes nothing (§9.6).
+`ok` and changes nothing (§9.4).
 
 ---
 
 ## 10. Security
 
 **Encryption is the device's decision, not this specification's.** A device MAY
-require an encrypted link on any characteristic, on all of them, or on none. No
-characteristic is required to be encrypted, and none is forbidden from being
-so.
+require an encrypted link on any characteristic, on all of them, or on none.
 
 **A client MUST support encryption on every characteristic.** A client that
 meets `Insufficient Encryption` or `Insufficient Authentication` on any read,
 write or subscription MUST initiate pairing and retry, and MUST NOT report the
-device as faulty or absent. This is the obligation that makes the device's
-freedom safe to grant: a device author choosing to protect their link must not
-thereby become unreadable by conforming clients.
-
-The obligation is one-sided on purpose. Requiring encryption costs the device
-author real work — bond storage, a bond table that fills, and a mismatch after
-reflashing that presents as a broken device — and that cost lands hardest on
-exactly the small implementations this protocol needs. Supporting encryption
-costs a client almost nothing: every major central stack turns `Insufficient
-Encryption` into a pairing attempt on its own. Putting the requirement on the
-side that can bear it leaves each device free to choose its own posture without
-fragmenting what clients can talk to.
+device as faulty or absent. The obligation is one-sided on purpose: requiring
+encryption costs a device author real work, while supporting it costs a client
+almost nothing — every major central stack turns `Insufficient Encryption`
+into a pairing attempt on its own (RATIONALE §8.8).
 
 ### 10.1 How a device requires it
 
 A device that requires encryption MUST enforce that with the GATT encryption
-permission, not with an application-level check.
-
-The two are not interchangeable, and an earlier draft of this section required
-both, which cannot be implemented. A characteristic carrying the permission is
-enforced by the ATT layer: an unencrypted write is answered `Insufficient
-Encryption` and never reaches application code, so there is nothing there to
-generate a reply from. A device that *can* reply has not set the permission.
-The delivery path settles it for Control either way — a response travels by
-indication on that characteristic, so on a device that has set the permission a
-client cannot even enable indications until the link is encrypted, and an
-application-level refusal would have nowhere to go.
+permission, not with an application-level check. The two are not
+interchangeable: a characteristic carrying the permission is enforced by the
+ATT layer, so an unencrypted write never reaches application code and there is
+nothing there to generate a reply from.
 
 Status `needs_encryption` (6) remains allocated and MUST NOT be reused for
 anything else, but a conforming device has no occasion to send it.
 
 ### 10.2 What to protect, and what it buys
 
-A device SHOULD leave the Info characteristic readable on an unencrypted link.
-A client that cannot pair — or has not yet — can then still identify what it
-has found and say so, rather than reporting a device that is present,
-advertising a VTP service and apparently broken. Info carries no measurement:
-version, capabilities, rates and buffer sizes, all of which the advertisement
-already hints at (§3.3).
+A device SHOULD leave the Info characteristic readable on an unencrypted link,
+so a client that cannot pair — or has not yet — can still identify what it has
+found. Info carries no measurement.
 
 A device that protects anything SHOULD protect the streams and not only
-Control. Control carries commands — which identifiers to forward, at what rate
-— and an eavesdropper learns little from them. The streams carry the
-measurement, including position, and that is the part with something to reveal.
-Encrypting Control alone is a common arrangement and an incoherent one: it
-guards who may reconfigure the device while leaving what the device reports in
-the clear.
-
-A device fitted to a vehicle bus carrying anything beyond powertrain telemetry
-SHOULD require encryption on every characteristic. A modern bus carries far
-more than the engine — location, identifiers, and door and lock activity among
-them — and a device with access to it is handling personal data whatever it
-was built to measure.
+Control: the streams carry the measurement, including position, and encrypting
+Control alone guards who may reconfigure the device while leaving what it
+reports in the clear. A device fitted to a vehicle bus carrying anything
+beyond powertrain telemetry SHOULD require encryption on every characteristic
+— a modern bus carries location, identifiers, and door and lock activity, so a
+device with access to it is handling personal data whatever it was built to
+measure.
 
 When pairing does occur, LE Secure Connections is REQUIRED. Just Works pairing
-is acceptable, and an implementer should know what it does and does not
-provide: LE Secure Connections protects against a passive listener even under
-Just Works, but Just Works has no authentication step, so it does not protect
-against an active man-in-the-middle. Encryption here is a defence against
-eavesdropping, not against an attacker who is willing to interpose.
+is acceptable: LE Secure Connections protects against a passive listener even
+under Just Works, but Just Works has no authentication step, so it does not
+protect against an active man-in-the-middle.
 
 ---
 
@@ -1807,7 +1305,6 @@ eavesdropping, not against an attacker who is willing to interpose.
 
 A major version has its own service UUID (§3). A client scans for the majors it
 implements; an unimplemented major is a discovery outcome, never a parsing one.
-
 A device MAY expose several major versions simultaneously as separate services.
 
 ### 11.2 Minor versions
@@ -1821,14 +1318,11 @@ Two rules make that structural rather than aspirational:
 
 ### 11.3 What a minor version may add
 
-A minor version has exactly three places to put something new. They are listed
-because the alternative — a general promise that new fields go in extension
-records — was not true of this specification and could not be made true after
-the fact. A conforming receiver rejects a payload whose length it does not
-expect (§5.5, §6.2, §7), so a trailer that did not exist in 1.0 cannot be
-introduced later: the first device to send one is rejected outright by every
-client already deployed. Extensibility is a decision taken before 1.0 or not at
-all.
+A minor version has exactly three places to put something new. The list is
+closed because a conforming receiver rejects a payload whose length it does
+not expect (§5.5, §6.2, §7), so a trailer that did not exist in 1.0 cannot be
+introduced later: extensibility is decided before 1.0 or not at all
+(RATIONALE §5).
 
 **Extension records**, on the records that carry them:
 
@@ -1845,31 +1339,20 @@ all.
 | `monitor_channel` | No — closed for major version 1 | — |
 | `monitor_header` | No — closed for major version 1 | — |
 | `monitor_value` | No — closed for major version 1 | — |
-| `can_list_page` | No — closed for major version 1 | One per CAN_LIST page |
-| `can_subscription` | No — closed for major version 1 | One per table entry |
 | `control_response` | No — closed for major version 1 | — |
 | `time_sync` | No — closed for major version 1 | — |
-| `link_params` | No — closed for major version 1 | On request |
 <!-- END GENERATED: extensibility -->
 
-**Reserved space**, for flags and small values. Appendix A lists it. This is
-where a new boolean or a small enumerated value goes.
+**Reserved space**, for flags and small values. Appendix A lists it.
 
 **New control opcodes.** Control requests and responses are not fixed-size
-records, so a minor version may add as many as it needs, with any payload. This
-is the general-purpose extension point: anything a client can ask for, rather
-than anything the device pushes, is extensible without limit. Multi-bus CAN
-(§6.9) is intended to be closed this way.
+records, so a minor version may add as many as it needs, with any payload.
+This is the general-purpose extension point; multi-bus CAN (§6.9) is intended
+to be closed this way.
 
 A record marked closed above stays closed for the life of major version 1. A
 field it does not carry today is a VTP/2 change, and §6.5 and §6.6 name two
 already: a remote frame's requested length, and CAN FD's BRS and ESI.
-
-The per-frame and per-sample records are closed deliberately rather than by
-omission. A one-byte trailer on `can_record` costs 4 kB/s at 4000 frames per
-second, on the one stream that can saturate a link — the same arithmetic §6.6
-used to exclude BRS and ESI, which does not stop applying because the byte is
-named differently.
 
 ### 11.4 Prohibited changes
 
@@ -1901,49 +1384,37 @@ Each case carries `hex` and either `expect` or `must_reject`. A case with
 `must_reject` MUST fail to decode; a runner that decodes it has not passed.
 
 The corpus is generated from `schema/vtp1.yaml`. A minor version MAY add cases
-and MUST NOT modify or remove an existing case. A change that alters the expected
-decode of an existing vector is by definition not a minor version.
+and MUST NOT modify or remove an existing case. A change that alters the
+expected decode of an existing vector is by definition not a minor version.
 
 ### 12.1 What the corpus does not cover
 
-The corpus decodes bytes. Every requirement in this specification that is
-expressed as a byte layout, a validity rule, an enum value or a length check is
-therefore mechanically testable, and passing the corpus is evidence about all of
-them.
+The corpus decodes bytes. Every requirement expressed as a byte layout, a
+validity rule, an enum value or a length check is mechanically testable, and
+passing the corpus is evidence about all of them.
 
-The transport requirements of §2.1-§2.3 are not of that kind. Link-layer
-payload, PHY and connection parameters have no representation in any
-notification, so no vector can assert them and passing the corpus says nothing
-about whether a device honours them. They are **integration requirements**: real
-and normative, but verifiable only against hardware.
-
-`GET_LINK_PARAMS` (§9.1) exists to narrow that gap. It moves a device's own view
-of those three parameters onto the wire, where a client can check it and this
-corpus can test the reporting. It remains a report rather than a proof — a
-device that misreports cannot be caught by any means this specification
-provides — but a value a client can read and log is a considerable improvement
-on a requirement nobody can observe.
-
-An implementer SHOULD treat §2.1-§2.3 as the part of this specification that
-needs verifying on a bench rather than in CI.
+The transport requirements of §2.1–§2.3 are not of that kind: link-layer
+payload, PHY and connection parameters appear in no payload, so no vector can
+assert them. They are **integration requirements** — real and normative, but
+verifiable only against hardware. An implementer SHOULD treat them as the part
+of this specification that needs verifying on a bench rather than in CI.
+Everything that exists only as *behaviour* — what a device answers, what its
+clock and sequence numbers do over time, what survives a reconnect — is the
+harness's job (`harness/`).
 
 ---
 
 ## 13. Monitor characteristic — WRITE
 
-Every other role carries measurement from the device to the client. Monitor runs
-the other way: the client supplies values the device cannot compute, so that a
-device with a display can show them.
-
-Lap time is the example that justifies the role. A logger has no idea where the
-start and finish line is — that is drawn on a map in the client — so a device
-can only ever display a lap time that the client sends it.
+Every other role carries measurement from the device to the client. Monitor
+runs the other way: the client supplies values the device cannot compute, so
+that a device with a display can show them. Lap time is the example that
+justifies the role — where the start/finish line is exists only in the client.
 
 A device implementing this role MUST set `capabilities` bit 3, which §4.1
-requires it to set `control` alongside. The `monitor_values` characteristic is
-present on every VTP/1 device whether or not the role is implemented (§4.1):
-without the bit it is inert, and a write to it is answered with an ATT error
-rather than silently accepted.
+requires it to set `control` alongside. Without the bit the `monitor_values`
+characteristic is inert (§4.1), and a write to it is answered with an ATT
+error rather than silently accepted.
 
 ### 13.1 The device asks; the client supplies
 
@@ -1953,7 +1424,7 @@ with `MONITOR_LIST` (§9), evaluates the channels it can, and writes values to
 
 The declaration is **fixed for the duration of a connection**. A device that
 needs a different set asks for everything it might display and chooses locally,
-or reconnects. This is the same rule as §9.2's subscription table for the same
+or reconnects — the same rule as §9.1's subscription table, for the same
 reason: a client that establishes state at connect never inherits state it did
 not install.
 
@@ -1977,17 +1448,14 @@ device MUST ignore a value for a slot it did not ask for.
 | *other* | *unknown* | MUST decode as unknown, never as a default |
 <!-- END GENERATED: enum:channel -->
 
-A device names a channel; it does not send an expression to be evaluated. The
-protocol therefore needs no expression language, no shared namespace of variable
-names, and no parser on either side, and a client cannot fail to understand a
-request in any way except not implementing the channel.
-
-Each channel has exactly one unit, fixed by this table. There is no unit
-negotiation and no scale factor: `lap_time` is milliseconds everywhere, forever.
+A device names a channel; it does not send an expression to be evaluated, so
+the protocol needs no expression language and no parser on either side. Each
+channel has exactly one unit, fixed by this table: `lap_time` is milliseconds
+everywhere, forever.
 
 A client that does not implement a requested channel MUST report it absent
-(§13.4) rather than omitting it. Absent is a state the device can render; silence
-is indistinguishable from the client having crashed.
+(§13.4) rather than omitting it: absent is a state the device can render, while
+silence is indistinguishable from the client having crashed.
 
 New channels MAY be added in a minor version, so a device MUST treat an
 unrecognised channel value as unknown and MUST NOT substitute another.
@@ -2024,15 +1492,9 @@ every update. A device MAY use any slot numbers it likes and MUST NOT repeat
 one.
 
 **The declaration is not paged.** `MONITOR_LIST` takes no parameters and
-answers with the whole of it. §13.4 caps a device at 15 channels — the most
-that fit in one complete client write at the minimum ATT MTU — and 15 channels
-are 62 bytes, comfortably inside the 97 a response carries at that same MTU. A
-page index could never be anything but zero.
-
-This is where Monitor and §9.5's CAN table genuinely differ, and the reason is
-worth stating: `can_subscription_slots` may be far larger than one response can
-carry, so `CAN_LIST` must page and does. Monitor cannot need it, so it does not
-have it.
+answers with the whole of it: §13.4 caps a device at 15 channels, which is 62
+bytes — comfortably inside the 97 a response carries at the minimum ATT MTU.
+A page index could never be anything but zero.
 
 ### 13.4 Values
 
@@ -2075,34 +1537,27 @@ ATT MTU permits.
 
 **A value whose `present` bit is clear MUST be written as zero and MUST be
 rendered as unavailable.** This is §1.1 in the one place the protocol reverses
-direction, and it is the reason the flag exists: before the first lap of a
-session there is no last lap time, and a device that displays 0.000 for it has
-been told something false. The client MUST clear the bit rather than omit the
-slot or send a placeholder.
+direction: before the first lap there is no last lap time, and a device that
+displays 0.000 for it has been told something false. The client MUST clear the
+bit rather than omit the slot or send a placeholder.
 
 **Every write MUST carry a value for every slot the device asked for.** A
 Monitor write is a complete statement of what the client can currently supply,
-not a set of changes to what it said before.
-
-Complete writes cost almost nothing here — the whole set is one small write at
-any plausible channel count — and they buy two things that deltas do not. A
-write that is lost changes nothing permanently, because the next one restates
-everything, so `seq` gaps need no recovery procedure and there is none to get
-wrong. And the client never has to remember what it last sent, which is the
-state that silently diverges when an app is backgrounded and resumed.
+not a set of changes to what it said before. Complete writes cost almost
+nothing at any plausible channel count, and they buy two things deltas do not:
+a lost write changes nothing permanently, so `seq` gaps need no recovery
+procedure — and the client never has to remember what it last sent, which is
+the state that silently diverges when an app is backgrounded and resumed.
 
 A slot MUST appear at most once in a write. A device MUST reject a write
-containing a slot twice, because nothing in this specification says which of
-the two wins and a device choosing either is choosing for every client.
+containing a slot twice, because nothing says which of the two wins.
 
 **`count` MUST NOT be zero**, and a device MUST reject a write that carries no
-values. An empty write is the one thing a complete statement cannot be: on a
-device that asked for channels it names none of them, which is not "nothing
-changed" but "I can supply nothing" said in a way that leaves every previous
-value standing. A client with nothing to supply says so by writing every slot
-with the `present` bit clear, which is a complete statement and expires
-correctly (§13.5). A client with nothing to say does not write at all, and
-§13.5's deadlines take care of the rest.
+values: on a device that asked for channels, an empty write names none of
+them, which is not "nothing changed" but "I can supply nothing" said in a way
+that leaves every previous value standing. A client with nothing to supply
+writes every slot with the `present` bit clear; a client with nothing to say
+does not write at all, and §13.5's deadlines take care of the rest.
 
 A device that asked for no channels (§13.5) has no complete write to receive,
 so a client MUST NOT write to it at all.
@@ -2110,8 +1565,7 @@ so a client MUST NOT write to it at all.
 A device MUST NOT ask for more channels than fit in a single write at the
 minimum ATT MTU of §2: with a 4-byte header and 6 bytes per value that is
 **15 channels**. Complete writes are only a workable rule if a complete write
-always fits, and a device that asks for more has made the rule unsatisfiable
-rather than made itself more capable.
+always fits.
 
 ### 13.5 Freshness
 
@@ -2128,29 +1582,23 @@ deadline, so every channel expires, and there is no second rule. A device MUST
 NOT declare a channel with `max_age` of 0, and a receiver MUST reject a
 declaration containing one.
 
-A device MAY declare no channels at all — `total` and `count` of zero is the
-state of a device that has not yet configured itself, or one whose display
-currently needs nothing. A client MUST accept the empty declaration and MUST
-NOT write values to a device that asked for none; every slot it could name is
-one the device did not ask for, and §13.1 already says those are ignored.
+A device MAY declare no channels at all — a `count` of zero is the state of a
+device that has not yet configured itself, or one whose display currently
+needs nothing. A client MUST accept the empty declaration and MUST NOT write
+values to a device that asked for none.
 
 The client MUST refresh before the deadline. A client SHOULD write only when
-something it can supply has changed — but "nothing has changed" is not a reason
-to let a value expire, so it MUST write anyway as the deadline approaches, and
-that write costs one small packet at whatever interval the device chose.
+something it can supply has changed — but "nothing has changed" is not a
+reason to let a value expire, so it MUST write anyway as the deadline
+approaches.
 
-`max_age` is per channel because the channels differ in kind. A `lap_time`
-ticking up is wrong within a second of going stale; a `best_lap_time` stays
-true until it is beaten, so it can carry a deadline measured in tens of seconds
-rather than one. A single device-wide timeout would be set for the most
-perishable channel and would then demand pointless traffic for the rest.
-
-A device SHOULD choose a `max_age` several times its expected update interval.
-It bounds how wrong a display may be, not how often a client must talk, and one
-set close to the update rate turns an ordinary scheduling delay into a
-flickering screen. For a channel that only changes occasionally, choose a large
-deadline rather than none: `best_lap_time` at 25.5 seconds is the longest this
-field can express, and that is still a bound.
+`max_age` is per channel because the channels differ in kind: a `lap_time`
+ticking up is wrong within a second of going stale, while a `best_lap_time`
+stays true until it is beaten. A device SHOULD choose a `max_age` several
+times its expected update interval — it bounds how wrong a display may be, not
+how often a client must talk — and for a channel that changes rarely it
+chooses a large deadline rather than none: 25.5 s is the ceiling, and still a
+bound.
 
 ### 13.6 What Monitor is not
 
@@ -2170,17 +1618,52 @@ record tables above.
 | --- | --- | --- |
 | `gps_fix.validity` | bits 12–31 | Validity for fields added in a later minor |
 | `gps_fix.fix_flags` | bits 5–7 | Additional solution-quality flags |
-| `info.capabilities` | bits 8–31 | Roles and features added in a later minor |
+| `info.capabilities` | bits 7–31 | Roles and features added in a later minor |
 | `can_header.flags` | bits 1–7 | Additional batch-level CAN status |
 | `imu_header.flags` | bits 3–7 | Additional sensor groups |
 | `info.clock_flags` | bits 2–7 | Additional clock properties |
 | `monitor_value.validity` | bits 1–7 | Validity for values added in a later minor |
-| `link_params.validity` | bits 4–15 | Validity for link parameters added in a later minor |
-| `info.reserved_20` | 1 byte | Was can_max_payload; derived from the capability bits since (SPEC.md 4.2) |
+| `info.reserved_20` | 1 byte | Was can_max_payload; derived from the capability bits since (SPEC.md 4.1) |
+| `info.reserved_22` | 2 bytes | Was max_notify_bytes; a notification is bounded by the negotiated ATT payload, which the client's stack already knows (SPEC.md 2) |
 | `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
 | `monitor_declaration.reserved` | 1 byte | Declaration metadata |
 | `monitor_header.reserved` | 1 byte | Update metadata |
-| `can_list_page.reserved` | 1 byte | Paging metadata |
 | Extension types | `0x80`–`0xFF` | Vendor-private; this specification MUST NOT assign them (§5.5) |
 <!-- END GENERATED: reserved_space -->
+
+---
+
+## Appendix B — A minimal device
+
+*Non-normative. Every rule below is stated normatively elsewhere; this is the
+shortest path through them.*
+
+The smallest conforming VTP/1 device is a GPS-only logger, and it is small:
+
+1. **Advertise** the VTP/1 service UUID (§3.3).
+2. **Expose the fixed attribute table** (§4.1): all six characteristics. Four
+   are inert — `can`, `imu` and `gps`'s CCCDs exist and accept writes;
+   `control` and `monitor_values` reject every write with an ATT error. Inert
+   code is a handful of lines.
+3. **Answer Info** (§4): one constant 24-byte record. `protocol_major` 1,
+   `capabilities` bit 0 (`gps`) only, `gps_rate_hz` and `gps_max_rate_hz` set
+   to the fix rate, every other field zero.
+4. **Notify one 74-byte `gps_fix` per solution** (§5): set the validity bits
+   for the fields the receiver actually supplies and write zeroes behind the
+   rest; stamp `t_device` from one monotonic microsecond clock (§8.1); start
+   `seq` at 0 each connection and count notifications (§8.2).
+
+There is no control plane, no batching, no subscription table and no Monitor
+on this device: each belongs to a capability bit it leaves clear. Adding a
+role later means setting its bit and implementing its section — nothing about
+the GPS path changes.
+
+Check it by decoding your own notifications with a reference decoder
+(`reference/`), then point the harness at the running device:
+
+```sh
+uv run vtp1-harness
+```
+
+It reads Info, sees which roles you declared, and tests exactly those.

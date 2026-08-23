@@ -74,29 +74,6 @@ static void put_absent(const vtp_gps_fix_t *f) {
     printf("]");
 }
 
-/* The same idea for link_params: which validity bit gates which field. */
-static const struct { const char *name; uint16_t bit; } LINK_GATED[] = {
-    {"att_mtu",             VTP_LINK_VALIDITY_ATT_MTU},
-    {"ll_max_tx_octets",    VTP_LINK_VALIDITY_LL_DATA_LENGTH},
-    {"ll_max_rx_octets",    VTP_LINK_VALIDITY_LL_DATA_LENGTH},
-    {"conn_interval",       VTP_LINK_VALIDITY_CONN_PARAMS},
-    {"peripheral_latency",  VTP_LINK_VALIDITY_CONN_PARAMS},
-    {"supervision_timeout", VTP_LINK_VALIDITY_CONN_PARAMS},
-    {"phy_tx",              VTP_LINK_VALIDITY_PHY},
-    {"phy_rx",              VTP_LINK_VALIDITY_PHY},
-};
-
-static void put_link_absent(const vtp_link_params_t *l) {
-    printf(",\"absent\":[");
-    int first = 1;
-    for (size_t i = 0; i < sizeof LINK_GATED / sizeof LINK_GATED[0]; i++) {
-        if (vtp_link_valid(l, LINK_GATED[i].bit)) continue;
-        printf("%s\"%s\"", first ? "" : ",", LINK_GATED[i].name);
-        first = 0;
-    }
-    printf("]");
-}
-
 /* SPEC.md §7 — a sensor group whose presence flag is clear is ABSENT, not a
  * measurement of zero. The decoder carries raw values and leaves this to the
  * caller, exactly as it does for gps_fix, so the harness reports what an
@@ -235,32 +212,12 @@ int main(void) {
                    "\"capabilities\":%u,\"gps_rate_hz\":%u,\"gps_max_rate_hz\":%u,"
                    "\"can_subscription_slots\":%u,\"can_max_frames_per_s\":%u,"
                    "\"imu_rate_hz\":%u,\"imu_max_rate_hz\":%u,\"reserved_20\":%u,"
-                   "\"clock_flags\":%u,\"max_notify_bytes\":%u",
+                   "\"clock_flags\":%u,\"reserved_22\":%u",
                    v.protocol_major, v.protocol_minor, v.capabilities,
                    v.gps_rate_hz, v.gps_max_rate_hz, v.can_subscription_slots,
                    v.can_max_frames_per_s, v.imu_rate_hz, v.imu_max_rate_hz,
-                   v.reserved_20, v.clock_flags, v.max_notify_bytes);
+                   v.reserved_20, v.clock_flags, v.reserved_22);
             finish(enc, vtp_encode_info(&v, enc, sizeof enc));
-
-        } else if (!strcmp(record, "can_list")) {
-            vtp_can_list_page_t pg;
-            if (vtp_decode_can_list(buf, len, &pg, &err)) { reject(err); continue; }
-            vtp_can_subscription_t subs[256];
-            for (uint8_t i = 0; i < pg.count; i++)
-                vtp_can_subscription_at(buf, i, &subs[i]);
-
-            printf("{\"ok\":true,\"page\":{\"total\":%u,\"index\":%u,"
-                   "\"count\":%u,\"reserved\":%u},\"entries\":[",
-                   pg.total, pg.index, pg.count, pg.reserved);
-            for (uint8_t i = 0; i < pg.count; i++) {
-                const vtp_can_subscription_t *s = &subs[i];
-                printf("%s{\"handle\":%u,\"id\":%u,\"mask\":%u,\"mode\":%u,"
-                       "\"arg\":%u,\"mode_known\":%s}",
-                       i ? "," : "", s->handle, s->id, s->mask, s->mode, s->arg,
-                       vtp_sub_mode_known(s->mode) ? "true" : "false");
-            }
-            printf("]");
-            finish(enc, vtp_encode_can_list(&pg, subs, enc, sizeof enc));
 
         } else if (!strcmp(record, "monitor_list")) {
             vtp_monitor_declaration_t pg;
@@ -300,22 +257,6 @@ int main(void) {
             }
             printf("]");
             finish(enc, vtp_encode_monitor_update(&mh, vals, enc, sizeof enc));
-
-        } else if (!strcmp(record, "link_params")) {
-            vtp_link_params_t l;
-            if (vtp_decode_link_params(buf, len, &l, &err)) { reject(err); continue; }
-            printf("{\"ok\":true,\"validity\":%u,\"att_mtu\":%u,"
-                   "\"ll_max_tx_octets\":%u,\"ll_max_rx_octets\":%u,"
-                   "\"conn_interval\":%u,\"peripheral_latency\":%u,"
-                   "\"supervision_timeout\":%u,\"phy_tx\":%u,\"phy_rx\":%u,"
-                   "\"phy_tx_known\":%s,\"phy_rx_known\":%s",
-                   l.validity, l.att_mtu, l.ll_max_tx_octets, l.ll_max_rx_octets,
-                   l.conn_interval, l.peripheral_latency, l.supervision_timeout,
-                   l.phy_tx, l.phy_rx,
-                   vtp_phy_known(l.phy_tx) ? "true" : "false",
-                   vtp_phy_known(l.phy_rx) ? "true" : "false");
-            put_link_absent(&l);
-            finish(enc, vtp_encode_link_params(&l, enc, sizeof enc));
 
         } else if (!strcmp(record, "control_response")) {
             vtp_control_response_t r;

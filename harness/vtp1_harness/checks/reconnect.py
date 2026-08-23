@@ -1,4 +1,4 @@
-"""SPEC.md §9.2 and 8.2 -- the state a device MUST NOT carry across a link drop.
+"""SPEC.md §9.1 and 8.2 -- the state a device MUST NOT carry across a link drop.
 
 Both rules exist so that a client always finds a known state at connect and
 never inherits one it did not install. Neither can be tested without dropping
@@ -8,7 +8,7 @@ from .. import refdec
 from . import Fail, Observe, Skip, check
 
 
-@check(id="reconnect.subscriptions_cleared", section="9.2", phase="reconnect",
+@check(id="reconnect.subscriptions_cleared", section="9.1", phase="reconnect",
        severity="MUST", requires=("control", "can"),
        title="The CAN subscription table is empty on a new connection")
 async def reconnect_subscriptions_cleared(s):
@@ -20,19 +20,26 @@ async def reconnect_subscriptions_cleared(s):
     if not installed:
         raise Skip("nothing was installed before the link dropped, so an empty "
                    "table proves nothing")
-    entries, pages, last = await s.control.pages(refdec.OPCODE["CAN_LIST"],
-                                                 "can_list")
-    if not last.ok:
-        raise Fail(f"CAN_LIST was answered {last.status_name} after reconnecting",
-                   response=last.raw.hex())
-    total = pages[0][1]["page"]["total"]
-    if total:
+    # §9.1 makes (id, mask) the subscription's identity, so removal is also
+    # the probe: unsubscribing something the OLD connection installed answers
+    # unknown_subscription on a device that cleared its table, and ok on one
+    # that carried it across the drop.
+    surviving = []
+    for can_id, mask in sorted(installed.items()):
+        response = await s.control.unsubscribe_can(can_id, mask=mask)
+        if response.ok:
+            surviving.append(can_id)
+        elif response.status != refdec.STATUS_VALUE["unknown_subscription"]:
+            raise Fail(
+                f"probing the table after reconnecting, CAN_UNSUBSCRIBE was "
+                f"answered {response.status_name}", response=response.raw.hex())
+    if surviving:
         raise Fail(
-            f"{total} subscription(s) survived the link dropping; "
+            f"{len(surviving)} subscription(s) survived the link dropping; "
             f"{len(installed)} were installed on the previous connection. A "
             f"device MUST clear its table when the link drops, so that a client "
             f"always finds a known state",
-            surviving=[e["handle"] for e in entries])
+            surviving=[hex(i) for i in surviving])
 
 
 @check(id="reconnect.seq_restarts", section="8.2", phase="reconnect",

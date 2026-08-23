@@ -69,39 +69,11 @@ int vtp_decode_gps_fix(const uint8_t *b, size_t len,
     o->ext_offset = VTP_GPS_FIX_SIZE;
     o->ext_bytes  = off - VTP_GPS_FIX_SIZE;
 
-    /* SPEC.md §5.4 -- a coordinate outside the earth is a corrupted field, and
-     * every other field came from the same bytes. Rejected, not clamped:
-     * clamping 91 degrees to 90 puts the vehicle at the pole and lets the
-     * client draw it there. Checked only where a validity bit claims the field
-     * means something. */
-    if (o->validity & VTP_GPS_VALIDITY_POSITION) {
-        if (o->lat > 900000000 || o->lat < -900000000) {
-            *err = "lat-out-of-range"; return -1;
-        }
-        if (o->lon > 1800000000 || o->lon < -1800000000) {
-            *err = "lon-out-of-range"; return -1;
-        }
-    }
-    if ((o->validity & VTP_GPS_VALIDITY_HEAD_MOT)
-        && (o->head_mot < 0 || o->head_mot >= 36000000)) {
-        *err = "head-out-of-range"; return -1;
-    }
-    /* SPEC.md 5.3 -- a carrier-phase solution has either resolved its
-     * integer ambiguities or it has not, so both RTK bits at once is a claim about
-     * solution quality that means nothing. The natural client reading of the pair is
-     * "fixed wins", which upgrades a device's accuracy claim on the strength of a
-     * bug. And either RTK bit implies `differential`, because an RTK solution IS a
-     * differentially corrected one. */
-    {
-        const uint8_t rtk = o->fix_flags
-            & (VTP_FIX_FLAGS_RTK_FLOAT | VTP_FIX_FLAGS_RTK_FIXED);
-        if (rtk == (VTP_FIX_FLAGS_RTK_FLOAT | VTP_FIX_FLAGS_RTK_FIXED)) {
-            *err = "rtk-both"; return -1;
-        }
-        if (rtk && !(o->fix_flags & VTP_FIX_FLAGS_DIFFERENTIAL)) {
-            *err = "rtk-without-differential"; return -1;
-        }
-    }
+    /* SPEC.md §5 and §5.3 bind the DEVICE: it must not emit an out-of-range
+     * coordinate or contradictory RTK flags, and the reference encoder
+     * refuses both (vtp1_encode.c). A receiver decodes the well-formed
+     * payload as it stands -- flagging the violation to the user is an
+     * application concern, not a decode outcome. */
     return 0;
 }
 
@@ -247,14 +219,16 @@ void vtp_imu_sample_at(const uint8_t *b, const vtp_imu_header_t *h,
     o->t_device = h->t_base + (uint64_t)i * h->period;
 }
 
-/* SPEC.md §4.1 -- the capability matrix, checked against the bytes rather than
- * against the decoded struct so a caller cannot skip it. Both tables are
- * generated from schema/vtp1.yaml, so this and the specification cannot
- * disagree about what a bit requires.
+/* SPEC.md §4.1 -- the capability matrix. Not a decode outcome: an Info that
+ * breaks it is well-formed and decodes, but the device that published it is
+ * non-conforming, a client must not use the role or capacity it contradicts,
+ * and §4.1 asks the client to surface it. This helper is what a client (or
+ * the harness) calls to do that. The rules are generated from
+ * schema/vtp1.yaml, so this and the specification cannot disagree.
  *
  * Reserved bits take no part: §2 says to ignore them on receive, and a minor
  * version this build has never heard of is exactly what they are for. Only the
- * implications of bits this build knows are enforced. */
+ * implications of bits this build knows are checked. */
 int vtp_capabilities_coherent(uint32_t capabilities,
                               const uint8_t *info, size_t len,
                               const char **why) {
@@ -291,16 +265,6 @@ int vtp_decode_info(const uint8_t *b, size_t len,
                     vtp_info_t *o, const char **err) {
     if (len != VTP_INFO_SIZE) { *err = "length"; return -1; }
 
-    /* SPEC.md §4.1 -- an Info whose capabilities break the matrix is treated
-     * as non-conforming, exactly as a protocol_major mismatch is. Decoding it
-     * and leaving the contradiction to the caller is how a client ends up
-     * subscribing to a CAN stream on a device with no way to install a
-     * subscription. */
-    if (!vtp_capabilities_coherent(rd32(b + VTP_INFO_OFF_CAPABILITIES),
-                                   b, len, err)) {
-        return -1;
-    }
-
     o->protocol_major         = b[VTP_INFO_OFF_PROTOCOL_MAJOR];
     o->protocol_minor         = b[VTP_INFO_OFF_PROTOCOL_MINOR];
     o->capabilities           = rd32(b + VTP_INFO_OFF_CAPABILITIES);
@@ -312,47 +276,8 @@ int vtp_decode_info(const uint8_t *b, size_t len,
     o->imu_max_rate_hz        = rd16(b + VTP_INFO_OFF_IMU_MAX_RATE_HZ);
     o->reserved_20            = b[VTP_INFO_OFF_RESERVED_20];
     o->clock_flags            = b[VTP_INFO_OFF_CLOCK_FLAGS];
-    o->max_notify_bytes       = rd16(b + VTP_INFO_OFF_MAX_NOTIFY_BYTES);
+    o->reserved_22            = rd16(b + VTP_INFO_OFF_RESERVED_22);
     return 0;
-}
-
-int vtp_sub_mode_known(uint8_t m) {
-    switch (m) {
-        case VTP_SUB_MODE_EVERY_FRAME:
-        case VTP_SUB_MODE_PERIODIC:
-        case VTP_SUB_MODE_ON_CHANGE:
-        case VTP_SUB_MODE_EVERY_NTH:
-            return 1;
-        default:
-            return 0;   /* A later minor's mode. Stays unknown. SPEC.md §11.4 */
-    }
-}
-
-int vtp_decode_can_list(const uint8_t *b, size_t len,
-                        vtp_can_list_page_t *p, const char **err) {
-    if (len < VTP_CAN_LIST_PAGE_SIZE) { *err = "length"; return -1; }
-
-    p->total    = rd16(b + VTP_CAN_LIST_PAGE_OFF_TOTAL);
-    p->index    = rd16(b + VTP_CAN_LIST_PAGE_OFF_INDEX);
-    p->count    = b[VTP_CAN_LIST_PAGE_OFF_COUNT];
-    p->reserved = b[VTP_CAN_LIST_PAGE_OFF_RESERVED];
-
-    const size_t needed = (size_t)VTP_CAN_LIST_PAGE_SIZE
-                        + (size_t)p->count * VTP_CAN_SUBSCRIPTION_SIZE;
-    if (len < needed) { *err = "truncated-record"; return -1; }
-    if (len != needed) { *err = "length"; return -1; }
-    return 0;
-}
-
-void vtp_can_subscription_at(const uint8_t *b, uint8_t index,
-                             vtp_can_subscription_t *o) {
-    const uint8_t *e = b + VTP_CAN_LIST_PAGE_SIZE
-                     + (size_t)index * VTP_CAN_SUBSCRIPTION_SIZE;
-    o->handle = rd16(e + VTP_CAN_SUBSCRIPTION_OFF_HANDLE);
-    o->id     = rd32(e + VTP_CAN_SUBSCRIPTION_OFF_ID);
-    o->mask   = rd32(e + VTP_CAN_SUBSCRIPTION_OFF_MASK);
-    o->mode   = e[VTP_CAN_SUBSCRIPTION_OFF_MODE];
-    o->arg    = rd16(e + VTP_CAN_SUBSCRIPTION_OFF_ARG);
 }
 
 int vtp_channel_known(uint16_t c) {
@@ -469,17 +394,6 @@ void vtp_monitor_value_at(const uint8_t *b, uint8_t index,
     o->value    = (int32_t)rd32(e + VTP_MONITOR_VALUE_OFF_VALUE);
 }
 
-int vtp_phy_known(uint8_t p) {
-    switch (p) {
-        case VTP_PHY_LE_1M:
-        case VTP_PHY_LE_2M:
-        case VTP_PHY_LE_CODED:
-            return 1;
-        default:
-            return 0;   /* A future Bluetooth revision's PHY. Stays unknown. */
-    }
-}
-
 int vtp_status_known(uint8_t s) {
     switch (s) {
         case VTP_STATUS_OK:
@@ -489,7 +403,7 @@ int vtp_status_known(uint8_t s) {
         case VTP_STATUS_RATE_EXCEEDED:
         case VTP_STATUS_BUSY:
         case VTP_STATUS_NEEDS_ENCRYPTION:
-        case VTP_STATUS_UNKNOWN_HANDLE:
+        case VTP_STATUS_UNKNOWN_SUBSCRIPTION:
             return 1;
         default:
             return 0;   /* A status a later minor assigned. Stays unknown. */
@@ -523,26 +437,10 @@ int vtp_decode_time_sync(const uint8_t *b, size_t len,
 
     o->t_device_rx = rd64(b + VTP_TIME_SYNC_OFF_T_DEVICE_RX);
     o->t_device_tx = rd64(b + VTP_TIME_SYNC_OFF_T_DEVICE_TX);
-    /* SPEC.md §9.7 -- answering before being asked is not a late clock, it is
+    /* SPEC.md §9.5 -- answering before being asked is not a late clock, it is
      * a malformed response, and a negative round trip halved into an offset
      * is a confidently wrong one. */
     if (o->t_device_tx < o->t_device_rx) { *err = "tx-before-rx"; return -1; }
     return 0;
 }
 
-int vtp_decode_link_params(const uint8_t *b, size_t len,
-                           vtp_link_params_t *o, const char **err) {
-    /* Fixed size, no extension mechanism: any other length is malformed. */
-    if (len != VTP_LINK_PARAMS_SIZE) { *err = "length"; return -1; }
-
-    o->validity            = rd16(b + VTP_LINK_PARAMS_OFF_VALIDITY);
-    o->att_mtu             = rd16(b + VTP_LINK_PARAMS_OFF_ATT_MTU);
-    o->ll_max_tx_octets    = rd16(b + VTP_LINK_PARAMS_OFF_LL_MAX_TX_OCTETS);
-    o->ll_max_rx_octets    = rd16(b + VTP_LINK_PARAMS_OFF_LL_MAX_RX_OCTETS);
-    o->conn_interval       = rd16(b + VTP_LINK_PARAMS_OFF_CONN_INTERVAL);
-    o->peripheral_latency  = rd16(b + VTP_LINK_PARAMS_OFF_PERIPHERAL_LATENCY);
-    o->supervision_timeout = rd16(b + VTP_LINK_PARAMS_OFF_SUPERVISION_TIMEOUT);
-    o->phy_tx              = b[VTP_LINK_PARAMS_OFF_PHY_TX];
-    o->phy_rx              = b[VTP_LINK_PARAMS_OFF_PHY_RX];
-    return 0;
-}

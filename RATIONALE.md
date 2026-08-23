@@ -175,9 +175,12 @@ everything unconditionally on every connect, because a module that browned out
 mid-session comes back promiscuous or deaf and both are silent.
 
 **VTP/1:** the Info characteristic declares slots, rate ceilings and payload
-support; the control channel is tagged request/response with typed failures
-(`table_full`, `rate_exceeded`); and `CAN_LIST` returns the installed table so a
-client can verify state rather than assume it.
+support, and the control channel is tagged request/response with typed failures
+(`table_full`, `rate_exceeded`). Reprogramming everything on every connect —
+the only safe strategy above — is made cheap instead of merely necessary: the
+table clears on disconnect, and re-installing the same subscription updates in
+place, so the client always knows the table because it installed it, this
+connection.
 
 ### 2.9 Motion data went somewhere else entirely
 
@@ -223,9 +226,12 @@ arrives already resolved. This is why one client entry can serve modules from
 several vendors.
 
 **Per-id rate limiting in the device.** Bandwidth bounded by an interval the
-device enforces, per identifier, expressed in milliseconds. Strictly better than
-hardware filter slots. VTP/1 generalises it with on-change and every-Nth modes
-rather than replacing it.
+device enforces, per identifier, expressed in milliseconds. Strictly better
+than hardware filter slots. VTP/1 keeps it as the `periodic` subscription mode
+rather than replacing it — and pre-1.0 drafts that generalised it with
+on-change and every-Nth modes walked that back (§8.4): the decade of evidence
+is for per-id intervals, and each extra mode bought real firmware complexity
+for a need nobody had demonstrated.
 
 **Publishing it and then leaving it alone.** Stability is the feature that
 created the ecosystem. Any successor inherits that obligation, which is why
@@ -332,27 +338,18 @@ and that is policy — the client knows whether the user is watching a lap timer
 or logging a session, and the device cannot. A protocol that moves that decision
 into the device stops being a dumb pipe (§3).
 
-`GET_LINK_PARAMS` (SPEC §9.1) is the half that *was* worth adding, and it points
-the other way: not another actuator, but the one measurement a client cannot
-take for itself. Negotiated link-layer payload, PHY and connection interval are
-not exposed to applications on at least one major mobile platform, so without
-the device reporting them a client cannot tell a well-configured device from one
-quietly costing three times the airtime for the same data. Sensing was the gap;
-actuation already existed.
-
-It has no `capabilities` bit, which is a deliberate asymmetry with
-`masked_subscriptions` and `on_change_subscriptions`. Those bits earn their
-place because a client must know before it composes a subscription plan;
-learning the answer by being rejected means unwinding work already done.
-`GET_LINK_PARAMS` has no plan behind it. A bit could not carry the values, so a
-client that cares issues the opcode either way — and the response already says
-whether it is supported. The bit would save no round trip, change no behaviour,
-and introduce a second source of truth needing a precedence rule for the case
-where it disagrees with the response. For a feature whose whole purpose is
-verifying rather than assuming, an advertised claim is the wrong shape; §2.8's
-answer to the same problem was `CAN_LIST` reading real state back, not another
-bit. `control` already tells a client whether there is a control channel at all,
-which is the part worth knowing before connecting.
+There is one genuine sensing gap here: negotiated link-layer payload, PHY and
+connection interval are not exposed to applications on at least one major
+mobile platform, so a client cannot tell a well-configured device from one
+quietly costing three times the airtime for the same data. Pre-1.0 drafts
+closed it with a `GET_LINK_PARAMS` opcode reporting the device's own view of
+the link, and the opcode was removed before anything shipped (§8.7): it was
+bench diagnostics dressed as a core feature — a record, a validity scheme and
+a set of consistency rules, in service of a question that a sniffer on a bench
+answers better and that no lap ever depends on. SPEC §12.1 now says plainly
+that §2.1–2.3 are verified on a bench; opcode `0x31` stays unassigned so a
+later minor can revive the report if hardware experience shows the runtime
+check earning its keep.
 
 ## 5. Why most records are closed
 
@@ -460,10 +457,12 @@ reconstructing masks the client already knew.
 
 The cost is real and is paid per frame. Matching stops being a lookup and
 becomes a scan of the table with a precedence rule to break ties
-(SPEC.md §9.3), on the one stream that can run at four thousand frames a
-second. It is also more specification: `CAN_UNSUBSCRIBE` takes a handle rather
-than an identifier (SPEC.md §9.2) precisely because an identifier stops being a
-unique name for an entry once masks exist.
+(SPEC.md §9.2), on the one stream that can run at four thousand frames a
+second. It also reshapes naming: an identifier stops being a unique name for
+an entry once masks exist, which is why a subscription's identity is its
+`(id, mask)` pair (SPEC.md §9.1) — pre-1.0 drafts solved the same problem
+with device-assigned handles, and the pair turned out to already be the name,
+so the handles went (§8.7).
 
 A device unwilling to pay any of that pays none of it. `masked_subscriptions`
 is `capabilities` bit 6, so a client knows before it composes a plan rather
@@ -494,6 +493,260 @@ Stating these plainly, because a rationale that only lists benefits is marketing
 
 ---
 
+## 8. Notes to the specification, section by section
+
+SPEC.md states the rules and stops; this section carries the reasoning each
+rule used to carry inline. It exists because the specification's own claim to
+be "deliberately terse" had stopped being true — at one point it ran to more
+than two thousand lines, most of them explanation, and the barrier to
+implementing a GPS beacon was reading all of it. The rules did not change when
+the explanations moved here; where a rule *did* change in the same revision,
+the note says so.
+
+### 8.1 Transport (SPEC §2)
+
+**Why the link-layer payload matters as much as the MTU (§2.1).** A large ATT
+MTU is not by itself a throughput figure. Sent over the 27-byte default
+link-layer payload, a 247-byte notification is fragmented across ten or more
+packets, each carrying its own header, inter-frame spacing and
+acknowledgement — roughly three times the radio airtime for the same bytes,
+taken from every other peripheral sharing the central's radio. §4.1 above has
+the airtime arithmetic.
+
+**Why flush timing follows the device's own clock (§2.3).** The connection
+interval is granted by the central, not chosen by the device, and a central
+serving several peripherals commonly grants 30 ms or more whatever was
+requested. A device that times batch flushes from the interval it *asked for*
+misbehaves precisely on the crowded radios where behaving matters.
+
+### 8.2 Discovery and Info (SPEC §3, §4)
+
+**Why the Device Information Service is a SHOULD (SPEC §3.4).** Nothing in VTP/1
+reads it, which is the point: it is where every generic Bluetooth tool already
+looks, so it is what answers "which firmware is on the logger that is
+misbehaving" without the asker needing to know anything about this protocol.
+It carries no protocol meaning, so requiring it would add a conformance
+surface no client behaviour depends on.
+
+**Why the attribute table is fixed (§4.1).** Central stacks cache the
+attribute table across connections, and several cache it across reboots of the
+phone. A device whose table changes between connections — because a capability
+was switched off in firmware, or a build shipped without a role — hands the
+client a stale handle. The client then reads or writes the wrong attribute
+rather than discovering a missing one, which is precisely the
+plausible-wrong-value failure SPEC §1.1 exists to prevent. An inert characteristic
+costs a handful of lines; a mutable table costs a caching bug on somebody
+else's phone.
+
+**Why an Info that breaks the capability matrix decodes (§4.1).** Earlier
+drafts had the receiver reject it, exactly as it rejects a wrong length. But
+the record is well-formed — every field is where it says it is — and the
+violation is a *device* defect, almost certainly a firmware bug rather than
+wire corruption (the BLE link layer already checksums every packet). Rejecting
+turned "your firmware set one bit wrong" into "the app says no device found",
+with no diagnostic path for exactly the person able to fix it. The client now
+decodes, refuses to use the contradicted role, and surfaces the contradiction;
+the reference encoder still refuses to produce one, so a conforming device
+cannot ship it.
+
+**Why `max_notify_bytes` was removed.** Info once published the largest
+notification the device would send. Its first definition — the negotiated ATT
+payload — was unimplementable: a client reads Info before a peripheral learns
+the negotiated maximum. Its second — a fixed device ceiling — was
+implementable and useless: a notification can never exceed the negotiated ATT
+payload, the client's own stack knows that number, and a receive buffer sized
+to it is always sufficient. A field that restates a bound the reader already
+has is a field two implementations can disagree about for no gain, which is
+the same argument that removed `can_max_payload`.
+
+### 8.3 GPS (SPEC §5)
+
+**Why the solution-epoch flag exists (SPEC §5.6).** A GNSS receiver computes a
+solution for a specific instant and delivers it over a serial link tens to
+hundreds of milliseconds later, varying with the receiver, its output rate and
+how busy the link is. A device that stamps delivery therefore reports a
+position that was true at one time with a timestamp naming another, and every
+GPS sample runs late against CAN and IMU by that latency — removing exactly
+the cross-channel alignment the shared clock exists to provide, while every
+number stays plausible. Whether the receiver exposes the epoch — a timing
+message, a PPS edge — is a property of the hardware, so the requirement cannot
+be unconditional; the flag is the honest answer to "when was this true?", and
+its absence is an admission rather than a guess.
+
+**Why out-of-range values decode (§5).** Earlier drafts had the receiver
+reject a latitude of 91°, on the argument that every other field in the record
+came from the same bytes. But the link layer already rules out wire
+corruption, so an out-of-range coordinate is a firmware bug — and rejecting
+the fix hides the evidence from the person best placed to notice, while a
+strict client meeting a slightly-buggy device shows a blank screen with no
+path forward. The bounds still bind the device absolutely, the reference
+encoder still refuses to emit a violation, and clamping is still forbidden —
+91° is not a place a clamp could move closer to, and clamping to 90° puts the
+vehicle at the pole and lets the client draw it there. The same reasoning
+moved the RTK-flag consistency rules (§5.3) from receiver-reject to
+device-must-not-emit: a receiver MUST NOT resolve both-RTK-bits as "fixed
+wins", because that upgrades a device's accuracy claim on the strength of a
+bug, but it decodes the fix and says what it saw.
+
+### 8.4 CAN (SPEC §6)
+
+**Why timestamps are end-of-frame (SPEC §6.7).** A device cannot generally know a
+frame's time on air without knowing the bit timing and the number of stuffed
+bits, so a start-of-frame timestamp would be back-computed rather than
+measured, and this specification prefers a measurement it can defend to an
+estimate it cannot. The cost: a long frame is stamped later than a short one
+relative to the moment it began — at 500 kbit/s a 64-byte FD frame is roughly
+a millisecond of that.
+
+**Why there are two subscription modes.** Pre-1.0 drafts had four:
+`every_frame`, `periodic`, `on_change` and `every_nth`. The last two were
+removed, and the argument is worth keeping because each looked free on paper.
+`every_nth` decimates by frame count, so its output rate scales with bus load
+— the wrong property for budgeting a radio — and `periodic` answers the same
+need with a rate the client actually chose; it also produced a genuine
+specification bug, because `every_nth` with N of 1 selects exactly what
+`every_frame` selects and the two were treated differently by the (since
+removed) rate-admission rule. `on_change` was the single largest RAM demand in
+the CAN role: SPEC §6.8 requires mode state per *matching identifier*, and
+`on_change` alone needs a copy of the last forwarded payload — 8 to 64 bytes —
+per identifier, on a mask that may cover the whole bus. Both modes are
+revivable in a later minor from the reserved enum values, against demonstrated
+need rather than symmetry.
+
+**Why per-identifier state may be bounded (SPEC §6.8).** A mask of zero matches
+every identifier on the bus, and a device cannot know at install time how many
+that is — so per-identifier `periodic` state is an unbounded demand on a
+bounded MCU. Earlier drafts left exhaustion unspecified, which is the worst
+available answer. Shedding is the mechanism the device already has: frames it
+can no longer schedule are counted in `dropped` with the shedding flag set,
+observable and degrading rather than silently wrong. Substituting unscheduled
+forwarding is forbidden because a client that asked for one frame in ten and
+silently gets all of them cannot tell a configuration bug from a flood.
+
+### 8.5 IMU (SPEC §7)
+
+**Why `t_base` is acquisition time, with no flag and no exception.** Samples
+are commonly drained from a sensor FIFO in bursts, so the read happens well
+after the earliest sample was taken — at 833 Hz a sixteen-deep FIFO is nearly
+twenty milliseconds. A device stamping the drain reports the batch late by the
+depth of its own buffer, and the error changes with occupancy, so a client
+cannot even calibrate it away. Unlike a GNSS solution epoch (§8.3 above) the
+device sets the sampling schedule itself: sample 0's time is the drain time
+less the samples behind it, and a device that cannot work that out is not
+measuring what it claims to measure.
+
+**Why a batch ends at a discontinuity.** Even spacing is what lets a client
+derive per-sample times arithmetically; a gap inside a batch makes every
+derived timestamp after it wrong by the size of the gap, silently and
+increasingly. Splitting costs one extra notification at the moment the device
+is already in trouble, which is the cheapest possible price for not shipping a
+timeline that is quietly wrong from that point on.
+
+**Why `period` may be approximate, and by how much.** Real sensor output data
+rates are not integer hertz, so `period` is the true interval rounded to the
+nearest microsecond — up to 0.5 µs per sample of error, accumulating only
+within a batch because each notification re-anchors at a measured `t_base`.
+At 833 Hz over nineteen samples the worst case is about 9 µs, below the 10 µs
+resolution of a CAN timestamp, so it can never be the limiting term in
+cross-channel alignment.
+
+### 8.6 Clock, sequence and loss (SPEC §8)
+
+**Why the seq rule is stated as a property of the notification (§8.2).** The
+counter phrasing — "restarts at 0" — can be read as the counter being zeroed
+and the first notification then taking the *next* value, which puts 1 on the
+wire. A device did exactly that, and its own conformance check was written to
+match, so the test agreed with the bug it existed to catch. "The first
+notification carries 0" admits one reading.
+
+**Why `dropped` is best-effort and `seq` exact (§8.3).** Attributing every
+lost item to exactly one notification means owning the counter transactionally
+across encoding, transmit-queue refusal and supersession. The question the
+field answers — "is my link bad, or is the device overrun?" — survives a count
+landing one notification late, so the exactness is spent on `seq` instead,
+where it is cheap: `seq` counts notifications actually sent, committed when
+the transport accepts one.
+
+### 8.7 Control (SPEC §9)
+
+**Why one outstanding request (SPEC §9).** An earlier draft let a client pipeline
+and required a device to accept at least four outstanding requests. That
+bought one thing — installing a subscription table without a round trip per
+connection interval — and cost every implementer a queue, a depth, an ordering
+guarantee and a refusal to hold them together. Nothing on the control plane is
+latency-critical: subscriptions are installed once at connect, rates change
+when a user changes them, and `TIME_SYNC` measures the round trip it is
+already waiting for.
+
+**Why subscriptions have no handles.** Pre-1.0 drafts had installs return a
+device-assigned handle, and `CAN_UNSUBSCRIBE` took one. But install-in-place
+already made `(id, mask)` a unique name — the same pair updates the same entry
+— so the handle was a second name for a thing that had one, and it dragged
+allocation rules, a reuse prohibition, an `unknown_handle` status and
+client-side bookkeeping behind it. Removal now names the pair directly; the
+overlap tie-break (SPEC §9.2) uses installation order, which the client knows
+because it installed the table, this connection.
+
+**Why there is no `CAN_LIST`.** The specification *mandates* that
+subscriptions clear on disconnect and that a client reprograms on every
+connection — so a conforming client always already knows the table: it
+installed it, this connection, with install-in-place semantics. A read-back
+opcode could only ever reveal device bugs, which makes it bench tooling, and
+it was the single largest piece of the control plane: a paged response, two
+record types, and rules for `total`, `index` and overshoot. The harness
+verifies table behaviour behaviourally — install, send, observe, remove — and
+opcode `0x05` stays unassigned for a later minor if implementation experience
+argues the debug window back in. `GET_LINK_PARAMS` went the same way for the
+same reason (§4.4 above).
+
+**Why a subscription is never refused on rate grounds (SPEC §9.3).** An earlier
+draft asked a device to predict the load a subscription would add and refuse
+beyond a budget. The prediction cannot be made: not for `every_frame`, which
+depends on what the bus will carry, and not for a mask, which keeps its
+schedule per matching identifier and so produces one rate per identifier
+rather than the one its `arg` names. Shedding is the honest mechanism and the
+device has it already — observable, degrading rather than failing, and needing
+no forecast. `rate_exceeded` remains for the two rate setters, where the
+ceiling is a fact the device knows.
+
+**Why TIME_SYNC carries two timestamps (SPEC §9.5).** One timestamp cannot bound
+its own error: a client that knows only when it asked, when it heard back, and
+one device reading cannot separate the outbound delay from the inbound one, so
+its estimate is uncertain by the whole round trip — tens of milliseconds on a
+30 ms connection interval, in an exchange whose purpose is aligning a
+microsecond clock. Reporting the device's own processing time lets the client
+subtract it; what remains unmeasurable is the asymmetry between the two
+queuing delays, which is why `delay` is a floor and not a total. This is NTP's
+exchange, for NTP's reason. The request carries no parameters because an
+earlier draft had it carry the host's UTC milliseconds, which the equations
+could not use and the device could only discard.
+
+**Why deliverability is decided before dispatch (SPEC §9.4).** Applying first and
+answering second is the natural order to write the code in, and it strands the
+client: a device that applies a request whose response is then lost leaves the
+client to retry, and for any non-idempotent request the retry applies it
+twice. The failure was observed in practice before it was specified.
+
+### 8.8 Security (SPEC §10)
+
+**Why the obligation is one-sided.** Requiring encryption costs the device
+author real work — bond storage, a bond table that fills, and a mismatch after
+reflashing that presents as a broken device — and that cost lands hardest on
+exactly the small implementations this protocol needs. Supporting encryption
+costs a client almost nothing: every major central stack turns `Insufficient
+Encryption` into a pairing attempt on its own. Putting the requirement on the
+side that can bear it leaves each device free to choose its posture without
+fragmenting what clients can talk to.
+
+**Why enforcement is the GATT permission, not an application check (SPEC §10.1).**
+The two are not interchangeable: a characteristic carrying the permission is
+enforced by the ATT layer, so an unencrypted write never reaches application
+code and there is nothing there to generate a `needs_encryption` reply from.
+An earlier draft required both, which cannot be implemented; the status stays
+allocated because a status, once allocated, is never reused (SPEC §11.4).
+
+---
+
 ## Contradictions found by review, and how each was closed
 
 SPEC.md states rules; this is why these particular rules are the ones it
@@ -521,9 +774,12 @@ build is a service declaration, four inert attributes and one notify path.
 **`max_notify_bytes` could not mean the negotiated MTU.** A client reads Info
 as its first act after connecting; a CoreBluetooth peripheral does not learn
 the negotiated maximum until a central subscribes, which is strictly later.
-Defined as the live value it was a field whose correct answer did not exist yet
-at the only moment anyone read it. Defined as a device ceiling (SPEC.md §4.2) it always
-has one.
+Defined as the live value it was a field whose correct answer did not exist
+yet at the only moment anyone read it. It was redefined as a device ceiling —
+and then removed altogether (§8.2): a notification never exceeds the
+negotiated ATT payload, which the client's own stack already knows, so even
+the ceiling was a second statement of a bound the client has. Bytes 22–23 of
+Info are reserved.
 
 **Monitor freshness had two rules and a third to reconcile them.** `max_age` of
 zero meant "no deadline of its own", and a derived device-wide "liveness bound"
@@ -542,7 +798,7 @@ best-effort and spends the exactness on `seq` instead, where it is cheap:
 accepts one.
 
 **Rate setting was undefined in four ways** — zero, unsupported rates,
-ceilings, and when the change takes effect. SPEC.md §9.8 states them. There is
+ceilings, and when the change takes effect. SPEC.md §9.6 states them. There is
 deliberately no way to enumerate supported rates: asking and finding out is one
 round trip on a link the client already has, and a discovery mechanism would be
 a list format, a paging scheme and a second thing to keep in step with Info.
@@ -554,9 +810,10 @@ receiver rejects a fix that breaks either rule — the flags and the position ca
 out of the same bytes, so the rest of the record is not trustworthy either.
 
 **An IMU batch could carry no samples**, though `t_base` is defined as the
-acquisition time of sample 0. SPEC.md §6's CAN batch still permits an empty one and
-that is not an inconsistency: a CAN `t_base` describes a bus that was observed
-and found quiet, an IMU `t_base` describes a sample.
+acquisition time of sample 0. The same reasoning was then applied to CAN:
+SPEC.md §6.2 forbids an empty CAN batch too, because its `t_base` is defined
+as the bus-arrival time of record 0 and a batch with no record 0 timestamps a
+frame that does not exist. A quiet bus is reported by sending nothing.
 
 ## What the reference peripheral cannot observe
 

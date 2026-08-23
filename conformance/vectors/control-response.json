@@ -4,15 +4,15 @@
   "cases": [
     {
       "name": "ok-with-detail",
-      "desc": "A successful CAN_SUBSCRIBE: three envelope bytes and the handle it assigned. SPEC.md 9 -- detail is present because status is ok.",
+      "desc": "A successful MONITOR_LIST: three envelope bytes and the empty declaration it returned. SPEC.md 9 -- detail is present because status is ok.",
       "record": "control_response",
-      "hex": "0201000700",
+      "hex": "4001000000",
       "expect": {
-        "opcode": 2,
+        "opcode": 64,
         "tag": 1,
         "status": 0,
         "status_known": true,
-        "detail_hex": "0700"
+        "detail_hex": "0000"
       }
     },
     {
@@ -30,7 +30,7 @@
     },
     {
       "name": "refused-is-three-bytes",
-      "desc": "CAN_SUBSCRIBE refused with bad_params. Exactly three bytes: a client reading the five it would get on success takes a handle from a request that failed.",
+      "desc": "CAN_SUBSCRIBE refused with bad_params. Exactly three bytes: a refusal never carries a detail, so a client reading further takes bytes from a request that failed.",
       "record": "control_response",
       "hex": "020302",
       "expect": {
@@ -95,7 +95,7 @@
     },
     {
       "name": "detail-on-error",
-      "desc": "bad_params carrying two bytes of detail. MUST be rejected: detail is present if and only if status is ok, and a client that has already decided the request succeeded would read those bytes as a handle.",
+      "desc": "bad_params carrying two bytes of detail. MUST be rejected: detail is present if and only if status is ok, and a client that has already decided the request succeeded would read those bytes as a detail.",
       "record": "control_response",
       "hex": "0208020700",
       "must_reject": "detail-on-error"

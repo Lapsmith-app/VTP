@@ -35,9 +35,9 @@ ROLES = {
     # that the specification permits not to have one, leaving it to fail
     # conformance for records it never claimed or to implement things it does
     # not support.
-    "control": {"control_response", "link_params", "time_sync"},
+    "control": {"control_response", "time_sync"},
     "gps":     {"gps_fix"},
-    "can":     {"can_batch", "can_list"},
+    "can":     {"can_batch"},
     "imu":     {"imu_batch"},
     "monitor": {"monitor_list", "monitor_update"},
 }
@@ -222,7 +222,15 @@ def main():
                 # checks what a decode cannot -- that the encoder agrees about
                 # the layout, and that it emits the canonical form rather than
                 # merely one that happens to decode back.
-                if got.get("roundtrip_error"):
+                #
+                # `no_roundtrip` marks the one shape of case where that check
+                # cannot apply: a payload a receiver MUST decode but a
+                # conforming encoder MUST refuse to produce, such as a fix
+                # whose coordinates are out of range. The refusal there is
+                # correct behaviour, not a failure.
+                if case.get("no_roundtrip"):
+                    pass
+                elif got.get("roundtrip_error"):
                     problems.append(f"re-encode failed: {got['roundtrip_error']}")
                 elif "roundtrip_hex" in got:
                     roundtripped += 1

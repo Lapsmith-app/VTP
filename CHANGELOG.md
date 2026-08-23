@@ -8,6 +8,87 @@ conformance vector.
 
 ## [Unreleased]
 
+### The specification was reviewed as what it is, and slimmed
+
+A design review asked one question of every part of VTP/1: does this earn its
+place in a hobbyist DIY telemetry protocol with zero deployed devices? The
+wire format's core — the shared clock, batching, validity bits, `seq` and
+`dropped`, the fixed attribute table — passed that review unchanged. Five
+things did not, and this revision removes or reshapes them. The corpus
+baseline was regenerated (`check_baseline.py --accept`): this is deliberately
+not a minor version, which `v0.x` exists to permit.
+
+- **The control plane lost its debug conveniences: 10 opcodes become 8.**
+  `CAN_LIST` (0x05) is gone — §9.1 already forces a client to reprogram on
+  every connection, so a conforming client always knows the table because it
+  installed it; a read-back could only reveal device bugs, and it was the
+  single largest piece of the control plane (a paged response, two record
+  types, and rules for `total`, `index` and overshoot). `GET_LINK_PARAMS`
+  (0x31) is gone with its `link_params` record, `link_validity` bitmask and
+  `phy` enum — bench diagnostics dressed as a core feature; §12.1 now says
+  plainly that §2.1–2.3 are verified on a bench. Both opcode values stay
+  unassigned so a later minor can revive either. RATIONALE §8.7 has the full
+  argument.
+
+- **Subscriptions lost their handles.** Install-in-place had already made
+  `(id, mask)` a unique name, so the handle was a second name for a thing
+  that had one — plus allocation rules, a reuse prohibition, client-side
+  bookkeeping and the `unknown_handle` status. A subscription is now named by
+  its `(id, mask)` pair everywhere: `CAN_SUBSCRIBE` answers a bare `ok`,
+  `CAN_UNSUBSCRIBE` takes `id:u32, mask:u32`, status 7 is renamed
+  `unknown_subscription`, and §9.2's overlap tie-break is most-specific-mask
+  then earliest-installed.
+
+- **Subscription modes: four become two.** `every_nth` decimates by frame
+  count, so its output rate scales with bus load — the wrong property for
+  budgeting a radio — and `periodic` answers the same need with a rate the
+  client chose; it had also already produced one specification bug (N of 1 is
+  `every_frame` by another spelling). `on_change` was the largest RAM demand
+  in the CAN role: per-identifier state must include a copy of the last
+  forwarded payload, on a mask that may cover the whole bus. Mode values 2
+  and 3 and capability bit 7 stay unassigned. What the removal paid for: §6.8
+  now states what a device does when bounded per-identifier state runs out —
+  it sheds, visibly, like any other overload — closing a hole the four-mode
+  draft had left unstated.
+
+- **Semantic cross-checks moved from receiver-MUST-reject to
+  device-MUST-NOT-emit.** An out-of-range coordinate, contradictory RTK
+  flags, or an Info that breaks the §4.1 capability matrix is a firmware bug,
+  not wire corruption — the link layer already checksums every packet — and
+  rejecting whole records over it hid the evidence from exactly the person
+  able to fix it, behind a client showing "no data". A receiver now decodes
+  the well-formed payload, MUST NOT clamp or guess, and SHOULD surface the
+  violation as a device defect; the reference encoders still refuse to
+  produce any of it, so a conforming device cannot ship it. Structural
+  rejects — lengths, counts, the FD ladder, identifier bits, a non-zero first
+  `dt` — are unchanged: those genuinely corrupt parsing. The affected decode
+  vectors carry `no_roundtrip`, since the decode is required and the
+  re-encode is forbidden.
+
+- **`max_notify_bytes` is gone from Info (bytes 22–23 reserved).** A
+  notification never exceeds the negotiated ATT payload, which the client's
+  own stack already knows, so even the device-ceiling redefinition was a
+  restatement of a bound the reader has — the same argument that removed
+  `can_max_payload` from byte 20.
+
+- **SPEC.md itself was cut by more than half**, from ~2,190 lines to under
+  1,100, by moving the why-essays into RATIONALE §8 (new), which mirrors the
+  specification's own sections. §9's subsections renumbered: 9.1
+  subscriptions, 9.2 overlap, 9.3 load, 9.4 lifecycle, 9.5 TIME_SYNC, 9.6
+  rates. A new Appendix B walks the smallest conforming device — a GPS-only
+  beacon — in one page. RATIONALE's own claim that "SPEC.md §6's CAN batch
+  still permits an empty one" was found stale against §6.2 and corrected:
+  prose drift in the very section about catching drift, and part of the
+  argument for shrinking the prose surface.
+
+**Monitor stays.** The review proposed deferring §13 to a later minor and the
+decision went the other way: the role is retained in full, unchanged.
+
+Everything downstream follows the schema: both references, the software
+peripheral, the harness (which now proves table state behaviourally — install,
+send, observe, remove — instead of reading `CAN_LIST` back), and the corpus
+(105 vectors across 7 record types, 34 producer cases).
+
 ### A busy radio was being reported as a device losing data
 
 Reported from the field: the peripheral shedding at `every_frame` and a client

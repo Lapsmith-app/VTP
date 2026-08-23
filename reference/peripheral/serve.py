@@ -87,13 +87,14 @@ def _in_app_bundle():
 # the difference between diagnosing a client and guessing at one.
 OPCODES = {
     0x01: "CAN_RESET", 0x02: "CAN_SUBSCRIBE", 0x03: "CAN_SUBSCRIBE_MASK",
-    0x04: "CAN_UNSUBSCRIBE", 0x05: "CAN_LIST", 0x10: "GPS_SET_RATE",
-    0x20: "IMU_SET_RATE", 0x30: "TIME_SYNC", 0x31: "GET_LINK_PARAMS",
+    0x04: "CAN_UNSUBSCRIBE", 0x10: "GPS_SET_RATE",
+    0x20: "IMU_SET_RATE", 0x30: "TIME_SYNC",
     0x40: "MONITOR_LIST",
 }
 STATUSES = {
     0: "ok", 1: "unsupported_opcode", 2: "bad_params", 3: "table_full",
-    4: "rate_exceeded", 5: "busy", 6: "needs_encryption", 7: "unknown_handle",
+    4: "rate_exceeded", 5: "busy", 6: "needs_encryption",
+    7: "unknown_subscription",
 }
 CHAR_NAMES = {}
 
@@ -214,8 +215,9 @@ def _describe_request(value):
         fmt = "ext" if cid & (1 << 29) else "std"
         detail = (f" id=0x{cid & 0x1FFFFFFF:03X}/{fmt} mask=0x{mask:08X} "
                   f"mode={mode} arg={arg}")
-    if opcode == 0x05 and len(params) == 2:
-        detail = f" start={struct.unpack('<H', params)[0]}"
+    if opcode == 0x04 and len(params) == 8:
+        cid, mask = struct.unpack("<II", params)
+        detail = f" id=0x{cid & 0x1FFFFFFF:03X} mask=0x{mask:08X}"
     return f"{name} tag={tag}{detail} params={params.hex() or '-'}"
 
 
@@ -829,8 +831,7 @@ class Peripheral:
             self._install_mtu_hook()
         except Exception:
             log.warning("could not hook the subscribe callback; the device "
-                        "will size batches from --mtu and GET_LINK_PARAMS "
-                        "will report no ATT MTU", exc_info=True)
+                        "will size batches from --mtu", exc_info=True)
         log.info("advertising %s as %r", SERVICE, self.name)
         log.info("a client matching on the service UUID needs that UUID in the "
                  "advertisement; name is %d of %d permitted characters",

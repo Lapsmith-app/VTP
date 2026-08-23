@@ -64,7 +64,7 @@ def _seq_of(stream, payload):
 # Before anything was asked for
 # ---------------------------------------------------------------------------
 
-@check(id="can.silent_until_asked", section="9.2", phase="info", severity="MUST",
+@check(id="can.silent_until_asked", section="9.1", phase="info", severity="MUST",
        requires=("can",),
        title="No CAN frame arrives before a subscription is installed")
 async def can_silent_until_asked(s):
@@ -78,7 +78,7 @@ async def can_silent_until_asked(s):
         if batch["records"]:
             carrying.append(item)
     if carrying:
-        # §9.2 clears the table when the link drops, so a fresh connection
+        # §9.1 clears the table when the link drops, so a fresh connection
         # matches nothing. A device streaming here has invented consent, and a
         # client that trusted it would be recording a bus it never asked for.
         raise Fail(
@@ -92,7 +92,7 @@ async def can_silent_until_asked(s):
 # Asking for traffic
 # ---------------------------------------------------------------------------
 
-@check(id="can.subscribe_for_observation", section="9.2", phase="observe",
+@check(id="can.subscribe_for_observation", section="9.1", phase="observe",
        severity="OBSERVE", requires=("control", "can"),
        title="Subscribe so there is CAN traffic to judge")
 async def can_subscribe_for_observation(s):
@@ -105,7 +105,7 @@ async def can_subscribe_for_observation(s):
         for can_id in wanted:
             response = await c.subscribe_can(can_id)
             if response.ok:
-                installed[can_id] = struct.unpack("<H", response.detail)[0]
+                installed[can_id] = refdec.MASK_EXACT
         s.state["installed"] = installed
         s.state["can_catch_all"] = False
         if not installed:
@@ -125,10 +125,10 @@ async def can_subscribe_for_observation(s):
         refdec.OPCODE["CAN_SUBSCRIBE_MASK"],
         struct.pack("<IIBH", 0, PROBE_MASK_ALL, 0, 0))
     if not response.ok:
-        raise Fail(f"a mask of zero, which §9.2 defines as covering every frame, "
+        raise Fail(f"a mask of zero, which §9.1 defines as covering every frame, "
                    f"was answered {response.status_name}",
                    response=response.raw.hex())
-    s.state["installed"] = {0: struct.unpack("<H", response.detail)[0]}
+    s.state["installed"] = {0: 0}
     s.state["can_catch_all"] = True
     raise Observe("subscribed to every identifier with a mask of zero")
 
@@ -454,7 +454,7 @@ async def stream_rates(s):
 # SPEC.md §6 -- what a subscription means
 # ---------------------------------------------------------------------------
 
-@check(id="can.matches_subscription", section="9.2", phase="streams",
+@check(id="can.matches_subscription", section="9.1", phase="streams",
        severity="MUST", requires=("control", "can"),
        title="Every forwarded frame matches an installed subscription")
 async def can_matches_subscription(s):
@@ -477,7 +477,7 @@ async def can_matches_subscription(s):
                     payload=item.payload.hex())
 
 
-@check(id="can.forwarded_once", section="9.3", phase="streams", severity="MUST",
+@check(id="can.forwarded_once", section="9.2", phase="streams", severity="MUST",
        requires=("control", "can", "masked_subscriptions"),
        title="A frame matching several subscriptions is forwarded at most once")
 async def can_forwarded_once(s):
@@ -493,21 +493,18 @@ async def can_forwarded_once(s):
     # Deliberately LESS specific than an exact subscription, and different from
     # the catch-all: clearing one arbitration bit still matches `target` and
     # cannot equal anything already installed. An exact mask here would be
-    # identical to what --can-id installs, and SPEC.md §9.2 requires a device to
-    # update that in place and return its existing handle -- so no second
-    # subscription would exist, no frame could be forwarded twice, and this
-    # would report a pass having never created the condition it tests.
-    overlap = await c.subscribe_can(target, mask=refdec.MASK_EXACT & ~0x1)
+    # identical to what --can-id installs, and SPEC.md §9.1 requires a device to
+    # update that in place -- so no second subscription would exist, no frame
+    # could be forwarded twice, and this would report a pass having never
+    # created the condition it tests.
+    overlap_mask = refdec.MASK_EXACT & ~0x1
+    if s.state.get("installed", {}).get(target) == overlap_mask:
+        raise Skip("the overlapping id and mask are already installed, so no "
+                   "second subscription would exist")
+    overlap = await c.subscribe_can(target, mask=overlap_mask)
     if not overlap.ok:
         raise Skip(f"could not install an overlapping subscription: "
                    f"{overlap.status_name}")
-    handle = struct.unpack("<H", overlap.detail)[0]
-    if handle in set(s.state.get("installed", {}).values()):
-        # The device merged it into a subscription that already existed, so
-        # only one still governs the frame and there is nothing to overlap.
-        raise Skip(f"the device returned existing handle {handle} for a "
-                   f"distinct id and mask, so no second subscription was "
-                   f"installed and no frame can match two")
     mark = len(s.streams["can"])
     await asyncio.sleep(2.0)
 
@@ -526,10 +523,10 @@ async def can_forwarded_once(s):
     if duplicates:
         item, (can_id, t) = duplicates[0]
         # Duplicate frames on one bus-arrival timestamp are indistinguishable
-        # from a bus fault, which is why §9.3 makes forwarding once a MUST
+        # from a bus fault, which is why §9.2 makes forwarding once a MUST
         # rather than an optimisation.
         raise Fail(
             f"identifier 0x{can_id:x} appears twice at device time {t} with two "
             f"subscriptions matching it. A frame MUST be forwarded at most "
-            f"once, governed by the most specific mask and then the lowest "
-            f"handle", payload=item.payload.hex())
+            f"once, governed by the most specific mask and then the earliest "
+            f"installed", payload=item.payload.hex())

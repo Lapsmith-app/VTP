@@ -42,14 +42,10 @@ def produce(record, data):
         return enc.encode_monitor_list(data["declaration"], data["entries"])
     if record == "monitor_update":
         return enc.encode_monitor_update(data["header"], data["values"])
-    if record == "can_list":
-        return enc.encode_can_list(data["page"], data["entries"])
     if record == "control_response":
         return enc.encode_control_response(data)
     if record == "time_sync":
         return enc.encode_time_sync(data)
-    if record == "link_params":
-        return enc.encode_link_params(data)
     raise LookupError(record)
 
 

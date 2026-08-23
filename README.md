@@ -54,7 +54,7 @@ rate limiting enforced in the device.
 | **Motion data lives somewhere else** — a board with an IMU reaches for a second, NMEA-shaped stream over RFCOMM or TCP/IP, with a different data model and no CAN. | IMU is a first-class role on the same service, batched and stamped against the same clock. At 200 Hz it costs about 2.4 kB/s and eleven notifications per second. |
 | **One CAN frame per notification.** BLE is bounded by notifications per connection event, so the ceiling sits near 270 frames/s — roughly 7% of a busy 500 kbit/s bus. | Batched frames: fifteen classic frames in one notification at a 247-byte MTU, and a ceiling near 4,000 frames/s. Fewer, fuller packets also occupy *less* airtime for the same frame rate, so everything else on the phone's radio is better off. |
 | **Loss is invisible.** With no sequence number and no drop counter, "the bus went quiet" and "I lost four hundred frames" look identical. | Every stream carries a sequence number, a count of what the device discarded, and a flag for active load shedding. Loss becomes a number a user interface can show. |
-| **Capacity is never expressed.** How many filters will it hold, what rate will it sustain, does it speak CAN FD? Filters are write-only: no read-back, no per-command result, no error when the table is full. | Info declares slots, rate ceilings and payload support; the control channel is tagged request/response with typed failures (`table_full`, `rate_exceeded`); and `CAN_LIST` returns the installed table, so a client verifies state rather than assuming it. |
+| **Capacity is never expressed.** How many filters will it hold, what rate will it sustain, does it speak CAN FD? Filters are write-only: no read-back, no per-command result, no error when the table is full. | Info declares slots, rate ceilings and payload support, and the control channel is tagged request/response with typed failures (`table_full`, `rate_exceeded`) — so installing a subscription has an answer, and a client always knows the table because it installed it, this connection. |
 | **"What is this device?" needs a connection**, an MTU negotiation and a GATT enumeration, to learn about three bits. | Capability bits and the minor version go in the advertisement, so scanning, labelling and ranking need no connection. The 24-byte Info read stays per-connection — that part is inherent to hardware its owner reflashes, not a protocol defect. |
 | **A fix does not fit**, so it is split across two characteristics matched by a 3-bit counter, and fields trade range against resolution behind mode flags. | One 74-byte record carrying an absolute microsecond device timestamp and an absolute UTC timestamp, and one linear encoding per field, sized to its range. No second characteristic, no counter, no rollover case, nothing to select between. |
 | **No version field anywhere**, so forward compatibility is left to convention. | Major versions get separate service UUIDs, so an unsupported major is something a client never discovers rather than something it half-parses. Minor versions are additive by construction: frozen record sizes, length-prefixed extension records, reserved bits. |
@@ -99,7 +99,7 @@ framing.
 | --- | --- |
 | Specification | Believed internally consistent; §4.1 fixes the profile |
 | UUID allocation | Frozen |
-| Conformance corpus | 125 vectors across 9 record types, and 35 producer cases |
+| Conformance corpus | 105 vectors across 7 record types, and 34 producer cases |
 | Reference decoders | C and Python, both passing every vector |
 | Reference encoders | C and Python, both passing every producer case |
 | Software peripheral | A synthetic device, verified against the reference decoder |
@@ -239,7 +239,10 @@ and the reference header cannot disagree.
 
 ## Implementing a device
 
-1. Read [SPEC.md](SPEC.md).
+1. Read [SPEC.md](SPEC.md). Appendix B there is the one-page path for the
+   smallest conforming device — a GPS-only build is a service declaration,
+   four inert attributes and one notify stream, and every other role is a
+   capability bit it leaves clear until you add it.
 2. Use the UUIDs in `schema/uuids.json` unchanged.
 3. Decode your own output with a reference decoder before testing against an
    app — the fastest way to find a byte-layout mistake is to have a known-good
@@ -302,12 +305,12 @@ there is no harness pointed the other way.
    - **Re-read Info on every connection** and never cache it across one (§4). A
      DIY device is reflashed by its owner: its capabilities and rate ceilings
      change while its address does not.
-   - **Enable indications on Control before your first write** (§9.6). A write
+   - **Enable indications on Control before your first write** (§9.4). A write
      that precedes enablement is a request whose answer has nowhere to go.
    - **One control request outstanding at a time** (§9). Write, wait for the
      indication, then write the next. A device answers `busy` if you pipeline,
      and `busy` says nothing about the request itself — wait, then retry.
-   - **Reprogram your subscriptions on every connection** (§9.2). They do not
+   - **Reprogram your subscriptions on every connection** (§9.1). They do not
      survive a disconnect, by design, so you always find a known state.
    - **A `seq` wrap from 65535 to 0 is not a gap** (§8.2), and `dropped` reading
      65535 means *at least* that many, never exactly (§8.3).

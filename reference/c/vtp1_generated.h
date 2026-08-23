@@ -27,7 +27,7 @@
 #define VTP_INFO_OFF_IMU_MAX_RATE_HZ 18
 #define VTP_INFO_OFF_RESERVED_20 20
 #define VTP_INFO_OFF_CLOCK_FLAGS 21
-#define VTP_INFO_OFF_MAX_NOTIFY_BYTES 22
+#define VTP_INFO_OFF_RESERVED_22 22
 
 /* One complete position solution. Never split, never paired, never packed. */
 #define VTP_GPS_FIX_SIZE 74
@@ -110,21 +110,6 @@
 #define VTP_MONITOR_VALUE_OFF_VALIDITY 1
 #define VTP_MONITOR_VALUE_OFF_VALUE 2
 
-/* One page of the CAN subscription table. Followed by `count` can_subscription entries. */
-#define VTP_CAN_LIST_PAGE_SIZE 6
-#define VTP_CAN_LIST_PAGE_OFF_TOTAL 0
-#define VTP_CAN_LIST_PAGE_OFF_INDEX 2
-#define VTP_CAN_LIST_PAGE_OFF_COUNT 4
-#define VTP_CAN_LIST_PAGE_OFF_RESERVED 5
-
-/* One installed CAN subscription, as the device holds it. */
-#define VTP_CAN_SUBSCRIPTION_SIZE 13
-#define VTP_CAN_SUBSCRIPTION_OFF_HANDLE 0
-#define VTP_CAN_SUBSCRIPTION_OFF_ID 2
-#define VTP_CAN_SUBSCRIPTION_OFF_MASK 6
-#define VTP_CAN_SUBSCRIPTION_OFF_MODE 10
-#define VTP_CAN_SUBSCRIPTION_OFF_ARG 11
-
 /* The envelope of every Control response. Detail follows only when status is ok. */
 #define VTP_CONTROL_RESPONSE_SIZE 3
 #define VTP_CONTROL_RESPONSE_OFF_OPCODE 0
@@ -135,18 +120,6 @@
 #define VTP_TIME_SYNC_SIZE 16
 #define VTP_TIME_SYNC_OFF_T_DEVICE_RX 0
 #define VTP_TIME_SYNC_OFF_T_DEVICE_TX 8
-
-/* The device's view of the negotiated link. Reported, never negotiated here. */
-#define VTP_LINK_PARAMS_SIZE 16
-#define VTP_LINK_PARAMS_OFF_VALIDITY 0
-#define VTP_LINK_PARAMS_OFF_ATT_MTU 2
-#define VTP_LINK_PARAMS_OFF_LL_MAX_TX_OCTETS 4
-#define VTP_LINK_PARAMS_OFF_LL_MAX_RX_OCTETS 6
-#define VTP_LINK_PARAMS_OFF_CONN_INTERVAL 8
-#define VTP_LINK_PARAMS_OFF_PERIPHERAL_LATENCY 10
-#define VTP_LINK_PARAMS_OFF_SUPERVISION_TIMEOUT 12
-#define VTP_LINK_PARAMS_OFF_PHY_TX 14
-#define VTP_LINK_PARAMS_OFF_PHY_RX 15
 
 typedef enum {
     VTP_FIX_TYPE_NONE = 0,
@@ -165,14 +138,12 @@ typedef enum {
     VTP_STATUS_RATE_EXCEEDED = 4,
     VTP_STATUS_BUSY = 5,
     VTP_STATUS_NEEDS_ENCRYPTION = 6,
-    VTP_STATUS_UNKNOWN_HANDLE = 7,
+    VTP_STATUS_UNKNOWN_SUBSCRIPTION = 7,
 } vtp_status_t;
 
 typedef enum {
     VTP_SUB_MODE_EVERY_FRAME = 0,
     VTP_SUB_MODE_PERIODIC = 1,
-    VTP_SUB_MODE_ON_CHANGE = 2,
-    VTP_SUB_MODE_EVERY_NTH = 3,
 } vtp_sub_mode_t;
 
 typedef enum {
@@ -186,12 +157,6 @@ typedef enum {
     VTP_CHANNEL_SESSION_DISTANCE = 8,
     VTP_CHANNEL_SESSION_TIME = 9,
 } vtp_channel_t;
-
-typedef enum {
-    VTP_PHY_LE_1M = 1,
-    VTP_PHY_LE_2M = 2,
-    VTP_PHY_LE_CODED = 3,
-} vtp_phy_t;
 
 #define VTP_GPS_VALIDITY_T_UTC (1u << 0)
 #define VTP_GPS_VALIDITY_T_UTC_RESOLVED (1u << 1)
@@ -223,8 +188,7 @@ typedef enum {
 #define VTP_CAPABILITIES_CONTROL (1u << 4)
 #define VTP_CAPABILITIES_CAN_FD (1u << 5)
 #define VTP_CAPABILITIES_MASKED_SUBSCRIPTIONS (1u << 6)
-#define VTP_CAPABILITIES_ON_CHANGE_SUBSCRIPTIONS (1u << 7)
-#define VTP_CAPABILITIES_RESERVED 0xFFFFFF00u
+#define VTP_CAPABILITIES_RESERVED 0xFFFFFF80u
 #define VTP_CAPABILITIES_KNOWN (~(uint32_t)VTP_CAPABILITIES_RESERVED)
 
 #define VTP_CAN_FLAGS_SHEDDING (1u << 0)
@@ -246,13 +210,6 @@ typedef enum {
 #define VTP_MONITOR_VALIDITY_RESERVED 0xFEu
 #define VTP_MONITOR_VALIDITY_KNOWN (~(uint32_t)VTP_MONITOR_VALIDITY_RESERVED)
 
-#define VTP_LINK_VALIDITY_ATT_MTU (1u << 0)
-#define VTP_LINK_VALIDITY_LL_DATA_LENGTH (1u << 1)
-#define VTP_LINK_VALIDITY_CONN_PARAMS (1u << 2)
-#define VTP_LINK_VALIDITY_PHY (1u << 3)
-#define VTP_LINK_VALIDITY_RESERVED 0xFFF0u
-#define VTP_LINK_VALIDITY_KNOWN (~(uint32_t)VTP_LINK_VALIDITY_RESERVED)
-
 /* SPEC.md 4.1 -- a capability bit and every bit it requires. */
 typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rule_t;
 #define VTP_CAPABILITY_RULES { \
@@ -263,9 +220,8 @@ typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rul
     { (1u << 4), 0x00000000u, "control" }, \
     { (1u << 5), 0x00000002u, "can_fd" }, \
     { (1u << 6), 0x00000002u, "masked_subscriptions" }, \
-    { (1u << 7), 0x00000002u, "on_change_subscriptions" }, \
 }
-#define VTP_CAPABILITY_RULE_COUNT 8
+#define VTP_CAPABILITY_RULE_COUNT 7
 
 /* SPEC.md 4.1 -- info fields that MUST be zero when their
  * capability bit is clear. Offset and size, so one loop covers all. */

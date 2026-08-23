@@ -35,9 +35,9 @@ It cannot ask a device a question. So nothing in this repository tested:
 | §4.1 | that the attribute table is the fixed one, and that an absent capability leaves an *inert* characteristic rather than no characteristic |
 | §8.2 | that `seq` starts at 0 on the first notification of a connection |
 | §8.1 | that the three streams are on one clock rather than three |
-| §9.2 | that the subscription table is empty after a reconnect |
-| §9.3 | that a frame matching two subscriptions is forwarded once |
-| §9.8 | that a rate answered `ok` is the rate Info then reports |
+| §9.1 | that the subscription table is empty after a reconnect |
+| §9.2 | that a frame matching two subscriptions is forwarded once |
+| §9.6 | that a rate answered `ok` is the rate Info then reports |
 | §13 | Monitor, which is a thing a device *receives* |
 | §5.1 | that a field whose validity bit is clear is actually zero |
 
@@ -160,9 +160,9 @@ uv run vtp1-harness --can-id 0x1A0 --can-id 0x2C4
 ### Adversarial requests
 
 By default the harness sends malformed control requests — truncated parameters,
-unallocated opcodes, a tag that is already outstanding, a handle that names
-nothing, a Monitor write missing a slot. This is the direct test of §1.1: does
-your device reject malformed *whole*, or decode a prefix and carry on?
+unallocated opcodes, a tag that is already outstanding, an id and mask that
+name nothing, a Monitor write missing a slot. This is the direct test of §1.1:
+does your device reject malformed *whole*, or decode a prefix and carry on?
 
 If your firmware is not ready to survive that, `--no-adversarial` turns it off,
 and the report says which checks it cost you.

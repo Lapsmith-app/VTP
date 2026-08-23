@@ -123,14 +123,14 @@ IMPLIES = {b["name"]: tuple(b.get("implies", ()))
 OPCODE = {op["name"]: op["value"] for op in SCHEMA["control"]["opcodes"]}
 OPCODE_NAME = {v: k for k, v in OPCODE.items()}
 #: SPEC.md §9 -- every opcode is owned by a capability, and availability is
-#: decided before parameters. None means the opcode belongs to the link or the
-#: clock, which every device has.
+#: decided before parameters. None means the opcode belongs to the clock,
+#: which every device has.
 OPCODE_CAPABILITY = {op["name"]: op.get("capability")
                      for op in SCHEMA["control"]["opcodes"]}
 OPCODE_PARAM_SIZE = {
     "CAN_RESET": 0, "CAN_SUBSCRIBE": 7, "CAN_SUBSCRIBE_MASK": 11,
-    "CAN_UNSUBSCRIBE": 2, "CAN_LIST": 2, "GPS_SET_RATE": 2,
-    "IMU_SET_RATE": 2, "TIME_SYNC": 0, "GET_LINK_PARAMS": 0,
+    "CAN_UNSUBSCRIBE": 8, "GPS_SET_RATE": 2,
+    "IMU_SET_RATE": 2, "TIME_SYNC": 0,
     "MONITOR_LIST": 0,
 }
 STATUS = enum_values("status")
@@ -138,7 +138,7 @@ STATUS_VALUE = {name: value for value, name in STATUS.items()}
 CAPABILITIES = bits("capabilities")
 CHANNELS = enum_values("channel")
 
-# SPEC.md §9.2 — CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK with this mask.
+# SPEC.md §9.1 — CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK with this mask.
 MASK_EXACT = 0x3FFFFFFF
 
 # SPEC.md §13.4 — as many values as fit beside a monitor_header in one write at
@@ -147,7 +147,7 @@ MONITOR_MAX_CHANNELS = _ref.MONITOR_MAX_CHANNELS
 
 
 def can_max_payload(capabilities):
-    """SPEC.md §4.2 — the largest CAN payload, which follows from the bits.
+    """SPEC.md §4.1 — the largest CAN payload, which follows from the bits.
 
     Info carried this as a byte until every value it could hold turned out to be
     decided by the capability bits already, so two statements of one fact

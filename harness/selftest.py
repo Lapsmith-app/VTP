@@ -54,16 +54,15 @@ CAUGHT_BY = {
     "monitor_accepts_partial": "monitor.rejects_incomplete",
     "monitor_accepts_duplicate_slot": "monitor.rejects_duplicate_slot",
     "subs_survive_reconnect": "reconnect.subscriptions_cleared",
-    "unknown_handle_ok": "can.unknown_handle",
+    "unknown_subscription_ok": "can.unknown_subscription",
     "stream_before_subscribe": "can.silent_until_asked",
     "caps_reserved_bits": "info.reserved_capabilities",
     "absent_field_nonzero": "gps.absent_fields_zero",
     "clock_per_stream": "clock.one_clock",
-    "drops_a_response": "link.get_link_params",
+    "drops_a_response": "control.time_sync",
     "pipelines_silently": "control.busy_when_outstanding",
     "busy_but_applied": "control.busy_not_applied",
-    "phy_half_reported": ("link.validity_groups", "link.phy"),
-    "list_reserved_nonzero": "can.list_matches_installed",
+    "list_reserved_nonzero": "monitor.declaration",
     "timesync_unsupported": "control.time_sync",
     "monitor_paged_declaration": "monitor.declaration",
     "monitor_accepts_bad_length": "monitor.rejects_bad_length",
@@ -72,15 +71,12 @@ CAUGHT_BY = {
     "unallocated_opcode_ok": "control.unsupported_opcode",
     "info_truncated": "info.decodes",
     "info_major_wrong": "info.major",
-    "notify_bytes_below_min": "info.notify_bytes",
     "capacity_zero": "info.capacities",
     "advert_no_service_uuid": "adv.service_uuid",
     "advert_caps_disagree": "adv.service_data_agrees",
-    "link_mtu_disagrees": "link.reported_mtu_agrees",
     "clock_steps_backwards": "clock.monotonic",
     "stream_truncated": "gps.decodes",
     "seq_survives_reconnect": "reconnect.seq_restarts",
-    "list_beyond_end_errors": "can.list_beyond_end",
     "rate_ceiling_ignored": "control.rate_ceiling",
     "info_rate_above_ceiling": "info.rate_ceiling",
     "inert_control_accepts_writes": "gatt.inert_control_rejects_writes",
@@ -110,12 +106,13 @@ NOT_SEEDED = {
         "advert_no_service_uuid covers the advertisement being wrong; an "
         "absent Service Data block is a SHOULD whose only injection is "
         "'return None', which tests the transport rather than the check",
-    "can.subscribe_handle":
-        "a handle that is not returned is a device that cannot subscribe, "
+    "can.subscribe_ok":
+        "a subscribe that is refused is a device that cannot subscribe, "
         "which fails every CAN check at once rather than this one",
     "can.subscribe_idempotent":
-        "seeding handle churn breaks CAN_UNSUBSCRIBE for the rest of the run, "
-        "so the fault would be caught by an accident of ordering",
+        "seeding a device that consumes a slot per re-install breaks the "
+        "table for the rest of the run, so the fault would be caught by an "
+        "accident of ordering",
     "can.table_full":
         "the table's size is the device model's, and a device that never "
         "answers table_full is one with an unbounded table",
@@ -126,7 +123,7 @@ NOT_SEEDED = {
         "duplicate forwarding needs the pump to send the same frame twice, "
         "which the device model's batching makes unreachable",
     "control.applies_only_if_answerable":
-        "§9.6 is about a request applied with the indication disabled; the "
+        "§9.4 is about a request applied with the indication disabled; the "
         "loopback returns before dispatch, so seeding it means removing the "
         "gate rather than breaking the device",
     "monitor.accepts_complete_write":
@@ -148,14 +145,6 @@ NOT_SEEDED = {
     "link.att_mtu":
         "the loopback names its own MTU, so a run below the minimum is a test "
         "of the transport's constructor",
-    "link.reported_fields_zeroed":
-        "the device model writes absent fields as zero by construction; "
-        "seeding it means writing into a field the encoder gates",
-    "link.reserved_validity":
-        "same -- the validity word is built from the schema",
-    "link.ll_payload":
-        "SHOULD, and the loopback reports no link-layer payload, so the check "
-        "skips before it can judge",
 }
 
 #: Faults that break the conversation rather than one rule, and the reason.
@@ -315,12 +304,6 @@ EXPECTED_SKIPS = {
         "this profile owns every opcode in this version",
     "can.matches_subscription":
         "the harness subscribes with a mask that matches every frame",
-    "link.ll_payload":
-        "the loopback reports no link-layer payload",
-    "link.phy":
-        "the loopback reports no PHY",
-    "link.conn_params":
-        "the loopback reports no connection parameters",
 }
 
 

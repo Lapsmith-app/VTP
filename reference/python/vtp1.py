@@ -68,36 +68,11 @@ def decode_gps_fix(buf):
     # this decoder by design (SPEC.md §5.5) but it is not free to discard them.
     fix["ext_hex"] = buf[_size("gps_fix"):].hex()
 
-    bit_of_valid = {b["name"]: b["bit"]
-                    for b in SCHEMA["bitmasks"]["gps_validity"]["bits"]}
-    # SPEC.md §5.4 — a coordinate outside the earth is a corrupted field, and
-    # every other field in the record came from the same bytes. Rejected rather
-    # than clamped: clamping 91° to 90° puts the vehicle at the pole and lets
-    # the client draw it there. Checked only where the validity bit claims the
-    # field means something.
-    if fix["validity"] & (1 << bit_of_valid["position"]):
-        if abs(fix["lat"]) > 900_000_000:
-            raise Reject("lat-out-of-range")
-        if abs(fix["lon"]) > 1_800_000_000:
-            raise Reject("lon-out-of-range")
-    if fix["validity"] & (1 << bit_of_valid["head_mot"]):
-        if not 0 <= fix["head_mot"] < 36_000_000:
-            raise Reject("head-out-of-range")
-
-    # SPEC.md 5.3 -- a carrier-phase solution has either resolved its
-    # integer ambiguities or it has not, so both RTK bits at once is a claim about
-    # solution quality that means nothing. The natural client reading of the pair is
-    # "fixed wins", which upgrades a device's accuracy claim on the strength of a
-    # bug. And either RTK bit implies `differential`, because an RTK solution IS a
-    # differentially corrected one.
-    flag = {b["name"]: 1 << b["bit"]
-            for b in SCHEMA["bitmasks"]["fix_flags"]["bits"]}
-    rtk = fix["fix_flags"] & (flag["rtk_float"] | flag["rtk_fixed"])
-    if rtk == (flag["rtk_float"] | flag["rtk_fixed"]):
-        raise Reject("rtk-both")
-    if rtk and not fix["fix_flags"] & flag["differential"]:
-        raise Reject("rtk-without-differential")
-
+    # SPEC.md §5 and §5.3 bind the DEVICE: it must not emit an out-of-range
+    # coordinate or contradictory RTK flags, and the reference ENCODER refuses
+    # both (vtp1_encode.py). A receiver decodes the well-formed payload as it
+    # stands — flagging the violation to the user is an application concern,
+    # not a decode outcome.
     known = {m["value"] for m in SCHEMA["enums"]["fix_type"]["members"]}
     fix["fix_type_known"] = fix["fix_type"] in known
 
@@ -200,8 +175,8 @@ def decode_imu_batch(buf):
     if hdr["period"] == 0:
         raise Reject("period-zero")
     # SPEC.md §7 — t_base is the acquisition time of sample 0, so a batch with
-    # no sample 0 timestamps one that does not exist. Unlike §6's CAN batch,
-    # whose count MAY be zero because its t_base describes an observed bus.
+    # no sample 0 timestamps one that does not exist. §6.2's CAN batch says the
+    # same of record 0, for the same reason.
     if hdr["count"] == 0:
         raise Reject("empty-batch")
     # SPEC.md §7.2 — "at least this much" is not "this much".
@@ -236,9 +211,15 @@ CAP_CAPACITY = SCHEMA["profile"]["capacity"]
 def capability_problem(info):
     """The first way `info` breaks SPEC.md §4.1, or None.
 
+    Not a decode outcome: an Info that breaks the matrix is well-formed and
+    decodes, but the device that published it is non-conforming, a client must
+    not use the role or capacity it contradicts, and SPEC.md §4.1 asks the
+    client to surface it. This helper is what a client (or the harness) calls
+    to do that.
+
     Reserved bits take no part: §2 says to ignore them on receive, and a bit
     from a minor version this build has never heard of is exactly what they are
-    for. Only the implications of bits this build knows are enforced.
+    for. Only the implications of bits this build knows are checked.
     """
     caps = info["capabilities"]
     for name, implies in CAP_IMPLIES.items():
@@ -265,39 +246,7 @@ def capability_problem(info):
 def decode_info(buf):
     if len(buf) != _size("info"):
         raise Reject("length")
-    info = _unpack("info", buf)
-    # SPEC.md §4.1 — an Info that breaks the matrix is non-conforming, exactly
-    # as a protocol_major mismatch is. Decoding it and leaving the
-    # contradiction to the caller is how a client ends up subscribing to a CAN
-    # stream on a device with no way to install a subscription.
-    problem = capability_problem(info)
-    if problem:
-        raise Reject(problem)
-    return info
-
-
-def decode_can_list(buf):
-    """SPEC.md §9.5 — one page of the CAN subscription table."""
-    hsz = _size("can_list_page")
-    if len(buf) < hsz:
-        raise Reject("length")
-    page = _unpack("can_list_page", buf)
-
-    esz = _size("can_subscription")
-    if len(buf) < hsz + page["count"] * esz:
-        raise Reject("truncated-record")
-    if len(buf) != hsz + page["count"] * esz:
-        raise Reject("length")
-
-    known = {m["value"] for m in SCHEMA["enums"]["sub_mode"]["members"]}
-    entries = []
-    for i in range(page["count"]):
-        e = _unpack("can_subscription", buf, hsz + i * esz)
-        # SPEC.md §11.4 — a mode from a later minor stays unknown. Reading it
-        # as every_frame would silently misreport what the device is doing.
-        e["mode_known"] = e["mode"] in known
-        entries.append(e)
-    return {"page": page, "entries": entries}
+    return _unpack("info", buf)
 
 
 # SPEC.md §13.4 — the most channels a device may ask for: as many values as fit
@@ -393,9 +342,9 @@ def decode_control_response(buf):
 
     The conditional detail is the whole rule. A refused request is answered
     with exactly three bytes, so a client that reads a fixed-width response
-    takes a well-formed handle 0 -- or a link_params of all zeroes -- from a
-    request that failed. Rejecting the surplus is what stops that reaching an
-    application that has already decided the request succeeded.
+    takes a well-formed detail of zeroes from a request that failed. Rejecting
+    the surplus is what stops that reaching an application that has already
+    decided the request succeeded.
     """
     base = _size("control_response")
     if len(buf) < base:
@@ -417,7 +366,7 @@ def decode_control_response(buf):
 
 
 def decode_time_sync(buf):
-    """SPEC.md §9.7 — the detail of a TIME_SYNC response.
+    """SPEC.md §9.5 — the detail of a TIME_SYNC response.
 
     Two readings of one clock. `t_device_tx` before `t_device_rx` would mean
     the device finished answering before the question arrived, so it is
@@ -431,35 +380,10 @@ def decode_time_sync(buf):
     if ts["t_device_tx"] < ts["t_device_rx"]:
         raise Reject("tx-before-rx")
     # Reported so a client need not recompute it, and so the corpus can check
-    # it: the device's own processing time is the term §9.7 takes out of the
+    # it: the device's own processing time is the term §9.5 takes out of the
     # round trip.
     ts["processing_us"] = ts["t_device_tx"] - ts["t_device_rx"]
     return ts
-
-
-def decode_link_params(buf):
-    """SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response.
-
-    Fixed size with no extension mechanism, so any other length is rejected.
-    """
-    if len(buf) != _size("link_params"):
-        raise Reject("length")
-    lp = _unpack("link_params", buf)
-
-    # Same rule as gps_fix, derived the same way: absence is the bitmask's job.
-    # A cleared phy bit means the controller did not report a PHY, which is not
-    # the same as LE 1M -- and is why the phy enum has no zero member.
-    bit_of = {b["name"]: b["bit"]
-              for b in SCHEMA["bitmasks"]["link_validity"]["bits"]}
-    lp["absent"] = sorted(
-        f["name"] for f in SCHEMA["records"]["link_params"]["fields"]
-        if f.get("valid_bit") is not None
-        and not (lp["validity"] & (1 << bit_of[f["valid_bit"]])))
-
-    known = {m["value"] for m in SCHEMA["enums"]["phy"]["members"]}
-    lp["phy_tx_known"] = lp["phy_tx"] in known
-    lp["phy_rx_known"] = lp["phy_rx"] in known
-    return lp
 
 
 DECODERS = {
@@ -467,8 +391,6 @@ DECODERS = {
     "can_batch": decode_can_batch,
     "imu_batch": decode_imu_batch,
     "info": decode_info,
-    "link_params": decode_link_params,
-    "can_list": decode_can_list,
     "monitor_list": decode_monitor_list,
     "monitor_update": decode_monitor_update,
     "control_response": decode_control_response,
