@@ -312,7 +312,7 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     out[VTP_INFO_OFF_RESERVED_20] = 0;   /* SPEC.md 2 */
     out[VTP_INFO_OFF_CLOCK_FLAGS] =
         (uint8_t)KNOWN_BITS(v->clock_flags, VTP_CLOCK_FLAGS_KNOWN);
-    wr16(out + VTP_INFO_OFF_MAX_NOTIFY_BYTES, v->max_notify_bytes);
+    wr16(out + VTP_INFO_OFF_RESERVED_22, 0);   /* SPEC.md 2 */
     return VTP_INFO_SIZE;
 }
 
@@ -389,32 +389,6 @@ int vtp_encode_monitor_update(const vtp_monitor_header_t *h,
     return (int)needed;
 }
 
-int vtp_encode_can_list(const vtp_can_list_page_t *p,
-                        const vtp_can_subscription_t *entries,
-                        uint8_t *out, size_t cap) {
-    const size_t needed = (size_t)VTP_CAN_LIST_PAGE_SIZE
-                        + (size_t)p->count * VTP_CAN_SUBSCRIPTION_SIZE;
-    if (cap < needed) return -1;
-    if (p->count && !entries) return -1;
-    memset(out, 0, needed);
-
-    wr16(out + VTP_CAN_LIST_PAGE_OFF_TOTAL, p->total);
-    wr16(out + VTP_CAN_LIST_PAGE_OFF_INDEX, p->index);
-    out[VTP_CAN_LIST_PAGE_OFF_COUNT] = p->count;
-    out[VTP_CAN_LIST_PAGE_OFF_RESERVED] = 0;   /* §2 */
-
-    for (uint8_t i = 0; i < p->count; i++) {
-        uint8_t *e = out + VTP_CAN_LIST_PAGE_SIZE
-                   + (size_t)i * VTP_CAN_SUBSCRIPTION_SIZE;
-        wr16(e + VTP_CAN_SUBSCRIPTION_OFF_HANDLE, entries[i].handle);
-        wr32(e + VTP_CAN_SUBSCRIPTION_OFF_ID, entries[i].id);
-        wr32(e + VTP_CAN_SUBSCRIPTION_OFF_MASK, entries[i].mask);
-        e[VTP_CAN_SUBSCRIPTION_OFF_MODE] = entries[i].mode;
-        wr16(e + VTP_CAN_SUBSCRIPTION_OFF_ARG, entries[i].arg);
-    }
-    return (int)needed;
-}
-
 int vtp_encode_gnss_aid_caps(const vtp_gnss_aid_caps_t *c, uint8_t *out, size_t cap) {
     if (cap < VTP_GNSS_AID_CAPS_SIZE) return -1;
     memset(out, 0, VTP_GNSS_AID_CAPS_SIZE);
@@ -423,8 +397,6 @@ int vtp_encode_gnss_aid_caps(const vtp_gnss_aid_caps_t *c, uint8_t *out, size_t 
 
     out[VTP_GNSS_AID_CAPS_OFF_VALIDITY] = (uint8_t)v;
     out[VTP_GNSS_AID_CAPS_OFF_FORMAT]   = c->format;
-    out[VTP_GNSS_AID_CAPS_OFF_FLAGS] =
-        (uint8_t)KNOWN_BITS(c->flags, VTP_AID_FLAGS_KNOWN);
     wr32(out + VTP_GNSS_AID_CAPS_OFF_MAX_BYTES, c->max_bytes);
     wr64(out + VTP_GNSS_AID_CAPS_OFF_HELD_UNTIL,
          (uint64_t)gate64((uint64_t)c->held_until, v, VTP_AID_VALIDITY_HELD_UNTIL));
@@ -439,7 +411,7 @@ int vtp_encode_aid_begin_result(const vtp_aid_begin_result_t *b, uint8_t *out, s
     if (b->chunk_bytes == 0) return -1;
     memset(out, 0, VTP_AID_BEGIN_RESULT_SIZE);
 
-    out[VTP_AID_BEGIN_RESULT_OFF_SESSION] = b->session;
+    out[VTP_AID_BEGIN_RESULT_OFF_TOKEN] = b->token;
     wr16(out + VTP_AID_BEGIN_RESULT_OFF_CHUNK_BYTES, b->chunk_bytes);
     return VTP_AID_BEGIN_RESULT_SIZE;
 }
@@ -469,34 +441,10 @@ int vtp_encode_aid_commit_result(const vtp_aid_commit_result_t *c, uint8_t *out,
     return VTP_AID_COMMIT_RESULT_SIZE;
 }
 
-int vtp_encode_link_params(const vtp_link_params_t *l, uint8_t *out, size_t cap) {
-    if (cap < VTP_LINK_PARAMS_SIZE) return -1;
-    memset(out, 0, VTP_LINK_PARAMS_SIZE);
-
-    const uint32_t v = KNOWN_BITS(l->validity, VTP_LINK_VALIDITY_KNOWN);
-
-    wr16(out + VTP_LINK_PARAMS_OFF_VALIDITY, (uint16_t)v);
-    wr16(out + VTP_LINK_PARAMS_OFF_ATT_MTU,
-         (uint16_t)gate32(l->att_mtu, v, VTP_LINK_VALIDITY_ATT_MTU));
-    wr16(out + VTP_LINK_PARAMS_OFF_LL_MAX_TX_OCTETS,
-         (uint16_t)gate32(l->ll_max_tx_octets, v, VTP_LINK_VALIDITY_LL_DATA_LENGTH));
-    wr16(out + VTP_LINK_PARAMS_OFF_LL_MAX_RX_OCTETS,
-         (uint16_t)gate32(l->ll_max_rx_octets, v, VTP_LINK_VALIDITY_LL_DATA_LENGTH));
-    wr16(out + VTP_LINK_PARAMS_OFF_CONN_INTERVAL,
-         (uint16_t)gate32(l->conn_interval, v, VTP_LINK_VALIDITY_CONN_PARAMS));
-    wr16(out + VTP_LINK_PARAMS_OFF_PERIPHERAL_LATENCY,
-         (uint16_t)gate32(l->peripheral_latency, v, VTP_LINK_VALIDITY_CONN_PARAMS));
-    wr16(out + VTP_LINK_PARAMS_OFF_SUPERVISION_TIMEOUT,
-         (uint16_t)gate32(l->supervision_timeout, v, VTP_LINK_VALIDITY_CONN_PARAMS));
-    out[VTP_LINK_PARAMS_OFF_PHY_TX] =
-         (uint8_t)gate32(l->phy_tx, v, VTP_LINK_VALIDITY_PHY);
-    out[VTP_LINK_PARAMS_OFF_PHY_RX] =
-         (uint8_t)gate32(l->phy_rx, v, VTP_LINK_VALIDITY_PHY);
-    return VTP_LINK_PARAMS_SIZE;
-}
-
 int vtp_encode_power_state(const vtp_power_state_t *p, uint8_t *out, size_t cap) {
-    /* An encoder must not emit what its own decoder rejects. SPEC.md §9.9. */
+    /* The device side of SPEC.md 9.7's range rule: a percent above 100 is
+     * refused here, and deliberately NOT rejected by the decoder -- the
+     * record is well formed, so a receiver decodes it and flags the value. */
     if ((p->validity & VTP_POWER_VALIDITY_PERCENT) && p->percent > 100) return -1;
     if (cap < VTP_POWER_STATE_SIZE) return -1;
     memset(out, 0, VTP_POWER_STATE_SIZE);
@@ -529,7 +477,7 @@ int vtp_encode_control_response(const vtp_control_response_t *r,
 }
 
 int vtp_encode_time_sync(const vtp_time_sync_t *t, uint8_t *out, size_t cap) {
-    /* An encoder must not emit what its own decoder rejects. SPEC.md §9.7. */
+    /* An encoder must not emit what its own decoder rejects. SPEC.md §9.5. */
     if (t->t_device_tx < t->t_device_rx) return -1;
     if (cap < VTP_TIME_SYNC_SIZE) return -1;
     wr64(out + VTP_TIME_SYNC_OFF_T_DEVICE_RX, t->t_device_rx);

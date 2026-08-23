@@ -35,9 +35,9 @@ It cannot ask a device a question. So nothing in this repository tested:
 | §4.1 | that the attribute table is the fixed one, and that an absent capability leaves an *inert* characteristic rather than no characteristic |
 | §8.2 | that `seq` starts at 0 on the first notification of a connection |
 | §8.1 | that the three streams are on one clock rather than three |
-| §9.2 | that the subscription table is empty after a reconnect |
-| §9.3 | that a frame matching two subscriptions is forwarded once |
-| §9.8 | that a rate answered `ok` is the rate Info then reports |
+| §9.1 | that the subscription table is empty after a reconnect |
+| §9.2 | that a frame matching two subscriptions is forwarded once |
+| §9.6 | that a rate answered `ok` is the rate Info then reports |
 | §13 | Monitor, which is a thing a device *receives* |
 | §5.1 | that a field whose validity bit is clear is actually zero |
 
@@ -130,19 +130,18 @@ device appears there rather than disappearing into a count.
 Four things are permanently in it:
 
 - **§2.1–§2.3** — link-layer payload, PHY and connection interval. No desktop
-  operating system exposes these to an application. The harness checks the
-  device's own `GET_LINK_PARAMS` report for internal consistency and against the
-  one figure the host does know, the ATT MTU. A device that misreports cannot be
-  caught by any means this specification provides. §12.1 says the same thing.
+  operating system exposes these to an application, so the harness checks the
+  one figure the host does know, the ATT MTU, and nothing else. §12.1 says the
+  same thing.
 - **§8.1's clock discipline and §6.1's timing bounds.** The host's scheduler and
   Bluetooth stack sit between the device and every arrival time measured here,
   and they are worth tens of milliseconds against a clock specified in
   microseconds. Ordering and internal consistency are checked; accuracy is not.
-- **§9.9's numbers themselves.** The harness checks that a device declaring
+- **§9.7's numbers themselves.** The harness checks that a device declaring
   `power` answers `GET_POWER`, that it reports something valid, and that what it
-  reports obeys §9.9's rules. Whether 7.42 V is what the pack is actually
-  sitting at is not observable from this side of the link, in exactly the way
-  §9.1's link parameters are not.
+  reports obeys §9.7's rules. Whether the pack is actually two-thirds full is
+  not observable from this side of the link, any more than §2's link
+  parameters are.
 - **§13.5's freshness expiry.** Every declared channel carries a `max_age` and
   the harness checks it is non-zero, but what happens when one lapses happens on
   the device's own display and puts nothing on the wire. Stop writing and watch
@@ -165,9 +164,9 @@ uv run vtp1-harness --can-id 0x1A0 --can-id 0x2C4
 ### Adversarial requests
 
 By default the harness sends malformed control requests — truncated parameters,
-unallocated opcodes, a tag that is already outstanding, a handle that names
-nothing, a Monitor write missing a slot. This is the direct test of §1.1: does
-your device reject malformed *whole*, or decode a prefix and carry on?
+unallocated opcodes, a tag that is already outstanding, an id and mask that
+name nothing, a Monitor write missing a slot. This is the direct test of §1.1:
+does your device reject malformed *whole*, or decode a prefix and carry on?
 
 If your firmware is not ready to survive that, `--no-adversarial` turns it off,
 and the report says which checks it cost you.
@@ -272,8 +271,8 @@ async def can_something(s):
 `requires` names capability bits from §4, so a device that never claimed a role
 is never failed for it. `Fail(..., severity="MUST")` overrides the check's own
 severity for one finding, which a SHOULD check needs when its failure mode is
-worse than the rule it is mainly about — not implementing `GET_LINK_PARAMS` is a
-SHOULD, not answering it breaks a MUST. `raise Skip(...)` when something cannot
+worse than the rule it is mainly about — surfacing an out-of-range reading is a
+SHOULD, acting on one breaks a MUST. `raise Skip(...)` when something cannot
 be asked here and say why — the reason is printed under Not verified rather than swallowed.
 `raise Observe(...)` for a measurement that is nobody's pass or fail, so the
 report cannot accumulate green ticks for things nothing was asserted about.

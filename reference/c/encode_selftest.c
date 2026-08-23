@@ -94,16 +94,6 @@ static void missing_arrays(void) {
     }
     {
         SETUP;
-        vtp_can_list_page_t p;
-        memset(&p, 0, sizeof p);
-        p.total = 2;
-        p.count = 2;
-        ok(vtp_encode_can_list(&p, NULL, out, sizeof out) == -1,
-           "can_list(count=2, entries=NULL) refuses");
-        ok(untouched(out, sizeof out), "can_list(entries=NULL) wrote nothing");
-    }
-    {
-        SETUP;
         vtp_gps_fix_t f;
         memset(&f, 0, sizeof f);
         ok(vtp_encode_gps_fix(&f, NULL, 4, out, sizeof out) == -1,
@@ -211,7 +201,7 @@ static void atomicity(void) {
         vtp_power_state_t p;
         memset(&p, 0, sizeof p);
         p.validity = VTP_POWER_VALIDITY_PERCENT;
-        p.percent  = 200;           /* SPEC.md 9.9 -- the field is 0..100 */
+        p.percent  = 200;           /* SPEC.md 9.7 -- the field is 0..100 */
         ok(vtp_encode_power_state(&p, out, sizeof out) == -1,
            "power_state refuses a percent above 100");
         ok(untouched(out, sizeof out),
@@ -238,15 +228,6 @@ static void short_buffers(void) {
         ok(vtp_encode_gps_fix(&f, NULL, 0, out, VTP_GPS_FIX_SIZE - 1) == -1,
            "gps_fix refuses a buffer one byte short");
         ok(untouched(out, sizeof out), "gps_fix wrote nothing into a short buffer");
-    }
-    {
-        SETUP;
-        vtp_link_params_t l;
-        memset(&l, 0, sizeof l);
-        ok(vtp_encode_link_params(&l, out, VTP_LINK_PARAMS_SIZE - 1) == -1,
-           "link_params refuses a buffer one byte short");
-        ok(untouched(out, sizeof out),
-           "link_params wrote nothing into a short buffer");
     }
     {
         SETUP;

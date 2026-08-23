@@ -403,7 +403,7 @@ static void do_info(const jctx *c, const jv *in) {
     v.imu_max_rate_hz        = (uint16_t)jint(c, in, "imu_max_rate_hz");
     v.reserved_20            = (uint8_t) jint(c, in, "reserved_20");
     v.clock_flags            = (uint8_t) jint(c, in, "clock_flags");
-    v.max_notify_bytes       = (uint16_t)jint(c, in, "max_notify_bytes");
+    v.reserved_22            = (uint16_t)jint(c, in, "reserved_22");
     encoded(vtp_encode_info(&v, out, sizeof out), out);
 }
 
@@ -458,35 +458,6 @@ static void do_monitor_update(const jctx *c, const jv *in) {
     encoded(vtp_encode_monitor_update(&hdr, n ? values : NULL, out, sizeof out), out);
 }
 
-static void do_can_list(const jctx *c, const jv *in) {
-    const jv *p = jget(c, in, "page");
-    const jv *es = jget(c, in, "entries");
-    if (!p) { refuse("no `page` object"); return; }
-    int n = jlen(c, es);
-    if (n < 0) { refuse("no `entries` array"); return; }
-    if (n > MAX_ENTRIES) { refuse("too many entries for this harness"); return; }
-
-    vtp_can_list_page_t page;
-    memset(&page, 0, sizeof page);
-    page.total    = (uint16_t)jint(c, p, "total");
-    page.index    = (uint16_t)jint(c, p, "index");
-    page.count    = (uint8_t) jint(c, p, "count");
-    page.reserved = (uint8_t) jint(c, p, "reserved");
-    if ((int)page.count != n) { refuse("can_list_page.count disagrees with `entries`"); return; }
-
-    static vtp_can_subscription_t entries[MAX_ENTRIES];
-    memset(entries, 0, sizeof entries);
-    for (int i = 0; i < n; i++) {
-        const jv *e = jat(c, es, i);
-        entries[i].handle = (uint16_t)jint(c, e, "handle");
-        entries[i].id     = (uint32_t)jint(c, e, "id");
-        entries[i].mask   = (uint32_t)jint(c, e, "mask");
-        entries[i].mode   = (uint8_t) jint(c, e, "mode");
-        entries[i].arg    = (uint16_t)jint(c, e, "arg");
-    }
-    encoded(vtp_encode_can_list(&page, n ? entries : NULL, out, sizeof out), out);
-}
-
 static void do_control_response(const jctx *c, const jv *in) {
     uint8_t detail[MAX_BYTES];
     size_t detail_len = 0;
@@ -511,21 +482,6 @@ static void do_time_sync(const jctx *c, const jv *in) {
     encoded(vtp_encode_time_sync(&t, out, sizeof out), out);
 }
 
-static void do_link_params(const jctx *c, const jv *in) {
-    vtp_link_params_t l;
-    memset(&l, 0, sizeof l);
-    l.validity            = (uint16_t)jint(c, in, "validity");
-    l.att_mtu             = (uint16_t)jint(c, in, "att_mtu");
-    l.ll_max_tx_octets    = (uint16_t)jint(c, in, "ll_max_tx_octets");
-    l.ll_max_rx_octets    = (uint16_t)jint(c, in, "ll_max_rx_octets");
-    l.conn_interval       = (uint16_t)jint(c, in, "conn_interval");
-    l.peripheral_latency  = (uint16_t)jint(c, in, "peripheral_latency");
-    l.supervision_timeout = (uint16_t)jint(c, in, "supervision_timeout");
-    l.phy_tx              = (uint8_t) jint(c, in, "phy_tx");
-    l.phy_rx              = (uint8_t) jint(c, in, "phy_rx");
-    encoded(vtp_encode_link_params(&l, out, sizeof out), out);
-}
-
 static void do_power_state(const jctx *c, const jv *in) {
     vtp_power_state_t p;
     memset(&p, 0, sizeof p);
@@ -540,7 +496,6 @@ static void do_gnss_aid_caps(const jctx *c, const jv *in) {
     memset(&a, 0, sizeof a);
     a.validity   = (uint8_t) jint(c, in, "validity");
     a.format     = (uint8_t) jint(c, in, "format");
-    a.flags      = (uint8_t) jint(c, in, "flags");
     a.max_bytes  = (uint32_t)jint(c, in, "max_bytes");
     a.held_until = (int64_t) jint(c, in, "held_until");
     encoded(vtp_encode_gnss_aid_caps(&a, out, sizeof out), out);
@@ -549,7 +504,7 @@ static void do_gnss_aid_caps(const jctx *c, const jv *in) {
 static void do_aid_begin_result(const jctx *c, const jv *in) {
     vtp_aid_begin_result_t b;
     memset(&b, 0, sizeof b);
-    b.session     = (uint8_t) jint(c, in, "session");
+    b.token       = (uint8_t) jint(c, in, "token");
     b.chunk_bytes = (uint16_t)jint(c, in, "chunk_bytes");
     encoded(vtp_encode_aid_begin_result(&b, out, sizeof out), out);
 }
@@ -594,10 +549,8 @@ int main(void) {
         else if (!strcmp(record, "info"))             do_info(&ctx, in);
         else if (!strcmp(record, "monitor_list"))     do_monitor_list(&ctx, in);
         else if (!strcmp(record, "monitor_update"))   do_monitor_update(&ctx, in);
-        else if (!strcmp(record, "can_list"))         do_can_list(&ctx, in);
         else if (!strcmp(record, "control_response")) do_control_response(&ctx, in);
         else if (!strcmp(record, "time_sync"))        do_time_sync(&ctx, in);
-        else if (!strcmp(record, "link_params"))      do_link_params(&ctx, in);
         else if (!strcmp(record, "power_state"))      do_power_state(&ctx, in);
         else if (!strcmp(record, "gnss_aid_caps"))    do_gnss_aid_caps(&ctx, in);
         else if (!strcmp(record, "aid_begin_result")) do_aid_begin_result(&ctx, in);

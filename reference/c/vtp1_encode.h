@@ -41,16 +41,17 @@ int vtp_encode_imu_batch(const vtp_imu_header_t *hdr,
 int vtp_encode_info(const vtp_info_t *info, uint8_t *out, size_t cap);
 
 /* Fields whose validity bit is clear are written as zero, as everywhere else:
- * a device that cannot determine its PHY cannot accidentally ship a stale one. */
-int vtp_encode_link_params(const vtp_link_params_t *lp, uint8_t *out, size_t cap);
+ * a held_until behind a cleared bit cannot ship a stale window. */
 int vtp_encode_gnss_aid_caps(const vtp_gnss_aid_caps_t *c, uint8_t *out, size_t cap);
 int vtp_encode_aid_begin_result(const vtp_aid_begin_result_t *b, uint8_t *out, size_t cap);
 int vtp_encode_aid_commit_result(const vtp_aid_commit_result_t *c, uint8_t *out, size_t cap);
 int vtp_encode_time_sync(const vtp_time_sync_t *t, uint8_t *out, size_t cap);
 
 /* Fields whose validity bit is clear are written as zero, as everywhere else.
- * A percent above 100 with its bit set is refused rather than clamped: this
- * encoder must not emit what its own decoder rejects (SPEC.md §9.9). */
+ * A percent above 100 with its bit set is refused rather than clamped: the
+ * device MUST NOT emit one (SPEC.md §9.7), and the encoder is the device
+ * side of that rule. The decoder deliberately accepts it and leaves the
+ * flagging to the caller. */
 int vtp_encode_power_state(const vtp_power_state_t *p, uint8_t *out, size_t cap);
 int vtp_encode_control_response(const vtp_control_response_t *r,
                                 uint8_t *out, size_t cap);
@@ -65,11 +66,6 @@ int vtp_encode_monitor_list(const vtp_monitor_declaration_t *page,
 int vtp_encode_monitor_update(const vtp_monitor_header_t *hdr,
                               const vtp_monitor_value_t *values,
                               uint8_t *out, size_t cap);
-
-/* `page->count` entries are read from `entries`. */
-int vtp_encode_can_list(const vtp_can_list_page_t *page,
-                        const vtp_can_subscription_t *entries,
-                        uint8_t *out, size_t cap);
 
 #ifdef __cplusplus
 }

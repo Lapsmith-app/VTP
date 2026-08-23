@@ -87,7 +87,7 @@ mistakes are not equal:
   does, and it can see the restart in the next notification.
 - *Not* resetting on a real reconnection hands the new connection the old one's
   sequence numbers and subscription table. SPEC.md §8.2 exists so a client
-  never has to tell a reconnection from a wrap and §9.2 so it never inherits
+  never has to tell a reconnection from a wrap and §9.1 so it never inherits
   state it did not install; a client cannot detect either failure.
 
 The second is silent and unrecoverable, so the ambiguous case errs towards
@@ -163,9 +163,9 @@ What it checks, and why each one needs hardware:
 | Discovery by service UUID | The advertisement has to fit in 31 bytes and actually be broadcast (§3.3) |
 | Info decodes and satisfies §4.1 | Nothing else reads Info off a real characteristic |
 | Negotiated ATT MTU ≥ 100 | §2's floor is a property of the two stacks, not of this code |
-| No notification exceeds `max_notify_bytes` | §4.2 — the ceiling bounds the device on a link it did not choose |
+| No notification exceeds the negotiated ATT payload | §2 — the link bounds the notification, and only a real link has one |
 | An indication arrives on Control | §9's response path is a CCCD write and an ATT indication |
-| `TIME_SYNC` returns `t_device_tx ≥ t_device_rx` | §9.7, measured across a real round trip |
+| `TIME_SYNC` returns `t_device_tx ≥ t_device_rx` | §9.5, measured across a real round trip |
 | Every stream decodes with the reference decoder | The bytes have crossed a radio |
 | Device timestamps advance, and the streams overlap | §8.1's one clock, observed in real time |
 | `seq` restarts at 0 on the second connection | §8.2 — needs a link that genuinely dropped |
@@ -269,8 +269,8 @@ transceiver. Full layouts are under
 [The synthetic CAN bus](#the-synthetic-can-bus) below.
 
 A client must send `CAN_SUBSCRIBE` for each id before any CAN arrives — the
-table is empty on every connection (SPEC.md §9.2), and it must **enable
-indications on Control before its first write** (SPEC.md §9.6). A write that
+table is empty on every connection (SPEC.md §9.1), and it must **enable
+indications on Control before its first write** (SPEC.md §9.4). A write that
 arrives before then is discarded *unapplied* and logged as such: the response
 would have nowhere to go, and a device that applied it anyway would leave the
 two ends disagreeing about the table.
@@ -483,7 +483,7 @@ Three identifiers, little-endian throughout, and **nothing else exists** — a
 subscription to any other id is accepted and yields no frames, because no such
 frame is on this bus.
 
-The device streams **no CAN at all until a client subscribes** (SPEC.md §9.2:
+The device streams **no CAN at all until a client subscribes** (SPEC.md §9.1:
 the table is empty on every connection). Configuring a channel in a client
 should install a `CAN_SUBSCRIBE` for its id; if nothing arrives, check that
 first.
@@ -548,10 +548,10 @@ imu              0     0.0        0      668             0
 configured: gps 10 Hz   imu 100 Hz
 
 CAN SUBSCRIPTIONS
-handle  id              mode           arg
-1       0x0C0           periodic        40
-2       0x1A0           periodic        40
-3       0x2E0           periodic        40
+id              mode           arg
+0x0C0           periodic        40
+0x1A0           periodic        40
+0x2E0           periodic        40
 
 CONTROL
 19:14:19  CAN_SUBSCRIBE tag=10 id=0x2E0      ok
@@ -612,27 +612,24 @@ it is a live demonstration of why §3.3's Service Data does not fit here.
 
 ## The Control plane
 
-Building this device is what produced SPEC.md §9.2-§9.5. Three opcodes were
+Building this device is what produced SPEC.md §9.1-§9.4. Opcodes had been
 named with no response payload defined, and the device could not implement
 them without inventing wire format — which a reference implementation must
 never do, because it creates a de facto standard by accident that no decoder
 here can check.
 
-All three are now specified, and this device implements them:
+The rules that survived into the slimmed control plane, all implemented here:
 
-- **`CAN_LIST`** returns a paged `can_list_page` record. Paging is not
-  decoration: at the minimum ATT MTU a response carries 97 bytes, of which 3
-  are opcode/tag/status and 6 the page header, leaving **six entries** against
-  a `can_subscription_slots` that may be far larger.
-- **Subscription handles.** An identifier stopped being a unique name for a
-  subscription the moment masks existed, so `CAN_UNSUBSCRIBE` takes a handle
-  and installs return one. Re-installing the same `(id, mask)` updates in
-  place and keeps its handle, so a client reprogramming on every connect
-  cannot exhaust the table.
-- **Overlap has a rule** (§9.3): most specific mask, then lowest handle, and a
-  frame is forwarded at most once. Both terms are visible through `CAN_LIST`,
-  so a client can determine which subscription governs rather than discover it.
-- **CAN subscriptions are never refused on rate grounds** (§9.4). The device
+- **A subscription is named by its `(id, mask)` pair** (§9.1). An identifier
+  stopped being a unique name the moment masks existed, so `CAN_UNSUBSCRIBE`
+  takes the pair, and re-installing the same pair updates in place — a client
+  reprogramming on every connect cannot exhaust the table. (Pre-1.0 drafts
+  solved this with device-assigned handles and a paged `CAN_LIST` read-back;
+  both were removed, and RATIONALE §8.7 records why.)
+- **Overlap has a rule** (§9.2): most specific mask, then earliest installed,
+  and a frame is forwarded at most once. Both terms are known to the client,
+  because it installed the table on this connection.
+- **CAN subscriptions are never refused on rate grounds** (§9.3). The device
   cannot predict the load one adds — not from bus traffic, not across modes
   that select identically, and not for a mask that schedules per identifier —
   so it admits and sheds, reporting loss in `dropped`. `rate_exceeded` survives

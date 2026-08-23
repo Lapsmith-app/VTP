@@ -51,12 +51,11 @@ PACK = {"u8": "B", "i8": "b", "u16": "H", "i16": "h",
 # fact never looked at one.
 COMPOSITE = {"can_batch": ("can_header", "can_record"),
              "imu_batch": ("imu_header", "imu_sample"),
-             "can_list": ("can_list_page", "can_subscription"),
              "monitor_list": ("monitor_declaration", "monitor_channel"),
              "monitor_update": ("monitor_header", "monitor_value")}
-STANDALONE = ("gps_fix", "info", "link_params", "control_response",
-              "time_sync", "power_state", "gnss_aid_caps",
-              "aid_begin_result", "aid_commit_result")
+STANDALONE = ("gps_fix", "info", "control_response", "time_sync",
+              "power_state", "gnss_aid_caps", "aid_begin_result",
+              "aid_commit_result")
 
 
 def cases():
@@ -64,6 +63,37 @@ def cases():
         for c in json.loads(path.read_text())["cases"]:
             c["_file"] = path.name
             yield c
+
+
+def check_content_rule_pairs(problems):
+    """Both halves of every content rule, re-checked from the artefacts.
+
+    tools/generate.py enforces this when the corpus is built; this re-checks
+    the committed JSON, so a hand edit that drops one half of a pair -- the
+    exact shape of drift that left four encoder refusals untested -- is caught
+    by the corpus gate and not only by regeneration.
+    """
+    no_roundtrip = {c["name"] for c in cases() if c.get("no_roundtrip")}
+    producers = json.loads(
+        (VECTORS.parent / "encoders.json").read_text())["cases"]
+    paired = set()
+    for c in producers:
+        if not c.get("must_refuse"):
+            continue
+        if ("vector" in c) == bool(c.get("structural")):
+            problems.append(
+                f"producer case {c['name']}: a refusal must name its "
+                f"no_roundtrip vector or be marked structural, exactly one")
+        elif "vector" in c:
+            if c["vector"] not in no_roundtrip:
+                problems.append(
+                    f"producer case {c['name']}: names vector {c['vector']!r},"
+                    f" which is not a no_roundtrip vector in the corpus")
+            paired.add(c["vector"])
+    for name in sorted(no_roundtrip - paired):
+        problems.append(
+            f"no_roundtrip vector {name}: no producer case refuses to encode "
+            f"it, so the device-side half of the rule is untested")
 
 
 def field(record, name):
@@ -297,6 +327,7 @@ def main():
     check_rejects(problems)
     check_distinct_fields(problems, decoded)
     check_unknown_enums(problems, decoded)
+    check_content_rule_pairs(problems)
 
     if problems:
         for p in problems:

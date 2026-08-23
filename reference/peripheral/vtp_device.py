@@ -33,7 +33,8 @@ import vtp1_encode as enc  # noqa: E402
 CAP_GPS, CAP_CAN, CAP_IMU = 1 << 0, 1 << 1, 1 << 2
 CAP_MONITOR = 1 << 3
 CAP_CONTROL, CAP_CAN_FD = 1 << 4, 1 << 5
-CAP_MASKED_SUBS, CAP_ONCHANGE_SUBS = 1 << 6, 1 << 7
+CAP_MASKED_SUBS = 1 << 6
+# Bit 7 was on_change_subscriptions in a pre-1.0 draft and stays unassigned.
 CAP_POWER = 1 << 8
 CAP_GNSS_AIDING = 1 << 9
 
@@ -49,16 +50,16 @@ FIX_FLAG_SOLUTION_EPOCH = 1 << 4
 
 # Control opcodes (SPEC.md §9).
 CAN_RESET, CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK = 0x01, 0x02, 0x03
-CAN_UNSUBSCRIBE, CAN_LIST = 0x04, 0x05
+CAN_UNSUBSCRIBE = 0x04
 GPS_SET_RATE, IMU_SET_RATE, TIME_SYNC = 0x10, 0x20, 0x30
-GET_LINK_PARAMS, MONITOR_LIST = 0x31, 0x40
+MONITOR_LIST = 0x40
 GET_POWER = 0x50
 
-# SPEC.md 9.9 -- power_source members and power_validity bits.
+# SPEC.md 9.7 -- power_source members and power_validity bits.
 SRC_EXTERNAL, SRC_DISCHARGING, SRC_CHARGING, SRC_CHARGED = 1, 2, 3, 4
 PWR_SOURCE, PWR_PERCENT = 1 << 0, 1 << 1
 GNSS_AID_INFO, GNSS_AID_BEGIN = 0x11, 0x12
-GNSS_AID_COMMIT, GNSS_AID_ABORT = 0x13, 0x14
+GNSS_AID_COMMIT = 0x13           # 0x14 was GNSS_AID_ABORT; unassigned
 
 # SPEC.md §14.1 — the one aiding format this device accepts. It forwards the
 # bytes to its receiver without interpreting them, so this names what the
@@ -68,7 +69,6 @@ AID_FORMAT_UBX_MGA = 1
 AID_RESULT_APPLIED, AID_RESULT_INCOMPLETE = 1, 2
 AID_RESULT_BAD_CRC, AID_RESULT_REJECTED = 3, 4
 
-AID_PERSISTS = 0x01              # aid_flags bit 0
 AID_V_HELD_UNTIL = 0x01          # aid_validity bit 0
 COMMIT_V_FIRST_MISSING = 0x01    # commit_validity bit 0
 
@@ -80,7 +80,7 @@ AID_MAX_BYTES = 131_072
 # header come off the negotiated MTU before any payload fits.
 AID_CHUNK_OVERHEAD = 6
 
-# SPEC.md §14.3 — `chunks` and `first_missing` are u16, so this is the most a
+# SPEC.md §14.3 — `index` and `first_missing` are u16, so this is the most a
 # transfer may need. Derived from the field rather than written as a number
 # somebody has to keep in step with it.
 AID_MAX_CHUNKS = 0xFFFF
@@ -139,16 +139,16 @@ OPCODE_CAPABILITY = {
 
 ST_OK, ST_UNSUPPORTED, ST_BAD_PARAMS = 0, 1, 2
 ST_TABLE_FULL, ST_RATE_EXCEEDED = 3, 4
-ST_UNKNOWN_HANDLE = 7
+ST_UNKNOWN_SUBSCRIPTION = 7
 
-# SPEC.md §9.2 — matching runs over bits 0-29: the arbitration identifier and
+# SPEC.md §9.1 — matching runs over bits 0-29: the arbitration identifier and
 # the standard/extended format bit. Bits 30 and 31 say how a frame was
 # transmitted, not which frame it is, and take no part. CAN_SUBSCRIBE is
 # CAN_SUBSCRIBE_MASK with every one of those bits set.
 CAN_MATCH_BITS = 0x3FFFFFFF
 MASK_EXACT = 0x3FFFFFFF
 
-SUB_EVERY_FRAME, SUB_PERIODIC, SUB_ON_CHANGE, SUB_EVERY_NTH = 0, 1, 2, 3
+SUB_EVERY_FRAME, SUB_PERIODIC = 0, 1
 
 CAN_SUBSCRIPTION_SLOTS = 32
 CAN_MAX_FRAMES_PER_S = 4000
@@ -247,13 +247,12 @@ class VtpDevice:
     """
 
     # SPEC.md 4.1 -- what this build declares. Configurable rather than a
-    # constant because three of the bits change how the control plane ANSWERS,
-    # and a device that hard-codes them can only ever demonstrate one half of
-    # each rule. selftest.py builds a device without them to check the other.
+    # constant because the bits change how the control plane ANSWERS, and a
+    # device that hard-codes them can only ever demonstrate one half of each
+    # rule. selftest.py builds a device without them to check the other.
     DEFAULT_CAPABILITIES = (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
                             | CAP_MONITOR | CAP_MASKED_SUBS
-                            | CAP_ONCHANGE_SUBS | CAP_POWER
-                            | CAP_GNSS_AIDING)
+                            | CAP_POWER | CAP_GNSS_AIDING)
 
     #: SPEC.md §14 — what this device declares in gnss_aid_caps. Named on the
     #: class so the conformance harness can seed a fault against the device's
@@ -270,14 +269,12 @@ class VtpDevice:
         self.capabilities = (self.DEFAULT_CAPABILITIES if capabilities is None
                              else capabilities)
         self.mtu = mtu
-        # SPEC.md 4 -- the ceiling Info publishes. Fixed for the life of the
-        # device: the ATT payload at the largest MTU this build will ever
-        # accept. `self.mtu` moves with the link; this does not.
+        # The largest MTU this build will ever accept. `self.mtu` moves with
+        # the link; this does not, and batches are never sized above it.
         self._device_mtu_ceiling = mtu
         # False until a backend tells us what the link actually negotiated.
         # `--mtu` is what this build was CONFIGURED for, not what it got.
         self._mtu_observed = False
-        self._max_notify_bytes = mtu - 3
         self.gps_hz = gps_hz
         self.imu_hz = imu_hz
         self.circuit = circuit or Circuit()
@@ -300,12 +297,14 @@ class VtpDevice:
         # batch it invalidates -- wait here for the next poll to drain them.
         self._deferred = []
 
-        # handle -> {id, mask, mode, arg, last, seen}. Empty until a client
-        # subscribes: SPEC.md §9.2 makes the cleared table the state after a
-        # reconnect, and a device that streamed before being asked would be
-        # inventing consent.
+        # (id, mask) -> {mode, arg, order, per_id}. SPEC.md §9.1 -- the pair IS
+        # the subscription's identity, so the table needs no handles. `order`
+        # is the installation order, which §9.2 uses to break specificity ties.
+        # Empty until a client subscribes: §9.1 makes the cleared table the
+        # state after a reconnect, and a device that streamed before being
+        # asked would be inventing consent.
         self._subscriptions = {}
-        self._next_handle = 1
+        self._install_counter = 0
 
         # SPEC.md §13 — this device has a display, so it asks the client for
         # what it cannot compute. The declaration is fixed for the connection.
@@ -330,11 +329,10 @@ class VtpDevice:
         self._monitor_values = {}
         self._monitor_seq = None
         self._monitor_updates = 0
-        self._link = None
         # SPEC.md §14.3 — at most one transfer open, so this is one slot and
         # not a table. None when nothing is in flight.
         self._aid = None
-        self._aid_last_session = None
+        self._aid_last_token = None
         # What this device is holding, as GNSS_AID_INFO reports it. None means
         # it holds nothing, which is the cleared validity bit rather than a
         # zero -- "valid until the Unix epoch" is a different claim.
@@ -345,7 +343,7 @@ class VtpDevice:
         # the normal pattern, not an unusual one.
         self._aid_applied = 0
 
-        # SPEC.md 9.9 -- a device on its own pack with a gauge that works, so
+        # SPEC.md 9.7 -- a device on its own pack with a gauge that works, so
         # this build exercises both validity bits. `set_power` moves it;
         # nothing else here does, because a supply reading is not on the
         # protocol's clock and does not belong in poll().
@@ -374,14 +372,14 @@ class VtpDevice:
         self._monitor_values.clear()
         self._monitor_seq = None
         self._monitor_updates = 0
-        # A transfer belongs to the connection that opened it: the client that
-        # would have committed it is gone, and its chunks name a session number
-        # a new client has no way to learn. SPEC.md §14.3's one-open-transfer
-        # rule would otherwise be held by a client that cannot close it.
+        # A transfer belongs to the connection that opened it (SPEC.md 14.3):
+        # the client that would have committed it is gone, and a new client
+        # has no way to learn its shape. Without this rule the one-open-
+        # transfer slot would be held by a client that cannot close it.
         #
-        # `_aid_held_until` deliberately survives, and `persists` is what says
-        # whether that is honest: aiding already handed to the receiver is in
-        # the receiver, not in this connection.
+        # `_aid_held_until` deliberately survives: aiding already handed to
+        # the receiver is in the receiver, not in this connection, and the
+        # next client learns what is held by reading GNSS_AID_INFO.
         self._aid = None
 
     def record_refused(self, stream, payload):
@@ -432,12 +430,9 @@ class VtpDevice:
         self._monitor_values.clear()
         self._monitor_seq = None
         self._aid = None
-        # Everything below was NEGOTIATED, so it describes a link that has
-        # gone. It used to persist until a new central happened to replace it,
-        # so the next connection read this one's MTU and PHY out of Info and
-        # GET_LINK_PARAMS -- reported with the validity bits set, which assert
-        # they are measurements of the link being asked about.
-        self._link = None
+        # The MTU was NEGOTIATED, so it describes a link that has gone. It used
+        # to persist until a new central happened to replace it, so batches for
+        # the next connection were sized to this one's link.
         self.mtu = self._device_mtu_ceiling
 
     def simulate_loss(self, stream, count):
@@ -450,27 +445,6 @@ class VtpDevice:
         if stream not in self._dropped:
             raise ValueError(f"unknown stream {stream!r}")
         self._dropped[stream] += count
-
-    def _allocate_handle(self):
-        """SPEC.md §9.2 — a handle MUST NOT be reused while the subscription
-        it names still exists.
-
-        The counter wraps at 65535, and wrapping onto a live handle used to
-        overwrite it: the entry the client knew as handle 1 silently became a
-        different subscription, so CAN_UNSUBSCRIBE(1) removed something the
-        client had never installed. Reaching the wrap takes 65534 installs,
-        which a long session can do and a short test never will.
-
-        Skipping occupied handles terminates because the table holds at most
-        CAN_SUBSCRIPTION_SLOTS entries out of 65535 numbers, so a free one
-        always exists when a free slot does. The bound is belt and braces.
-        """
-        for _ in range(0xFFFF):
-            handle = self._next_handle
-            self._next_handle = (self._next_handle % 0xFFFF) + 1
-            if handle not in self._subscriptions:
-                return handle
-        return None
 
     # SPEC.md §8.2 — seq counts notifications **sent**. That makes it a fact
     # about delivery, not about encoding, and it is now assigned at delivery.
@@ -519,32 +493,11 @@ class VtpDevice:
     @property
     def notify_bytes(self):
         """ATT payload available for one notification on the CURRENT link:
-        the negotiated MTU minus the 3-byte ATT notification header.
-
-        This is what batching is sized against, and it is NOT what Info
-        publishes -- see `max_notify_bytes`.
+        the negotiated MTU minus the 3-byte ATT notification header. This is
+        what batching is sized against; SPEC.md §2 gives a client the same
+        bound from its own stack, so Info carries no copy of it.
         """
         return self.mtu - 3
-
-    @property
-    def max_notify_bytes(self):
-        """SPEC.md 4 -- the largest notification this DEVICE will ever send.
-
-        A ceiling the device chose, not the current link's negotiated value.
-        The two were the same field, and that could not work: a client reads
-        Info immediately after connecting, while this reference only learns the
-        negotiated maximum when a central subscribes, which is later. So the
-        number a client read described the previous link, or the --mtu default,
-        and by the time it was right nobody was going to read it again.
-
-        Making it a fixed ceiling removes the ordering problem rather than
-        solving it. A client sizes its receive buffer from a number that cannot
-        change under it, the device sizes each batch from the negotiated MTU as
-        it always did, and the negotiated value remains available -- properly
-        this time -- from GET_LINK_PARAMS (SPEC.md 9.1), which is a request
-        made after subscription rather than a value read before it.
-        """
-        return self._max_notify_bytes
 
     # -- Info -------------------------------------------------------------
 
@@ -573,7 +526,6 @@ class VtpDevice:
             "imu_rate_hz": self.imu_hz if imu else 0,
             "imu_max_rate_hz": 833 if imu else 0,
             "clock_flags": 0b10,      # survives reconnect; not GNSS-disciplined
-            "max_notify_bytes": self.max_notify_bytes,
         })
 
     # -- GPS --------------------------------------------------------------
@@ -806,24 +758,25 @@ class VtpDevice:
         return [(c, p) for c, p in out if p is not None]
 
     def _governing(self, cid):
-        """SPEC.md §9.3 — of the subscriptions matching `cid`, the one that
-        governs: most specific mask first, then lowest handle. A frame is
-        forwarded at most once, whatever else matches it."""
-        matches = [(h, s) for h, s in self._subscriptions.items()
-                   if (cid & s["mask"]) == (s["id"] & s["mask"])]
+        """SPEC.md §9.2 — of the subscriptions matching `cid`, the one that
+        governs: most specific mask first, then the one installed earliest. A
+        frame is forwarded at most once, whatever else matches it."""
+        matches = [(key, s) for key, s in self._subscriptions.items()
+                   if (cid & key[1]) == (key[0] & key[1])]
         if not matches:
-            return None, None
-        return min(matches, key=lambda hs: (-bin(hs[1]["mask"]).count("1"), hs[0]))
+            return None
+        return min(matches,
+                   key=lambda ks: (-bin(ks[0][1]).count("1"),
+                                   ks[1]["order"]))[1]
 
     def _due_can_frames(self, now):
         for cid, rate_hz, payload in self._bus_frames(now):
-            handle, sub = self._governing(cid)
+            sub = self._governing(cid)
             if sub is None:
                 continue
             # SPEC.md §6.8 — one set of mode state per matching identifier.
             st = sub["per_id"].setdefault(
-                cid, {"last": 0, "seen": 0, "emitted_at": 0,
-                      "last_payload": None})
+                cid, {"last": 0, "seen": 0, "emitted_at": 0})
             interval = round(1_000_000 / rate_hz)
             if now - st["last"] < interval:
                 continue
@@ -835,28 +788,12 @@ class VtpDevice:
             emit = True
             if sub["mode"] == SUB_PERIODIC and sub["arg"] and not first:
                 emit = (now - st["emitted_at"]) >= sub["arg"] * 1000
-            elif sub["mode"] == SUB_EVERY_NTH and sub["arg"]:
-                emit = ((st["seen"] - 1) % sub["arg"]) == 0
-            elif sub["mode"] == SUB_ON_CHANGE and not first:
-                emit = payload != st["last_payload"]
-                if emit and sub["arg"]:
-                    emit = (now - st["emitted_at"]) >= sub["arg"] * 1000
             st["last"] = now
             if emit:
                 st["emitted_at"] = now
-                st["last_payload"] = payload
                 yield {"id": cid, "payload": payload, "_t": now}
 
     # -- Control ----------------------------------------------------------
-
-    def set_link_params(self, **kwargs):
-        """Called by the transport as it learns each part of the link.
-
-        Merged rather than replaced: a host stack exposes these one at a time
-        and from different callbacks, and a later report of the PHY must not
-        erase an earlier report of the MTU.
-        """
-        self._link = dict(self._link or {}, **kwargs)
 
     def set_negotiated_mtu(self, att_mtu):
         """The real ATT MTU, as opposed to the one this device assumed.
@@ -864,15 +801,10 @@ class VtpDevice:
         Batch sizing had been driven entirely by the --mtu argument, so a
         device told 247 while the link negotiated 185 built notifications the
         link could not carry -- refused by the stack, or truncated, depending
-        on how forgiving it is. SPEC.md 9.1 also requires GET_LINK_PARAMS to
-        report the negotiated value or none at all, and a value taken from a
-        command-line flag is neither.
-
-        This moves `self.mtu`, which sizes batches, and NOT the ceiling Info
-        publishes: SPEC.md 4 makes `max_notify_bytes` a property of the device
-        rather than of the link. Batches are also never sized above the
-        ceiling, so a central that negotiates a larger MTU than this build was
-        configured for does not silently get batches bigger than Info promised.
+        on how forgiving it is. Batches are also never sized above the
+        configured ceiling, so a central that negotiates a larger MTU than
+        this build was configured for does not get larger batches than the
+        build was designed to hold.
         """
         self.mtu = min(att_mtu, self._device_mtu_ceiling)
         # Recorded because SPEC.md §14.3 needs the difference. Sizing a
@@ -881,7 +813,6 @@ class VtpDevice:
         # silently, because the client writes what the device asked for and
         # the device then rejects its own arithmetic.
         self._mtu_observed = True
-        self.set_link_params(att_mtu=att_mtu)
 
     def handle_control(self, request, t_rx=None):
         """SPEC.md §9. `[opcode][tag][params]` in, `[opcode][tag][status]
@@ -946,65 +877,47 @@ class VtpDevice:
                 mask = MASK_EXACT
             else:
                 cid, mask, mode, arg = struct.unpack("<IIBH", params)
-            if mode > SUB_EVERY_NTH:
-                return reply(ST_BAD_PARAMS)
-            # SPEC.md 4.1 -- refused, never silently substituted. Forwarding
-            # every frame where a client asked for changes only is the
-            # difference between a channel that updates on an event and one
-            # that floods, and the client would have no way to find out.
-            if (mode == SUB_ON_CHANGE
-                    and not self.capabilities & CAP_ONCHANGE_SUBS):
-                return reply(ST_BAD_PARAMS)
-            # SPEC.md §6.8 — N of 0 selects no frames at all and is meaningless.
-            if mode == SUB_EVERY_NTH and arg == 0:
+            # SPEC.md §6.8 — a mode this version does not define (2 and 3 were
+            # pre-1.0 drafts') is bad_params, never silently substituted.
+            if mode > SUB_PERIODIC:
                 return reply(ST_BAD_PARAMS)
             cid &= CAN_MATCH_BITS
             mask &= CAN_MATCH_BITS
 
-            # SPEC.md §9.2 — the same (id, mask) updates in place and keeps its
-            # handle, so a client reprogramming on every connect cannot exhaust
-            # the table.
-            for h, s in self._subscriptions.items():
-                if s["id"] == cid and s["mask"] == mask:
-                    s.update(mode=mode, arg=arg)
-                    return reply(ST_OK, struct.pack("<H", h))
+            # SPEC.md §9.1 — the same (id, mask) updates in place and keeps its
+            # installation order, so a client reprogramming on every connect
+            # cannot exhaust the table.
+            sub = self._subscriptions.get((cid, mask))
+            if sub is not None:
+                sub.update(mode=mode, arg=arg)
+                return reply(ST_OK)
 
             if len(self._subscriptions) >= CAN_SUBSCRIPTION_SLOTS:
                 return reply(ST_TABLE_FULL)
-            # SPEC.md §9.4 — no rate admission. A device cannot predict the load
-            # a subscription adds: not for every_frame or on_change, which
-            # depend on the bus; not across every_nth with N of 1, which selects
-            # exactly what every_frame does; and not for a masked subscription,
-            # which keeps its schedule per matching identifier (§6.8) and so
-            # produces one rate per identifier rather than the one its arg
-            # names. It admits, and sheds what it cannot forward.
-
-            handle = self._allocate_handle()
-            if handle is None:
-                return reply(ST_TABLE_FULL)
-            self._subscriptions[handle] = {
-                "id": cid, "mask": mask, "mode": mode, "arg": arg,
+            # SPEC.md §9.3 — no rate admission. The load a subscription adds
+            # depends on what the bus carries and, for a mask, on how many
+            # identifiers it matches (§6.8) — neither knowable at install. It
+            # admits, and sheds what it cannot forward.
+            self._install_counter += 1
+            self._subscriptions[(cid, mask)] = {
+                "mode": mode, "arg": arg, "order": self._install_counter,
                 # SPEC.md §6.8 — mode state is per matching identifier, not per
                 # subscription. A mask covering three identifiers keeps three
                 # independent sets; sharing one would let whichever frame
                 # arrived first consume the interval for the whole group.
                 "per_id": {},
             }
-            return reply(ST_OK, struct.pack("<H", handle))
-
-        if opcode == CAN_UNSUBSCRIBE:
-            if len(params) != 2:
-                return reply(ST_BAD_PARAMS)
-            (handle,) = struct.unpack("<H", params)
-            if self._subscriptions.pop(handle, None) is None:
-                return reply(ST_UNKNOWN_HANDLE)
             return reply(ST_OK)
 
-        if opcode == CAN_LIST:
-            if len(params) != 2:
+        if opcode == CAN_UNSUBSCRIBE:
+            # SPEC.md §9.1 — named by the same (id, mask) that installed it.
+            if len(params) != 8:
                 return reply(ST_BAD_PARAMS)
-            (start,) = struct.unpack("<H", params)
-            return reply(ST_OK, self._list_page(start))
+            cid, mask = struct.unpack("<II", params)
+            key = (cid & CAN_MATCH_BITS, mask & CAN_MATCH_BITS)
+            if self._subscriptions.pop(key, None) is None:
+                return reply(ST_UNKNOWN_SUBSCRIPTION)
+            return reply(ST_OK)
 
         if opcode == GPS_SET_RATE or opcode == IMU_SET_RATE:
             if len(params) != 2:
@@ -1024,30 +937,26 @@ class VtpDevice:
             return reply(ST_OK)
 
         if opcode == TIME_SYNC:
-            # SPEC.md §9.7 — parameterless. It used to carry the host's UTC
+            # SPEC.md §9.5 — parameterless. It used to carry the host's UTC
             # milliseconds, which the equations could not use and this device
             # discarded.
             if params:
                 return reply(ST_BAD_PARAMS)
-            # SPEC.md §9.7 — two readings: when it arrived, and now. The
+            # SPEC.md §9.5 — two readings: when it arrived, and now. The
             # client subtracts the difference from its own round trip and is
             # left with the flight time rather than the flight time plus
             # however long this device took to think about it.
             return reply(ST_OK, enc.encode_time_sync({
                 "t_device_rx": t_rx, "t_device_tx": self.now_us()}))
 
-        if opcode == GET_LINK_PARAMS:
-            if params:
-                return reply(ST_BAD_PARAMS)
-            return reply(ST_OK, self._link_params())
-
         if opcode == GET_POWER:
-            # SPEC.md 9.9 -- parameterless, and measured when the request
+            # SPEC.md 9.7 -- parameterless, and measured when the request
             # arrives rather than sampled on a timer: the answer a client gets
             # is the reading this device had at the moment it was asked.
             if params:
                 return reply(ST_BAD_PARAMS)
             return reply(ST_OK, self._power_state())
+
         if opcode == GNSS_AID_INFO:
             if params:
                 return reply(ST_BAD_PARAMS)
@@ -1073,77 +982,49 @@ class VtpDevice:
             if chunk_bytes <= 0:
                 return reply(ST_BAD_PARAMS)
 
-            # SPEC.md §14.3 -- `chunks` and `first_missing` are both u16 while
-            # total_bytes is u32, so a large enough transfer has a count that
-            # cannot be committed and a gap that cannot be named. Refused here,
-            # where both numbers are first known, rather than discovered at a
-            # commit the client cannot express.
+            # SPEC.md §14.3 -- `index` and `first_missing` are both u16 while
+            # total_bytes is u32, so a large enough transfer has chunks that
+            # cannot be named. Refused here, where both numbers are first
+            # known, rather than discovered at a commit the client cannot
+            # express.
             if -(-total // chunk_bytes) > AID_MAX_CHUNKS:
                 return reply(ST_BAD_PARAMS)
 
-            # SPEC.md §14.3 -- one transfer open. A BEGIN arriving over an open
-            # one discards it and takes a DIFFERENT session number, so a chunk
-            # still in flight for the old transfer fails the session check
-            # below instead of landing in the new one.
-            session = self._allocate_aid_session()
+            # SPEC.md §14.3 -- one transfer open, and a BEGIN over an open one
+            # discards it. The fresh token is what keeps them apart: with
+            # EATT a chunk of the discarded transfer can still be queued on
+            # another bearer, and it MUST fail the token check below rather
+            # than land in the new transfer.
+            token = self._allocate_aid_token()
             self._aid = {
-                "session": session,
+                "token": token,
                 "total_bytes": total,
                 "chunk_bytes": chunk_bytes,
                 "chunks": {},
             }
             return reply(ST_OK, enc.encode_aid_begin_result(
-                {"session": session, "chunk_bytes": chunk_bytes,
-                 "reserved_3": 0}))
+                {"token": token, "chunk_bytes": chunk_bytes}))
 
         if opcode == GNSS_AID_COMMIT:
-            if len(params) != 7:
+            if len(params) != 4:
                 return reply(ST_BAD_PARAMS)
-            session, chunks, crc = struct.unpack("<BHI", params)
-            # SPEC.md §14.4 -- a session this device does not hold. Note this
-            # is bad_params and not a result: there is no transfer to report on.
-            if not self._aid or session != self._aid["session"]:
-                return reply(ST_BAD_PARAMS)
-            # SPEC.md §14.4 -- `chunks` disagreeing with the transfer's own
-            # shape is a bad parameter, not an incomplete transfer. Reporting
-            # it as `incomplete` means naming a first_missing the device
-            # actually holds, and a client that resends from it commits again
-            # with the same wrong count and never converges.
-            if chunks != self._aid_expected_chunks(self._aid):
+            (crc,) = struct.unpack("<I", params)
+            # SPEC.md §14.4 -- no transfer open. Note this is bad_params and
+            # not a result: there is no transfer to report on.
+            if not self._aid:
                 return reply(ST_BAD_PARAMS)
             return reply(ST_OK, self._aid_commit(crc))
 
-        if opcode == GNSS_AID_ABORT:
-            if len(params) != 1:
-                return reply(ST_BAD_PARAMS)
-            (session,) = struct.unpack("<B", params)
-            if not self._aid or session != self._aid["session"]:
-                return reply(ST_BAD_PARAMS)
-            self._aid = None
-            return reply(ST_OK)
-
         if opcode == MONITOR_LIST:
             # SPEC.md §13.3 — parameterless: the declaration is not paged, so
-            # there is no `start` to take. It used to take one, mirroring
-            # CAN_LIST, and the index could never be anything but zero.
+            # there is no `start` to take. It used to take one, mirroring the
+            # since-removed CAN_LIST, and the index could never be anything
+            # but zero.
             if params:
                 return reply(ST_BAD_PARAMS)
             return reply(ST_OK, self._monitor_declaration())
 
         return reply(ST_UNSUPPORTED)
-
-    def _list_page(self, start):
-        """SPEC.md §9.5. One page from `start`, sized to the notification
-        budget. A start beyond the end is ok with count 0, not an error."""
-        table = sorted(self._subscriptions.items())
-        # 3 bytes of opcode/tag/status, then the page header, then entries.
-        room = (self.notify_bytes - 3 - 6) // 13
-        page = table[start:start + max(0, room)]
-        header = {"total": len(table), "index": start,
-                  "count": len(page), "reserved": 0}
-        entries = [{"handle": h, "id": s["id"], "mask": s["mask"],
-                    "mode": s["mode"], "arg": s["arg"]} for h, s in page]
-        return enc.encode_can_list(header, entries)
 
     # -- Monitor (SPEC.md §13) --------------------------------------------
 
@@ -1161,18 +1042,18 @@ class VtpDevice:
 
     # -- aiding (SPEC.md §14) ---------------------------------------------
 
-    def _allocate_aid_session(self):
-        """A session number that is not the one just discarded.
+    def _allocate_aid_token(self):
+        """A token that is not the one just discarded.
 
-        SPEC.md §14.3. Reusing it would let a chunk still in flight for the
-        abandoned transfer be accepted into the new one, at whatever offset its
-        index names -- silent corruption of a payload whose CRC is computed by
-        somebody else.
+        SPEC.md §14.3. Reusing it would let a chunk still queued on another
+        ATT bearer for the abandoned transfer be accepted into the new one,
+        at whatever offset its index names -- silent corruption of a payload
+        whose CRC is computed by somebody else.
         """
-        previous = self._aid["session"] if self._aid else self._aid_last_session
-        session = 1 if previous is None else (previous % 255) + 1
-        self._aid_last_session = session
-        return session
+        previous = self._aid["token"] if self._aid else self._aid_last_token
+        token = 1 if previous is None else (previous % 255) + 1
+        self._aid_last_token = token
+        return token
 
     def _aid_caps(self):
         """SPEC.md §14.2 — what this device accepts, and what it already holds."""
@@ -1180,12 +1061,6 @@ class VtpDevice:
         return enc.encode_gnss_aid_caps({
             "validity": AID_V_HELD_UNTIL if held is not None else 0,
             "format": self.AID_FORMAT,
-            # This device keeps what it was given, so a client that topped it
-            # up yesterday is told so and sends nothing. A device with no flash
-            # clears this flag and is re-sent on every connection, which is the
-            # honest answer rather than the convenient one.
-            "flags": AID_PERSISTS,
-            "reserved_3": 0,
             "max_bytes": self.AID_MAX_BYTES_DECLARED,
             "held_until": held or 0,
         })
@@ -1226,14 +1101,17 @@ class VtpDevice:
             return "aiding-not-supported"
         if len(payload) < 3:
             return "length"
-        session, index = struct.unpack_from("<BH", payload, 0)
+        token, index = struct.unpack_from("<BH", payload, 0)
         body = payload[3:]
 
         if not self._aid:
             return "no-open-transfer"
         t = self._aid
-        if session != t["session"]:
-            return "wrong-session"
+        # SPEC.md §14.3 -- a stale chunk for a discarded transfer. EATT means
+        # it can arrive after the BEGIN that discarded its transfer, so this
+        # check is what keeps it out of the new one.
+        if token != t["token"]:
+            return "wrong-token"
 
         expected = self._aid_expected_chunks(t)
         if index >= expected:
@@ -1257,9 +1135,9 @@ class VtpDevice:
     def _aid_commit(self, crc):
         """SPEC.md §14.4 — what became of the transfer.
 
-        The status of the RESPONSE is ok throughout: the request named an open
-        session and was well formed, so the device applied it. What it found is
-        in the result, which is the only place an index to resend from can
+        The status of the RESPONSE is ok throughout: a transfer was open and
+        the request was well formed, so the device applied it. What it found
+        is in the result, which is the only place an index to resend from can
         travel (§14.5).
         """
         t = self._aid
@@ -1375,15 +1253,16 @@ class VtpDevice:
         return None
 
     def can_table(self):
-        """The installed CAN subscriptions, as CAN_LIST would report them.
+        """The installed CAN subscriptions, in installation order.
 
         Exposed for the debug panel: the difference between "three ids
         installed" and "three ids installed and the client is listening" is
         most of the diagnostic work in this protocol, and neither number means
         much without the other.
         """
-        return [(handle, s["id"], s["mask"], s["mode"], s["arg"])
-                for handle, s in sorted(self._subscriptions.items())]
+        return [(cid, mask, s["mode"], s["arg"])
+                for (cid, mask), s in sorted(self._subscriptions.items(),
+                                             key=lambda ks: ks[1]["order"])]
 
     def pending_dropped(self):
         """Discards accumulated but not yet reported on a notification."""
@@ -1441,7 +1320,7 @@ class VtpDevice:
         """What the device's own supply monitoring found.
 
         Both arguments are independent, and None means "this build cannot
-        measure it" rather than zero -- which is the whole shape of SPEC.md 9.9.
+        measure it" rather than zero -- which is the whole shape of SPEC.md 9.7.
         A device wired to the ignition feed passes `percent=None` forever and
         reports `external` truthfully, rather than reporting 100% and leaving a
         client to render a gauge for a battery that does not exist. A device
@@ -1449,7 +1328,7 @@ class VtpDevice:
         nothing about a battery, so `set_power(SRC_EXTERNAL, 40)` is an
         ordinary state and not a contradiction.
 
-        SPEC.md 9.9's one device rule is refused HERE, where the mistake is,
+        SPEC.md 9.7's one device rule is refused HERE, where the mistake is,
         rather than at the next GET_POWER: by then the device is running and
         the traceback names a control response rather than the call that made
         it wrong.
@@ -1458,16 +1337,16 @@ class VtpDevice:
                 and source is None and percent is None):
             raise ValueError(
                 "a device declaring `power` MUST report at least one valid "
-                "field (SPEC.md 9.9); with nothing to say it declares no "
+                "field (SPEC.md 9.7); with nothing to say it declares no "
                 "`power` capability instead")
         self._power = {"source": source, "percent": percent}
 
     def _power_state(self):
-        """SPEC.md 9.9 -- the detail of a GET_POWER response.
+        """SPEC.md 9.7 -- the detail of a GET_POWER response.
 
-        Presence, not truthiness, for the same reason _link_params uses it: a
-        percent of 0 is a flat battery and a real measurement, and reading it
-        as "unknown" would hide the one state a driver most needs to see.
+        Presence, not truthiness: a percent of 0 is a flat battery and a real
+        measurement, and reading it as "unknown" would hide the one state a
+        driver most needs to see.
         """
         fields, validity = {"source": 0, "percent": 0}, 0
         for bit, name in ((PWR_SOURCE, "source"), (PWR_PERCENT, "percent")):
@@ -1475,39 +1354,3 @@ class VtpDevice:
                 validity |= bit
                 fields[name] = self._power[name]
         return enc.encode_power_state({"validity": validity, **fields})
-
-    def _link_params(self):
-        link = self._link or {}
-        fields = {
-            "att_mtu": 0, "ll_max_tx_octets": 0, "ll_max_rx_octets": 0,
-            "conn_interval": 0, "peripheral_latency": 0,
-            "supervision_timeout": 0, "phy_tx": 0, "phy_rx": 0,
-        }
-        # SPEC.md §9.1 — a bit governing several fields may be set only when
-        # EVERY one of them is known. This used to set the bit as soon as one
-        # was, filling the rest with zero or with a copy: told a TX PHY and
-        # nothing else, it reported the same value as the RX PHY, with a
-        # validity bit asserting that was a measurement. Half a group is the
-        # same state as none of it, and a clear bit is how that state is said.
-        GROUPS = (
-            (0, ("att_mtu",)),
-            (1, ("ll_max_tx_octets", "ll_max_rx_octets")),
-            (2, ("conn_interval", "peripheral_latency", "supervision_timeout")),
-            (3, ("phy_tx", "phy_rx")),
-        )
-        validity = 0
-        for bit, names in GROUPS:
-            # PRESENCE, not truthiness. `all(link.get(n) ...)` read a
-            # peripheral_latency of 0 as unknown, and 0 is not only valid but
-            # the value SPEC.md 2 says a device SHOULD request while streaming
-            # -- so the one connection-parameter group a conforming device is
-            # most likely to have reported the whole of every field as absent.
-            if all(link.get(n) is not None for n in names):
-                validity |= 1 << bit
-                for n in names:
-                    fields[n] = link[n]
-        # Everything a host stack does not expose stays absent rather than
-        # being guessed — SPEC.md §9.1 is explicit that a cleared bit is the
-        # only honest answer, and a desktop CoreBluetooth or BlueZ peripheral
-        # genuinely cannot see most of this.
-        return enc.encode_link_params({"validity": validity, **fields})

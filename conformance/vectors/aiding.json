@@ -4,14 +4,13 @@
   "cases": [
     {
       "name": "caps-holding-a-window",
-      "desc": "A device that accepts UBX-MGA, keeps it across a power cycle, and is already holding orbit data valid to a stated instant.",
+      "desc": "A device that accepts UBX-MGA and is already holding orbit data valid to a stated instant. What it holds NOW is the whole declaration: a client learns what survives a power cycle by asking again on the next connection (SPEC.md 14.2).",
       "record": "gnss_aid_caps",
-      "hex": "0101010000000200007ccd2d9b010000",
+      "hex": "0101000000000200007ccd2d9b010000",
       "expect": {
         "validity": 1,
         "format": 1,
-        "flags": 1,
-        "reserved_3": 0,
+        "reserved_2": 0,
         "max_bytes": 131072,
         "held_until": 1766000000000,
         "format_known": true
@@ -23,47 +22,29 @@
       "name": "caps-holding-nothing",
       "desc": "A device with no aiding loaded. held_until is zero AND its validity bit is clear; a client MUST conclude 'holds nothing', never 'valid until the Unix epoch'.",
       "record": "gnss_aid_caps",
-      "hex": "00010000000002000000000000000000",
+      "hex": "00010000000001000000000000000000",
       "expect": {
         "validity": 0,
         "format": 1,
-        "flags": 0,
-        "reserved_3": 0,
-        "max_bytes": 131072,
+        "reserved_2": 0,
+        "max_bytes": 65536,
         "held_until": 0,
         "format_known": true
       },
       "expect_absent": [
         "held_until"
       ],
-      "note": "validity, format and flags all differ from each other across this file's three caps vectors. Without that a decoder reading any one of the three from another's offset passes the whole corpus -- the hole mutation testing found in link_params' tx/rx pair."
-    },
-    {
-      "name": "caps-without-persistence",
-      "desc": "A device holding a window that will not survive a power cycle. A client MUST NOT carry held_until forward to the next connection (SPEC.md 14.2).",
-      "record": "gnss_aid_caps",
-      "hex": "0101000000000100007ccd2d9b010000",
-      "expect": {
-        "validity": 1,
-        "format": 1,
-        "flags": 0,
-        "reserved_3": 0,
-        "max_bytes": 65536,
-        "held_until": 1766000000000,
-        "format_known": true
-      },
-      "expect_absent": []
+      "note": "validity, format and max_bytes all differ from caps-holding-a-window's values. Without that a decoder reading one field from another's offset passes the whole corpus -- a hole mutation testing has found in look-alike field pairs before."
     },
     {
       "name": "caps-stale-value-behind-cleared-bit",
       "desc": "A non-conforming device that clears the held_until bit but leaves the previous window in the bytes. A decoder MUST report held_until absent on the strength of the bit alone.",
       "record": "gnss_aid_caps",
-      "hex": "0001010000000200007ccd2d9b010000",
+      "hex": "0001000000000200007ccd2d9b010000",
       "expect": {
         "validity": 0,
         "format": 1,
-        "flags": 1,
-        "reserved_3": 0,
+        "reserved_2": 0,
         "max_bytes": 131072,
         "held_until": 1766000000000,
         "format_known": true
@@ -73,7 +54,7 @@
       ],
       "note": "Not byte-canonical, so the round-trip also asserts that a conforming encoder normalises the field to zero. This is the only coverage the gnss_aid_caps encoder gate gets.",
       "canonical": false,
-      "expect_roundtrip_hex": "00010100000002000000000000000000"
+      "expect_roundtrip_hex": "00010000000002000000000000000000"
     },
     {
       "name": "caps-unknown-format",
@@ -83,8 +64,7 @@
       "expect": {
         "validity": 0,
         "format": 9,
-        "flags": 0,
-        "reserved_3": 0,
+        "reserved_2": 0,
         "max_bytes": 131072,
         "held_until": 0,
         "format_known": false
@@ -94,41 +74,22 @@
       ]
     },
     {
-      "name": "caps-reserved-flag-set",
-      "desc": "A later minor assigned aid_flags bit 4. A decoder MUST ignore the unknown bit and decode every known field normally, and a VTP/1.0 encoder MUST normalise it away on transmit (SPEC.md 2).",
+      "name": "caps-reserved-bytes-set",
+      "desc": "A later minor assigned gnss_aid_caps.reserved_2 -- the bytes that held aid_flags in a pre-1.0 draft. A decoder MUST read them and report them, MUST NOT reject the record, and MUST decode every known field normally; a VTP/1.0 encoder MUST normalise them to zero.",
       "record": "gnss_aid_caps",
-      "hex": "0101110000000200007ccd2d9b010000",
+      "hex": "01015a5a00000200007ccd2d9b010000",
       "expect": {
         "validity": 1,
         "format": 1,
-        "flags": 17,
-        "reserved_3": 0,
+        "reserved_2": 23130,
         "max_bytes": 131072,
         "held_until": 1766000000000,
         "format_known": true
       },
       "expect_absent": [],
+      "note": "A decoder that omits a reserved field from its output while another reads it has two references disagreeing about the same payload -- the defect class this corpus exists to prevent.",
       "canonical": false,
-      "expect_roundtrip_hex": "0101010000000200007ccd2d9b010000"
-    },
-    {
-      "name": "caps-reserved-byte-set",
-      "desc": "A later minor assigned gnss_aid_caps.reserved_3. A decoder MUST read the byte and report it, MUST NOT reject the record, and MUST decode every known field normally.",
-      "record": "gnss_aid_caps",
-      "hex": "0101015a00000200007ccd2d9b010000",
-      "expect": {
-        "validity": 1,
-        "format": 1,
-        "flags": 1,
-        "reserved_3": 90,
-        "max_bytes": 131072,
-        "held_until": 1766000000000,
-        "format_known": true
-      },
-      "expect_absent": [],
-      "note": "The C decoder used to omit this field from its struct and print a literal zero while the Python decoder read the byte, so the two references disagreed about the same payload -- the defect class this corpus exists to prevent. No vector carried a non-zero reserved byte, so nothing noticed.",
-      "canonical": false,
-      "expect_roundtrip_hex": "0101010000000200007ccd2d9b010000"
+      "expect_roundtrip_hex": "0101000000000200007ccd2d9b010000"
     },
     {
       "name": "caps-short-payload",
@@ -150,11 +111,11 @@
       "record": "aid_begin_result",
       "hex": "07f10000",
       "expect": {
-        "session": 7,
+        "token": 7,
         "chunk_bytes": 241,
         "reserved_3": 0
       },
-      "note": "chunk_bytes is fixed for the transfer because index-to-offset must be arithmetic; SPEC.md 14.3 gives the reason."
+      "note": "chunk_bytes is fixed for the transfer because index-to-offset must be arithmetic, and the token names the transfer so a stale chunk on another EATT bearer cannot land in it; SPEC.md 14.3 has both arguments."
     },
     {
       "name": "begin-at-minimum-mtu",
@@ -162,7 +123,7 @@
       "record": "aid_begin_result",
       "hex": "015e0000",
       "expect": {
-        "session": 1,
+        "token": 1,
         "chunk_bytes": 94,
         "reserved_3": 0
       }
@@ -173,7 +134,7 @@
       "record": "aid_begin_result",
       "hex": "07f100a5",
       "expect": {
-        "session": 7,
+        "token": 7,
         "chunk_bytes": 241,
         "reserved_3": 165
       },
@@ -269,6 +230,49 @@
       "note": "The only coverage the aid_commit_result encoder gate gets.",
       "canonical": false,
       "expect_roundtrip_hex": "00010000"
+    },
+    {
+      "name": "begin-zero-chunk-bytes",
+      "desc": "A chunk size of zero: a device-side violation of SPEC.md 14.3. The record is well-formed, so a receiver MUST decode it -- and SHOULD report it as a device defect, since no chunk of such a transfer can carry a byte.",
+      "record": "aid_begin_result",
+      "hex": "03000000",
+      "expect": {
+        "token": 3,
+        "chunk_bytes": 0,
+        "reserved_3": 0
+      },
+      "note": "No round-trip: a conforming encoder refuses a zero chunk_bytes, which is the device-side half of the rule.",
+      "no_roundtrip": true
+    },
+    {
+      "name": "commit-index-beside-applied",
+      "desc": "first_missing named beside `applied`: a device-side violation of SPEC.md 14.4's if-and-only-if rule. The record decodes; a client MUST NOT tell a user chunk 7 was lost from a transfer that succeeded, and SHOULD flag the contradiction.",
+      "record": "aid_commit_result",
+      "hex": "01010700",
+      "expect": {
+        "validity": 1,
+        "result": 1,
+        "first_missing": 7,
+        "result_known": true
+      },
+      "expect_absent": [],
+      "no_roundtrip": true
+    },
+    {
+      "name": "commit-incomplete-without-index",
+      "desc": "`incomplete` with the first_missing bit clear: the device says something is missing and refuses to say what. The record decodes -- first_missing reads absent -- and a client has no index to resend from, so it SHOULD flag the defect rather than guess one (SPEC.md 14.4).",
+      "record": "aid_commit_result",
+      "hex": "00020000",
+      "expect": {
+        "validity": 0,
+        "result": 2,
+        "first_missing": 0,
+        "result_known": true
+      },
+      "expect_absent": [
+        "first_missing"
+      ],
+      "no_roundtrip": true
     },
     {
       "name": "commit-unknown-result",

@@ -88,10 +88,15 @@ def _known_bits(bitmask):
     sets one has published a claim it cannot make.
     """
     spec = SCHEMA["bitmasks"][bitmask]
-    reserved_from = spec.get("reserved_from")
-    if reserved_from is None:
+    if "reserved_from" not in spec:
         return (1 << (spec["width"] * 8)) - 1
-    return (1 << reserved_from) - 1
+    # From the NAMED bits, not from reserved_from: a bit retired below the
+    # boundary -- capabilities bit 7, assigned by a pre-1.0 draft -- is
+    # reserved exactly like the range above it.
+    known = 0
+    for b in spec["bits"]:
+        known |= 1 << b["bit"]
+    return known
 
 
 def _normalise_bitmasks(name, values):
@@ -357,18 +362,6 @@ def encode_info(info):
     return _pack("info", info)
 
 
-def encode_can_list(page, entries):
-    """SPEC.md §9.5. One page header followed by `count` subscription entries."""
-    if len(entries) != page.get("count", 0):
-        raise EncodeError(
-            f"can_list_page.count is {page.get('count', 0)} but "
-            f"{len(entries)} entr(ies) were supplied")
-    out = bytearray(_pack("can_list_page", _zero_reserved("can_list_page", page)))
-    for e in entries:
-        out += _pack("can_subscription", e)
-    return bytes(out)
-
-
 MONITOR_MAX_CHANNELS = (
     (SCHEMA["protocol"]["min_att_mtu"] - 3
      - SCHEMA["records"]["monitor_header"]["size"])
@@ -438,7 +431,7 @@ def encode_control_response(resp):
 
 
 def encode_time_sync(ts):
-    """SPEC.md §9.7. An encoder must not emit what its own decoder rejects."""
+    """SPEC.md §9.5. An encoder must not emit what its own decoder rejects."""
     if ts.get("t_device_tx", 0) < ts.get("t_device_rx", 0):
         raise EncodeError(
             "time_sync: t_device_tx precedes t_device_rx, so the device "
@@ -446,29 +439,27 @@ def encode_time_sync(ts):
     return _pack("time_sync", ts)
 
 
-def encode_link_params(link_params):
-    """SPEC.md §9.1. The detail of a GET_LINK_PARAMS response."""
-    return _pack("link_params", _gate("link_params", link_params))
-
-
 POWER_BIT = {b["name"]: 1 << b["bit"]
              for b in SCHEMA["bitmasks"]["power_validity"]["bits"]}
 
 
 def encode_power_state(power):
-    """SPEC.md §9.9. The detail of a GET_POWER response.
+    """SPEC.md §9.7. The detail of a GET_POWER response.
 
-    An encoder must not emit what its own decoder rejects, so the one range
-    this record has is checked here too -- and only where the validity bit
-    claims the byte means something, since a cleared bit is written as zero and
-    zero is always in range.
+    A device MUST NOT emit a percent above 100, and the encoder is the device
+    side of that rule -- checked only where the validity bit claims the byte
+    means something, since a cleared bit is written as zero and zero is always
+    in range. The decoder deliberately does NOT reject it: the record is well
+    formed, so a receiver decodes it and SHOULD flag the value instead.
     """
     if (power.get("validity", 0) & POWER_BIT["percent"]
             and power.get("percent", 0) > 100):
         raise EncodeError(
             f"power_state.percent is {power['percent']}; the field is 0..100 "
-            f"and a receiver rejects the record rather than clamping it")
+            f"and a device MUST NOT emit a larger value (SPEC.md 9.7)")
     return _pack("power_state", _gate("power_state", power))
+
+
 def encode_gnss_aid_caps(caps):
     """SPEC.md §14.2. The detail of a GNSS_AID_INFO response."""
     return _pack("gnss_aid_caps", _gate("gnss_aid_caps", caps))
@@ -517,9 +508,7 @@ ENCODERS = {
     "can_batch": lambda d: encode_can_batch(d["header"], d["records"]),
     "imu_batch": lambda d: encode_imu_batch(d["header"], d["samples"]),
     "info": encode_info,
-    "link_params": encode_link_params,
     "power_state": encode_power_state,
-    "can_list": lambda d: encode_can_list(d["page"], d["entries"]),
     "monitor_list": lambda d: encode_monitor_list(d["declaration"], d["entries"]),
     "monitor_update": lambda d: encode_monitor_update(d["header"], d["values"]),
     "control_response": encode_control_response,

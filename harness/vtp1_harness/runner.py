@@ -175,8 +175,7 @@ class Runner:
         except (ControlTimeout, ControlEchoMismatch) as exc:
             # SPEC.md §9 -- a device MUST respond to every request it applies
             # and MUST echo the opcode and tag. Both are MUSTs regardless of
-            # the severity of the check that happened to provoke them:
-            # implementing GET_LINK_PARAMS is a SHOULD, answering it is not.
+            # the severity of the check that happened to provoke them.
             return finish(Status.FAIL, str(exc),
                           getattr(exc, "evidence", {}))
         except TransportError:

@@ -157,15 +157,16 @@ async def one_connection(BleakClient, address, args, first):
             check(False, f"the device's Info did not decode: {exc} ({raw.hex()})")
             return None
         note(f"Info: minor {info['protocol_minor']}, capabilities "
-             f"0x{info['capabilities']:X}, max_notify_bytes "
-             f"{info['max_notify_bytes']}")
+             f"0x{info['capabilities']:X}")
         check(info["protocol_major"] == 1,
               f"protocol_major is {info['protocol_major']}, not 1")
 
-        # SPEC.md 4.1 -- decode_info already enforces the matrix, so reaching
-        # here means it held. Say so, because a client author reading this
-        # output wants to know the check ran.
-        note("Info satisfies the SPEC.md 4.1 capability matrix")
+        # SPEC.md 4.1 -- the capability matrix binds the device; a client
+        # decodes and reports. Reported as a fault here, because a bench is
+        # exactly where the device author can fix it.
+        problem = vtp1.capability_problem(info)
+        check(problem is None,
+              f"Info breaks the SPEC.md 4.1 capability matrix: {problem}")
 
         caps = info["capabilities"]
         has = {name: bool(caps & (1 << bit))
@@ -258,10 +259,9 @@ async def one_connection(BleakClient, address, args, first):
                       f"below can say anything about the CAN stream")
                 if can_subscribed:
                     detail = bytes.fromhex(resp["detail_hex"])
-                    check(len(detail) == 2,
+                    check(len(detail) == 0,
                           f"CAN_SUBSCRIBE answered ok with {len(detail)} "
-                          f"detail byte(s); SPEC.md 9 says the detail is a "
-                          f"u16 handle")
+                          f"detail byte(s); SPEC.md 9 gives it none")
 
         # ---- The streams, together --------------------------------------
         sinks = {n: s for n, s in (("gps", gps), ("can", can), ("imu", imu))
@@ -320,13 +320,13 @@ def inspect(result, args):
         if len(headers) != len(payloads):
             continue
 
-        # SPEC.md 4.2 -- the ceiling the device published bounds every
-        # notification it sends, on any link.
+        # SPEC.md 2 -- a notification never exceeds the negotiated ATT
+        # payload, which is the number the client's own stack knows.
         biggest = max(len(p) for p in payloads)
-        check(biggest <= info["max_notify_bytes"],
+        budget = (result.get("mtu") or 23) - 3
+        check(biggest <= budget,
               f"{name}: a {biggest}-byte notification exceeds the "
-              f"max_notify_bytes {info['max_notify_bytes']} Info published "
-              f"(SPEC.md 4.2)")
+              f"{budget}-byte ATT payload of the negotiated MTU (SPEC.md 2)")
 
         # SPEC.md 8.2 -- +1 each, wrapping. Gaps are the link losing what the
         # device sent, which is worth reporting but is not a device fault.

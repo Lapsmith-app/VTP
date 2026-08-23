@@ -50,10 +50,11 @@ async def info_reserved_capabilities(s):
 async def info_capability_implications(s):
     if s.info_raw is None or len(s.info_raw) < refdec.size("info"):
         raise Skip("Info could not be read")
-    # Read from the bytes, not the decoded record. The reference decoder rejects
-    # an Info that breaks an implication -- correctly, because a client MUST
-    # treat one as non-conforming -- which would leave this check skipping on
-    # exactly the device it exists to describe.
+    # §4.1 binds the DEVICE: it MUST NOT publish an Info that breaks an
+    # implication. A client decodes it -- the record is well-formed -- and
+    # this is the surfacing §4.1 asks that client to do: it MUST NOT use a
+    # role whose required bit is missing, and MUST NOT guess which half was
+    # meant.
     declared = _declared_capabilities(s.info_raw)
     broken = []
     for capability, required in refdec.IMPLIES.items():
@@ -63,13 +64,10 @@ async def info_capability_implications(s):
         if missing:
             broken.append(f"{capability} requires {', '.join(missing)}")
     if broken:
-        # A client MUST treat this exactly as it treats a protocol_major
-        # mismatch, and MUST NOT guess which half was meant: monitor without
-        # control has asked for values through an opcode it cannot answer, and
-        # can_fd without can has described a bus it does not have.
-        raise Fail("; ".join(broken) + ". §4.1 makes the implications normative "
-                   "and a client MUST NOT guess which half was meant",
-                   declared=sorted(declared))
+        raise Fail("; ".join(broken) + ". §4.1 makes the implications normative: "
+                   "monitor without control has asked for values through an "
+                   "opcode it cannot answer, and can_fd without can describes a "
+                   "bus the device does not have", declared=sorted(declared))
 
 
 @check(id="info.capacities", section="4.1", phase="info", severity="MUST",
@@ -120,8 +118,9 @@ async def info_reserved_fields(s):
         raise Skip("Info did not decode")
     # Derived from the schema, so a byte that gains a meaning in a later minor
     # stops being checked here the moment the schema says it has one. Byte 20
-    # held can_max_payload until §4.2 made the largest payload follow from the
-    # capability bits, and two statements of one fact became one.
+    # held can_max_payload until §4.1 made the largest payload follow from the
+    # capability bits, and bytes 22-23 held max_notify_bytes until it was
+    # removed as a restatement of the negotiated ATT payload.
     reserved = [f["name"] for f in refdec.SCHEMA["records"]["info"]["fields"]
                 if f["name"].startswith("reserved")]
     nonzero = [(name, s.info[name]) for name in reserved if s.info[name]]
@@ -133,7 +132,7 @@ async def info_reserved_fields(s):
               "meant it", info_hex=s.info_raw.hex())
 
 
-@check(id="info.can_payload", section="4.2", phase="info", severity="OBSERVE",
+@check(id="info.can_payload", section="4.1", phase="info", severity="OBSERVE",
        requires=("can",),
        title="The largest CAN payload this device can carry")
 async def info_can_payload(s):
@@ -142,36 +141,9 @@ async def info_can_payload(s):
     payload = refdec.can_max_payload(s.capabilities)
     raise Observe(
         f"{payload} bytes -- {'CAN FD' if s.has('can_fd') else 'classic CAN'}. "
-        f"§4.2 derives this from the capability bits; it is no longer a field, "
+        f"§4.1 derives this from the capability bits; it is not a field, "
         f"so there is nothing here that can disagree with itself",
         can_max_payload=payload)
-
-
-@check(id="info.notify_bytes", section="4", phase="info", severity="MUST",
-       title="max_notify_bytes fits the link and clears the specified floor")
-async def info_notify_bytes(s):
-    if s.info is None:
-        raise Skip("Info did not decode")
-    if not (s.capabilities & {"gps", "can", "imu"}):
-        raise Skip("this device declares no notifying role")
-    declared = s.info["max_notify_bytes"]
-    if declared < refdec.MIN_NOTIFY_BYTES:
-        raise Fail(
-            f"max_notify_bytes is {declared}; §2 requires a device to function "
-            f"at an ATT MTU of {refdec.MIN_ATT_MTU}, which is "
-            f"{refdec.MIN_NOTIFY_BYTES} bytes of payload")
-    if s.mtu is not None and declared > s.mtu - 3:
-        raise Fail(
-            f"max_notify_bytes is {declared} but the negotiated ATT MTU is "
-            f"{s.mtu}, leaving {s.mtu - 3}. A notification that size cannot be "
-            f"delivered on this link", att_mtu=s.mtu)
-    if s.mtu is not None and declared < s.mtu - 3:
-        # Not a failure -- a device may have a smaller buffer than the link --
-        # but worth reporting, because it is throughput the link is offering
-        # and the device is not taking.
-        raise Observe(
-            f"max_notify_bytes is {declared} of the {s.mtu - 3} this link "
-            f"allows", declared=declared, available=s.mtu - 3)
 
 
 @check(id="info.identity", section="4", phase="info", severity="OBSERVE",

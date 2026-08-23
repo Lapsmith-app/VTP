@@ -95,7 +95,7 @@ def format_can_id(can_id, mask):
             else f"0x{can_id:03X}/{mask:X}")
 
 
-SUB_MODES = {0: "every", 1: "periodic", 2: "on-change", 3: "every-Nth"}
+SUB_MODES = {0: "every", 1: "periodic"}
 
 
 class MonitorDisplay:
@@ -300,7 +300,7 @@ class MonitorDisplay:
 
     def _build_can(self):
         self.can_body = self._panel("CAN SUBSCRIPTIONS")
-        for i, width in enumerate((80, 150, 120, 90)):
+        for i, width in enumerate((200, 120, 90)):
             self.can_body.grid_columnconfigure(i, minsize=width, weight=1)
         self._can_rows = []
         # The empty-state label is its own widget, NOT a short row in the row
@@ -308,7 +308,7 @@ class MonitorDisplay:
         # update indexed into, and the IndexError killed the peripheral.
         self._can_empty = self._cell(self.can_body, "none installed", 0, 0,
                                      colour=self.DIM, size=12, anchor="w")
-        self._can_empty.grid(columnspan=4)
+        self._can_empty.grid(columnspan=3)
 
     def _build_control(self):
         self.ctrl_body = self._panel("CONTROL")
@@ -442,13 +442,13 @@ class MonitorDisplay:
 
     def _update_can(self, table):
         self._can_rows = self._fit_rows(self.can_body, len(table),
-                                        self._can_rows, 4, self._can_empty)
-        for row, (handle, can_id, mask, mode, arg) in zip(self._can_rows, table):
-            values = (str(handle), format_can_id(can_id, mask),
+                                        self._can_rows, 3, self._can_empty)
+        for row, (can_id, mask, mode, arg) in zip(self._can_rows, table):
+            values = (format_can_id(can_id, mask),
                       SUB_MODES.get(mode, f"mode {mode}"),
-                      str(arg) if mode in (1, 2, 3) else "—")
+                      str(arg) if mode == 1 else "—")
             for i, (widget, value) in enumerate(zip(row, values)):
-                self._set(widget, value, self.FG, anchor="w" if i < 2 else "e")
+                self._set(widget, value, self.FG, anchor="w" if i < 1 else "e")
 
     def _update_control(self, control):
         entries = list(reversed(control))
@@ -497,11 +497,11 @@ if __name__ == "__main__":
             "unwanted": {"gps": 0, "can": 0, "imu": int(t)},
             "rate": {"gps": 10.0, "can": 27.0, "imu": 5.0},
             "pending_dropped": {"gps": 0, "can": 0, "imu": 0},
-            "can_table": [(1, 0x0C0, 0x3FFFFFFF, 0, 0),
-                          (2, 0x1A0, 0x3FFFFFFF, 1, 40),
-                          (3, 0x2E0, 0x1FFFFF00, 3, 5)],
+            "can_table": [(0x0C0, 0x3FFFFFFF, 0, 0),
+                          (0x1A0, 0x3FFFFFFF, 1, 40),
+                          (0x2E0, 0x1FFFFF00, 1, 5)],
             "control": [("12:00:01", "CAN_SUBSCRIBE tag=2 id=0x0C0 mode=0 arg=0", "ok"),
-                        ("12:00:01", "CAN_LIST tag=5 start=0", "ok")],
+                        ("12:00:01", "TIME_SYNC tag=5", "ok")],
             "configured": {"gps": 10, "imu": 100},
             "monitor_seq": int(t), "monitor_updates": int(t * 2),
         })

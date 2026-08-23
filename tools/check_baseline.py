@@ -39,7 +39,8 @@ BASELINE = ROOT / "conformance" / "baseline.json"
 # absent deliberately: they are how the corpus explains itself, and improving
 # an explanation is not a compatibility break.
 SEMANTIC = ("record", "hex", "expect", "must_reject", "expect_absent",
-            "expect_roundtrip_hex", "expect_scaled", "canonical")
+            "expect_roundtrip_hex", "expect_scaled", "canonical",
+            "no_roundtrip")
 
 
 def digest(case):

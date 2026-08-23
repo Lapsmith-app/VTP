@@ -266,33 +266,38 @@ FAULTS = {
     "seq_repeats": "SPEC.md §8.2 — the sequence number does not advance",
     "detail_on_error": "SPEC.md §9 — a refused request answered with a detail",
     "no_tag_echo": "SPEC.md §9 — the response tag does not echo the request",
-    "timesync_single_reading": "SPEC.md §9.7 — t_device_rx and t_device_tx are one reading",
+    "timesync_single_reading": "SPEC.md §9.5 — t_device_rx and t_device_tx are one reading",
     "monitor_accepts_partial": "SPEC.md §13.4 — an incomplete write is accepted",
     "monitor_accepts_duplicate_slot": "SPEC.md §13.4 — a slot twice in one write is accepted",
-    "subs_survive_reconnect": "SPEC.md §9.2 — the subscription table is not cleared",
-    "unknown_handle_ok": "SPEC.md §9.2 — an unknown handle is answered ok",
-    "stream_before_subscribe": "SPEC.md §9.2 — CAN frames arrive with no subscription installed",
+    "subs_survive_reconnect": "SPEC.md §9.1 — the subscription table is not cleared",
+    "duplicate_consumes_slot": "SPEC.md §9.1 — re-installing the same id and mask silently takes a second slot",
+    "duplicate_double_entry": "SPEC.md §9.1 — re-installing the same id and mask creates a second removable entry",
+    "table_full_early": "SPEC.md §9.1 — table_full arrives one subscription before the capacity Info declares",
+    "overlap_wrong_governor": "SPEC.md §9.2 — the least specific matching mask governs the frame",
+    "tie_break_latest": "SPEC.md §9.2 — equally specific masks tie-break to the latest installed",
+    "can_duplicate_across_batches": "SPEC.md §9.2 — a forwarded frame is repeated in a later batch",
+    "unknown_subscription_ok": "SPEC.md §9.1 — an unknown id and mask is answered ok",
+    "stream_before_subscribe": "SPEC.md §9.1 — CAN frames arrive with no subscription installed",
     "caps_reserved_bits": "SPEC.md §4 — a reserved capability bit is set",
     "absent_field_nonzero": "SPEC.md §5.1 — a field whose validity bit is clear is not zero",
     "clock_per_stream": "SPEC.md §8.1 — the streams are not on one clock",
     "drops_a_response": "SPEC.md §9 — a request is silently discarded rather than answered",
     "pipelines_silently": "SPEC.md §9 — a second request is applied instead of answered busy",
     "busy_but_applied": "SPEC.md §9 — a request answered busy is applied anyway",
-    "phy_half_reported": "SPEC.md §9.1 — the phy validity bit is set with only one PHY known",
-    "list_reserved_nonzero": "SPEC.md §9.5 — a reserved page byte is not zero",
+    "list_reserved_nonzero": "SPEC.md §13.3 — a reserved declaration byte is not zero",
     "missing_characteristic": "SPEC.md §4.1 — a characteristic is absent rather than inert",
     "extra_characteristic": "SPEC.md §4.1 — the service carries a characteristic it must not",
     "inert_cccd_rejected": "SPEC.md §4.1 — a CCCD write on an inert stream is refused",
     "implication_broken": "SPEC.md §4.1 — a capability bit without the bit it requires",
     "opcode_capability_late": "SPEC.md §9 — an unowned opcode answered bad_params, not unsupported_opcode",
-    "rate_not_applied": "SPEC.md §9.8 — a rate answered ok and never applied",
+    "rate_not_applied": "SPEC.md §9.6 — a rate answered ok and never applied",
     "info_reserved_nonzero": "SPEC.md §4 — a reserved byte of Info is not zero",
     # Everything below is a defect a device could be shipping today and this
     # harness would have said nothing about, because no seeded fault ever made
     # the check that covers it fail. See harness/selftest.py: the reverse
     # coverage gate is what turned each of these from an untested claim into a
     # tested one.
-    "timesync_unsupported": "SPEC.md §9.7 — TIME_SYNC answered unsupported_opcode, an opcode with no owning capability",
+    "timesync_unsupported": "SPEC.md §9.5 — TIME_SYNC answered unsupported_opcode, an opcode with no owning capability",
     "monitor_paged_declaration": "SPEC.md §13.3 — MONITOR_LIST answers the superseded paged declaration",
     "monitor_accepts_bad_length": "SPEC.md §13.4 — a write whose length contradicts its count is accepted",
     "monitor_rejects_unknown_slot": "SPEC.md §13.1 — a value for an undeclared slot is refused rather than ignored",
@@ -300,23 +305,20 @@ FAULTS = {
     "unallocated_opcode_ok": "SPEC.md §9 — an opcode this version does not define is answered ok",
     "info_truncated": "SPEC.md §4 — Info is shorter than the record it must be",
     "info_major_wrong": "SPEC.md §4 — protocol_major disagrees with the service UUID's major",
-    "notify_bytes_below_min": "SPEC.md §4 — max_notify_bytes is below what the minimum ATT MTU carries",
     "capacity_zero": "SPEC.md §4.1 — a declared role publishes a capacity of zero",
     "advert_no_service_uuid": "SPEC.md §3.3 — the advertisement omits the VTP/1 service UUID",
     "advert_caps_disagree": "SPEC.md §3.3 — advertised Service Data contradicts Info",
-    "link_mtu_disagrees": "SPEC.md §9.1 — the device reports an ATT MTU the host did not negotiate",
     "clock_steps_backwards": "SPEC.md §8.1 — the device clock jumps backwards while connected",
     "stream_truncated": "SPEC.md §5 — a notification is shorter than the record it carries",
     "seq_survives_reconnect": "SPEC.md §8.2 — sequence numbers continue rather than restarting at 0",
-    "list_beyond_end_errors": "SPEC.md §9.5 — a CAN_LIST start past the end is an error rather than an empty page",
-    "rate_ceiling_ignored": "SPEC.md §9.4 — a rate above the declared maximum is accepted, not refused rate_exceeded",
+    "rate_ceiling_ignored": "SPEC.md §9.6 — a rate above the declared maximum is accepted, not refused rate_exceeded",
     "info_rate_above_ceiling": "SPEC.md §4 — Info publishes a current rate above its own maximum",
     "inert_control_accepts_writes": "SPEC.md §4.1 — a device that has not declared Control answers writes to it",
-    "power_unsupported": "SPEC.md §9.9 — GET_POWER refused by a device that declares the capability owning it",
-    "power_percent_impossible": "SPEC.md §9.9 — a percent above 100, which a receiver rejects rather than clamps",
-    "power_stale_behind_bit": "SPEC.md §9.9 — a charge reading left in the bytes with its validity bit clear",
-    "power_declared_but_empty": "SPEC.md §9.9 — the `power` capability declared and nothing reported valid",
-    "power_reserved_nonzero": "SPEC.md §9.9 — the reserved byte of power_state is not zero",
+    "power_unsupported": "SPEC.md §9.7 — GET_POWER refused by a device that declares the capability owning it",
+    "power_percent_impossible": "SPEC.md §9.7 — a percent above 100, which a device MUST NOT emit and a client MUST NOT clamp",
+    "power_stale_behind_bit": "SPEC.md §9.7 — a charge reading left in the bytes with its validity bit clear",
+    "power_declared_but_empty": "SPEC.md §9.7 — the `power` capability declared and nothing reported valid",
+    "power_reserved_nonzero": "SPEC.md §9.7 — the reserved byte of power_state is not zero",
     # SPEC.md §14. Every one of these is a defect that costs a client its
     # transfer without ever refusing a request, which is what makes the role
     # worth checking at all: the bulk path carries no errors by construction,
@@ -328,8 +330,9 @@ FAULTS = {
     "aid_applied_with_missing_index": "SPEC.md §14.4 — an applied transfer still reports a missing chunk",
     "aid_reports_first_chunk_missing": "SPEC.md §14.4 — the gap is always reported as chunk 0",
     "aid_ignores_crc": "SPEC.md §14.4 — a transfer whose CRC does not match is applied anyway",
-    "aid_abort_keeps_session": "SPEC.md §14.4 — an aborted transfer is still committable",
-    "aid_accepts_count_mismatch": "SPEC.md §14.4 — a commit whose chunk count contradicts the transfer is applied instead of refused",
+    "aid_begin_keeps_transfer": "SPEC.md §14.3 — a BEGIN over an open transfer is answered ok and the old transfer kept",
+    "aid_token_reused": "SPEC.md §14.3 — a superseding BEGIN reuses the discarded transfer's token",
+    "aid_token_ignored": "SPEC.md §14.3 — a chunk naming the wrong token is accepted instead of ignored",
 }
 
 
@@ -366,6 +369,9 @@ class LoopbackTransport(Transport):
         self._connected = False
         self._stale_subs = {}
         self._seen_a_connection = False
+        self._dup_entries = {}
+        self._dup_shunt = 0
+        self._pending_dup_unsub = None
 
     # -- lifecycle --------------------------------------------------------
 
@@ -417,7 +423,7 @@ class LoopbackTransport(Transport):
         self.device.set_negotiated_mtu(self._mtu)
         self.device.on_connect()
         if "subs_survive_reconnect" in self.faults and self._stale_subs:
-            # SPEC.md §9.2 — the table MUST be cleared when the link drops. A
+            # SPEC.md §9.1 — the table MUST be cleared when the link drops. A
             # device that keeps it hands the next client state it never
             # installed and cannot account for.
             self.device._subscriptions.update(self._stale_subs)
@@ -431,8 +437,56 @@ class LoopbackTransport(Transport):
         if "stream_before_subscribe" in self.faults:
             # A device that streams what nobody asked for: one subscription
             # matching every identifier, installed by the device itself.
-            self.device._subscriptions[self.device._allocate_handle()] = {
-                "id": 0, "mask": 0, "mode": 0, "arg": 0, "per_id": {}}
+            self.device._subscriptions[(0, 0)] = {
+                "mode": 0, "arg": 0, "order": 0, "per_id": {}}
+        if "overlap_wrong_governor" in self.faults:
+            # SPEC.md §9.2 -- the LEAST specific matching mask governs. The
+            # frames themselves stay well-formed; only which subscription's
+            # mode shapes them changes, which is exactly why the check needs
+            # the two subscriptions to differ in mode to see it.
+            dev = self.device
+            def least_specific(cid, _dev=dev):
+                matches = [(k, sub) for k, sub in _dev._subscriptions.items()
+                           if (cid & k[1]) == (k[0] & k[1])]
+                if not matches:
+                    return None
+                return min(matches,
+                           key=lambda ks: (bin(ks[0][1]).count("1"),
+                                           ks[1]["order"]))[1]
+            dev._governing = least_specific
+        if "tie_break_latest" in self.faults:
+            # SPEC.md §9.2 -- specificity still wins, but ties go to the
+            # LATEST installed subscription instead of the earliest.
+            dev = self.device
+            def latest_wins(cid, _dev=dev):
+                matches = [(k, sub) for k, sub in _dev._subscriptions.items()
+                           if (cid & k[1]) == (k[0] & k[1])]
+                if not matches:
+                    return None
+                return min(matches,
+                           key=lambda ks: (-bin(ks[0][1]).count("1"),
+                                           -ks[1]["order"]))[1]
+            dev._governing = latest_wins
+        if "can_duplicate_across_batches" in self.faults:
+            # SPEC.md §9.2 -- a forwarded frame is emitted again in a LATER
+            # batch, bus-arrival timestamp and all. The held frame is only
+            # replayed once a flush has closed its own batch, so the copy is
+            # guaranteed cross-batch -- the shape a per-notification dedup
+            # set cannot see, and passed for exactly that reason. Replayed
+            # while the new batch is still empty, so it becomes that batch's
+            # t_base and keeps its original timestamp on the wire.
+            dev = self.device
+            orig_frames = dev._due_can_frames
+            state = {"held": None}
+            def duplicating(now, _dev=dev, _orig=orig_frames, _st=state):
+                if _st["held"] is not None and _dev._can_batch_t0 is None:
+                    yield _st["held"]
+                    _st["held"] = None
+                frames = list(_orig(now))
+                yield from frames
+                if frames and _st["held"] is None:
+                    _st["held"] = dict(frames[-1])
+            dev._due_can_frames = duplicating
         self._connected = True
         self._owed = False
         self._pump = asyncio.create_task(self._run())
@@ -505,10 +559,6 @@ class LoopbackTransport(Transport):
             if "info_major_wrong" in self.faults:
                 info[refdec.offset("info", "protocol_major")] = \
                     refdec.PROTOCOL_MAJOR + 1
-            if "notify_bytes_below_min" in self.faults:
-                struct.pack_into("<H", info,
-                                 refdec.offset("info", "max_notify_bytes"),
-                                 refdec.MIN_NOTIFY_BYTES - 1)
             if "capacity_zero" in self.faults:
                 # SPEC.md §4.1 — a capacity of zero means none, not
                 # unspecified, so this is a device that declares a role and
@@ -547,6 +597,12 @@ class LoopbackTransport(Transport):
         if uuid == refdec.CHAR["monitor_values"]:
             return self._monitor_write(data)
         if uuid == refdec.CHAR["aiding"]:
+            # SPEC.md §14.3 -- a chunk whose token the device never reads: it
+            # is rewritten to whatever transfer is open, so a stale chunk
+            # from a superseded transfer lands instead of being ignored.
+            if "aid_token_ignored" in self.faults and len(data) >= 1 and \
+                    getattr(self.device, "_aid", None):
+                data = bytes([self.device._aid["token"]]) + bytes(data[1:])
             # SPEC.md §14.3 -- a Write Command. Nothing comes back, including
             # when the device discards it, so the reason is dropped here
             # exactly as a real peripheral drops it.
@@ -596,7 +652,7 @@ class LoopbackTransport(Transport):
             # device without the capability owes every write -- and a device
             # that accepts silently is the harder half to notice.
             return
-        # SPEC.md §9.6 -- deliverability is decided BEFORE dispatch. With
+        # SPEC.md §9.4 -- deliverability is decided BEFORE dispatch. With
         # indications disabled the answer has nowhere to go, so the request MUST
         # NOT take effect and MUST NOT be counted as received.
         if refdec.CHAR["control"] not in self._subs:
@@ -607,14 +663,80 @@ class LoopbackTransport(Transport):
             request = self._parse_leniently(request)
         request = self._indulge_aiding(request)
 
-        # SPEC.md §14.4 -- the abort is answered ok and the transfer is kept.
-        # Seeded ahead of dispatch because the defect is that the device never
-        # acts on it, which is not something a corrupted RESPONSE can model.
-        if "aid_abort_keeps_session" in self.faults and len(request) >= 2 and \
-                request[0] == refdec.OPCODE["GNSS_AID_ABORT"]:
+        # SPEC.md §14.3 -- a BEGIN over an open transfer MUST discard it; this
+        # device answers ok and keeps the old one, chunks and all. Seeded
+        # ahead of dispatch because the defect is that the device never acts
+        # on the request, which a corrupted RESPONSE cannot model. The reply
+        # echoes the OLD transfer's chunk_bytes, exactly as such a device
+        # would. Gated on the old transfer actually HOLDING a chunk, so only
+        # the check that leaves one there -- aiding.begin_supersedes -- meets
+        # it, rather than every check that opens a transfer.
+        if "aid_begin_keeps_transfer" in self.faults and len(request) >= 2 and \
+                request[0] == refdec.OPCODE["GNSS_AID_BEGIN"] and \
+                getattr(self.device, "_aid", None) and \
+                self.device._aid.get("chunks"):
+            import vtp1_encode as _enc
+            detail = _enc.encode_aid_begin_result(
+                {"token": self.device._aid["token"],
+                 "chunk_bytes": self.device._aid["chunk_bytes"]})
             self._deliver_control(bytes([request[0], request[1],
-                                         refdec.STATUS_VALUE["ok"]]))
+                                         refdec.STATUS_VALUE["ok"]]) + detail)
             return
+
+        # SPEC.md §14.3 -- the superseding BEGIN takes the SAME token the
+        # discarded transfer had, so a stale chunk still queued on another
+        # EATT bearer is accepted into the new transfer. Gated on the old
+        # transfer holding a chunk, like the fault above, so only the check
+        # that stages that situation meets it. The device state is rewritten
+        # after dispatch, below, so the reuse is real and not cosmetic.
+        if "aid_token_reused" in self.faults and len(request) >= 2 and \
+                request[0] == refdec.OPCODE["GNSS_AID_BEGIN"] and \
+                getattr(self.device, "_aid", None) and \
+                self.device._aid.get("chunks"):
+            self._aid_reuse_token = self.device._aid["token"]
+        else:
+            self._aid_reuse_token = None
+
+        # SPEC.md §9.1 -- the duplicate-install family. Each takes effect only
+        # on a well-formed subscribe naming an (id, mask) the table already
+        # holds, so the checks that stage that situation are the only ones
+        # that meet them.
+        sub_key = self._parse_subscribe(request)
+        if sub_key is not None and sub_key in getattr(
+                self.device, "_subscriptions", {}):
+            if "duplicate_consumes_slot" in self.faults:
+                # The old entry is shunted to a name nothing matches and
+                # nothing can remove, so the re-install lands in a fresh
+                # entry: one slot silently gone, visible only to arithmetic
+                # against Info's declared capacity.
+                sub = self.device._subscriptions.pop(sub_key)
+                self._dup_shunt += 1
+                tomb = (0x3FF00000 + self._dup_shunt, refdec.MASK_EXACT)
+                self.device._subscriptions[tomb] = sub
+            if "duplicate_double_entry" in self.faults:
+                # The re-install will create a second REMOVABLE entry: the
+                # device updates in place, but this transport then honours
+                # one extra removal, which is what such a table looks like
+                # from outside.
+                self._dup_entries[sub_key] = self._dup_entries.get(sub_key, 0) + 1
+        if "table_full_early" in self.faults and sub_key is not None and \
+                sub_key not in getattr(self.device, "_subscriptions", {}):
+            slots = getattr(self.device, "CAN_SUBSCRIPTION_SLOTS", None) or \
+                _load_peripheral().CAN_SUBSCRIPTION_SLOTS
+            if len(self.device._subscriptions) == slots - 1:
+                # Refused one short of the capacity Info declares: the
+                # classic off-by-one, and exactly the answer a device with a
+                # leaked slot gives.
+                self._deliver_control(bytes(
+                    [request[0], request[1],
+                     refdec.STATUS_VALUE["table_full"]]))
+                return
+        if "duplicate_double_entry" in self.faults and len(request) >= 10 and \
+                request[0] == refdec.OPCODE["CAN_UNSUBSCRIBE"]:
+            cid, mask = struct.unpack_from("<II", request, 2)
+            self._pending_dup_unsub = (cid, mask)
+        else:
+            self._pending_dup_unsub = None
 
         # SPEC.md §9 -- a client has at most ONE request outstanding, and a
         # device meeting one that pipelines anyway answers `busy` and MUST NOT
@@ -634,7 +756,7 @@ class LoopbackTransport(Transport):
         if response is None:
             return
         if "drops_a_response" in self.faults and len(request) == 2 and \
-                request[0] == refdec.OPCODE["GET_LINK_PARAMS"]:
+                request[0] == refdec.OPCODE["TIME_SYNC"]:
             # Only the well-formed one, so exactly one check meets it. A device
             # that drops responses drops them for every request, and any check
             # making that request would catch it -- which would make WHICH check
@@ -662,6 +784,20 @@ class LoopbackTransport(Transport):
         cb = self._subs.get(refdec.CHAR["control"])
         if cb is not None:
             cb(response, asyncio.get_running_loop().time())
+
+    def _parse_subscribe(self, request):
+        """(id, mask) of a well-formed subscribe request, else None."""
+        if len(request) < 2:
+            return None
+        if request[0] == refdec.OPCODE["CAN_SUBSCRIBE"] and \
+                len(request) == 2 + refdec.OPCODE_PARAM_SIZE["CAN_SUBSCRIBE"]:
+            (cid,) = struct.unpack_from("<I", request, 2)
+            return (cid, refdec.MASK_EXACT)
+        if request[0] == refdec.OPCODE["CAN_SUBSCRIBE_MASK"] and \
+                len(request) == 2 + refdec.OPCODE_PARAM_SIZE["CAN_SUBSCRIBE_MASK"]:
+            cid, mask = struct.unpack_from("<II", request, 2)
+            return (cid, mask)
+        return None
 
     def _parse_leniently(self, request):
         """SPEC.md §9 — the device that takes what it was given and copes.
@@ -695,8 +831,6 @@ class LoopbackTransport(Transport):
             return request
         if request[0] == refdec.OPCODE["GNSS_AID_BEGIN"]:
             return self._indulge_begin(request)
-        if request[0] == refdec.OPCODE["GNSS_AID_COMMIT"]:
-            return self._indulge_commit(request)
         return request
 
     def _indulge_begin(self, request):
@@ -715,32 +849,11 @@ class LoopbackTransport(Transport):
                 total = ceiling
         return bytes(request[:2]) + struct.pack("<BI", fmt, total)
 
-    def _indulge_commit(self, request):
-        """SPEC.md §14.4 — the count that contradicts the transfer, taken anyway.
-
-        The device is handed the number it was going to compute for itself, so
-        it never sees the disagreement `chunks` exists to surface. A client
-        that miscounted is told its transfer succeeded.
-        """
-        if "aid_accepts_count_mismatch" not in self.faults:
-            return request
-        if len(request) != 2 + refdec.OPCODE_PARAM_SIZE["GNSS_AID_COMMIT"]:
-            return request
-        transfer = getattr(self.device, "_aid", None)
-        if not transfer:
-            # No open transfer, so the refusal on the way is about the session
-            # and not the count. Left alone, or this fault would also break
-            # the check that asserts an aborted session cannot be committed.
-            return request
-        session, _chunks, crc = struct.unpack_from("<BHI", request, 2)
-        expected = self.device._aid_expected_chunks(transfer)
-        return bytes(request[:2]) + struct.pack("<BHI", session, expected, crc)
-
     def _corrupt_response(self, response, request):
         opcode, status = response[0], response[2]
         if "timesync_unsupported" in self.faults and \
                 opcode == refdec.OPCODE["TIME_SYNC"]:
-            # A device that never implemented §9.7 at all, which is what a
+            # A device that never implemented §9.5 at all, which is what a
             # client meets on firmware predating it. The detail goes with it:
             # §9 allows one only on ok.
             return bytearray(response[:2]
@@ -756,20 +869,10 @@ class LoopbackTransport(Transport):
             return bytearray(response[:3]
                              + struct.pack("<HHBB", count, 0, count, 0)
                              + entries)
-        if "list_beyond_end_errors" in self.faults and \
-                opcode == refdec.OPCODE["CAN_LIST"] and status == 0 and \
-                len(response) >= 3 + refdec.size("can_list_page") and \
-                response[3 + refdec.offset("can_list_page", "count")] == 0:
-            # §9.5 — a start past the end is ok with count zero, not an error.
-            # A client walking the table cannot then tell "you have read it
-            # all" from "that request was wrong", and the detail goes with the
-            # refusal because §9 allows one only on ok.
-            return bytearray(response[:2]
-                             + bytes([refdec.STATUS_VALUE["bad_params"]]))
         if "rate_ceiling_ignored" in self.faults and opcode in (
                 refdec.OPCODE["GPS_SET_RATE"], refdec.OPCODE["IMU_SET_RATE"]) \
                 and status == refdec.STATUS_VALUE["rate_exceeded"]:
-            # §9.4 — the ceiling Info publishes, accepted past. The device then
+            # §9.6 — the ceiling Info publishes, accepted past. The device then
             # runs at a rate it told the client it could not reach, and every
             # buffer the client sized from that ceiling is too small.
             response[2] = refdec.STATUS_VALUE["ok"]
@@ -799,6 +902,16 @@ class LoopbackTransport(Transport):
             # missing rather than at the number that was wrong.
             base = 3 + refdec.offset("aid_begin_result", "chunk_bytes")
             struct.pack_into("<H", response, base, self.mtu + 1)
+        if getattr(self, "_aid_reuse_token", None) is not None and \
+                status == 0 and opcode == refdec.OPCODE["GNSS_AID_BEGIN"]:
+            # The second half of aid_token_reused: the response carries the
+            # discarded transfer's token, and the device's own state is set
+            # to match, so a stale chunk with that token genuinely lands.
+            response[3 + refdec.offset("aid_begin_result", "token")] = \
+                self._aid_reuse_token
+            if getattr(self.device, "_aid", None):
+                self.device._aid["token"] = self._aid_reuse_token
+            self._aid_reuse_token = None
         if opcode == refdec.OPCODE["GNSS_AID_COMMIT"] and status == 0 and \
                 len(response) >= 3 + refdec.size("aid_commit_result"):
             base = 3
@@ -832,29 +945,23 @@ class LoopbackTransport(Transport):
             response[1] = (response[1] + 1) & 0xFF
         if "detail_on_error" in self.faults and status != 0:
             response += b"\x00\x00"
-        if "unknown_handle_ok" in self.faults and \
+        if "duplicate_double_entry" in self.faults and \
+                self._pending_dup_unsub is not None and \
                 opcode == refdec.OPCODE["CAN_UNSUBSCRIBE"] and \
-                status == refdec.STATUS_VALUE["unknown_handle"]:
+                status == refdec.STATUS_VALUE["unknown_subscription"] and \
+                self._dup_entries.get(self._pending_dup_unsub, 0) > 0:
+            # The second entry the duplicate install created, coming out of
+            # the table: the device already removed the first, and this
+            # removal finds the copy.
+            self._dup_entries[self._pending_dup_unsub] -= 1
+            response[2] = refdec.STATUS_VALUE["ok"]
+        if "unknown_subscription_ok" in self.faults and \
+                opcode == refdec.OPCODE["CAN_UNSUBSCRIBE"] and \
+                status == refdec.STATUS_VALUE["unknown_subscription"]:
             response[2] = 0
         if "timesync_single_reading" in self.faults and \
                 opcode == refdec.OPCODE["TIME_SYNC"] and status == 0:
             struct.pack_into("<Q", response, 3 + 8, *struct.unpack_from("<Q", response, 3))
-        if "phy_half_reported" in self.faults and \
-                opcode == refdec.OPCODE["GET_LINK_PARAMS"] and status == 0:
-            base = 3
-            validity = struct.unpack_from("<H", response, base)[0]
-            validity |= 1 << refdec.bit("link_validity", "phy")
-            struct.pack_into("<H", response, base, validity)
-            response[base + refdec.offset("link_params", "phy_tx")] = 1
-            response[base + refdec.offset("link_params", "phy_rx")] = 0
-        if "link_mtu_disagrees" in self.faults and \
-                opcode == refdec.OPCODE["GET_LINK_PARAMS"] and status == 0:
-            # §9.1 — the one field in this record the harness can check against
-            # something independent. A device wrong about its own MTU is a
-            # device whose other link_params fields nobody can trust either.
-            base = 3 + refdec.offset("link_params", "att_mtu")
-            struct.pack_into("<H", response, base,
-                             struct.unpack_from("<H", response, base)[0] + 4)
         if "power_unsupported" in self.faults and \
                 opcode == refdec.OPCODE["GET_POWER"]:
             # A device whose Info declares bit 8 and whose control plane has
@@ -869,10 +976,10 @@ class LoopbackTransport(Transport):
             base = 3
             pbit = refdec.bit("power_validity", "percent")
             if "power_percent_impossible" in self.faults:
-                # §9.9 -- 200%. A client that clamps it to 100 shows a full
-                # battery on a device that has lost track of its own pack, so
-                # the record is rejected whole and this must surface as a
-                # decode failure rather than a reading.
+                # §9.7 -- 200%. The record is well formed, so it DECODES; the
+                # defect surfaces as a value the harness must flag, and a
+                # client that clamps it to 100 shows a full battery on a
+                # device that has lost track of its own pack.
                 response[base + refdec.offset("power_state", "validity")] |= \
                     1 << refdec.bit("power_validity", "percent")
                 response[base + refdec.offset("power_state", "percent")] = 200
@@ -894,15 +1001,13 @@ class LoopbackTransport(Transport):
             response = self._corrupt_capability_refusal(response, request)
         if "rate_not_applied" in self.faults and status == 0 and opcode in (
                 refdec.OPCODE["GPS_SET_RATE"], refdec.OPCODE["IMU_SET_RATE"]):
-            # Answers ok and quietly keeps the rate it had: SPEC.md §9.8's
+            # Answers ok and quietly keeps the rate it had: SPEC.md §9.6's
             # plausible wrong value, where the client believes it asked for
             # something the timestamps then contradict.
             self.device.gps_hz, self.device.imu_hz = self._rates_before
-        if "list_reserved_nonzero" in self.faults and status == 0 and opcode in (
-                refdec.OPCODE["CAN_LIST"], refdec.OPCODE["MONITOR_LIST"]):
-            record = ("can_list_page" if opcode == refdec.OPCODE["CAN_LIST"]
-                      else "monitor_declaration")
-            response[3 + refdec.offset(record, "reserved")] = 1
+        if "list_reserved_nonzero" in self.faults and status == 0 and \
+                opcode == refdec.OPCODE["MONITOR_LIST"]:
+            response[3 + refdec.offset("monitor_declaration", "reserved")] = 1
         return response
 
     async def subscribe(self, uuid, callback):

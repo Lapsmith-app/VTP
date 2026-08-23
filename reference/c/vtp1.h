@@ -115,9 +115,9 @@ typedef struct {
     uint16_t gps_rate_hz, gps_max_rate_hz, can_subscription_slots;
     uint32_t can_max_frames_per_s;
     uint16_t imu_rate_hz, imu_max_rate_hz;
-    uint8_t  reserved_20;   /* was can_max_payload; SPEC.md 4.2 derives it */
+    uint8_t  reserved_20;   /* was can_max_payload; SPEC.md 4.1 derives it */
     uint8_t  clock_flags;
-    uint16_t max_notify_bytes;
+    uint16_t reserved_22;   /* was max_notify_bytes; SPEC.md 2 removed it */
 } vtp_info_t;
 
 int vtp_decode_info(const uint8_t *buf, size_t len,
@@ -125,43 +125,14 @@ int vtp_decode_info(const uint8_t *buf, size_t len,
 
 /* SPEC.md §4.1 -- non-zero when this capability word satisfies the profile
  * matrix: every implication met, and every capacity field zero behind a
- * cleared bit. `info` may be NULL to check only the implications, which is
- * what an ENCODER has before it has written anything. On a false result `why`
- * (when not NULL) names the bit or field that failed. */
+ * cleared bit. Not called by the decoder: an Info that breaks the matrix
+ * decodes, and this is what a CLIENT calls to surface the contradiction (and
+ * what the encoder mirrors to refuse producing one). `info` may be NULL to
+ * check only the implications. On a false result `why` (when not NULL) names
+ * the bit or field that failed. */
 int vtp_capabilities_coherent(uint32_t capabilities,
                               const uint8_t *info, size_t len,
                               const char **why);
-
-/* ---- CAN subscription table ------------------------------------------ */
-
-/* SPEC.md §9.5 — one page of the installed table, as CAN_LIST returns it. */
-typedef struct {
-    uint16_t total;     /* subscriptions installed, across all pages */
-    uint16_t index;     /* table index of the first entry in this page */
-    uint8_t  count;
-    uint8_t  reserved;
-} vtp_can_list_page_t;
-
-typedef struct {
-    uint16_t handle;
-    uint32_t id;
-    uint32_t mask;      /* a set bit is a bit of id that must match */
-    uint8_t  mode;
-    uint16_t arg;
-} vtp_can_subscription_t;
-
-/* Non-zero when the mode is one this build recognises. False means UNKNOWN and
- * MUST NOT be read as every_frame. */
-int vtp_sub_mode_known(uint8_t mode);
-
-/* Validates the whole page before yielding anything, as the CAN batch decoder
- * does, so a truncated trailing entry rejects the response rather than
- * half-decoding it. */
-int vtp_decode_can_list(const uint8_t *buf, size_t len,
-                        vtp_can_list_page_t *page, const char **err);
-/* Caller supplies index < page->count; the page must already be validated. */
-void vtp_can_subscription_at(const uint8_t *buf, uint8_t index,
-                             vtp_can_subscription_t *out);
 
 /* ---- Monitor ---------------------------------------------------------- */
 
@@ -219,34 +190,7 @@ void vtp_monitor_value_at(const uint8_t *buf, uint8_t index,
  * lower bound on the magnitude, not a measurement. */
 #define VTP_IMU_FLAG_SATURATED 0x04
 
-/* ---- Link parameters ------------------------------------------------- */
-
-/* SPEC.md §9.1 — the detail of a GET_LINK_PARAMS response. Reporting only:
- * nothing here is negotiated through VTP/1.
- *
- * Every field is gated by a validity bit, because a controller that cannot
- * report a parameter must say so rather than guess. Note that the phy enum has
- * no zero member, so a zeroed phy_tx can never pass for LE 1M. */
-typedef struct {
-    uint16_t validity;
-    uint16_t att_mtu;
-    uint16_t ll_max_tx_octets, ll_max_rx_octets;
-    uint16_t conn_interval;        /* 1.25 ms units */
-    uint16_t peripheral_latency;
-    uint16_t supervision_timeout;  /* 10 ms units */
-    uint8_t  phy_tx, phy_rx;
-} vtp_link_params_t;
-
-static inline int vtp_link_valid(const vtp_link_params_t *l, uint16_t bit) {
-    return (l->validity & bit) != 0;
-}
-
-/* Non-zero when the PHY value is one this build recognises. A false result
- * means UNKNOWN and MUST NOT be treated as any particular PHY. */
-int vtp_phy_known(uint8_t phy);
-
-int vtp_decode_link_params(const uint8_t *buf, size_t len,
-                           vtp_link_params_t *out, const char **err);
+/* ---- Aiding ----------------------------------------------------------- */
 
 /* SPEC.md §14.2 -- what aiding a device accepts, and what it already holds.
  *
@@ -257,8 +201,7 @@ int vtp_decode_link_params(const uint8_t *buf, size_t len,
 typedef struct {
     uint8_t  validity;
     uint8_t  format;
-    uint8_t  flags;
-    uint8_t  reserved_3;   /* Appendix A holds it; MUST be ignored on receive */
+    uint16_t reserved_2;   /* Appendix A holds it; MUST be ignored on receive */
     uint32_t max_bytes;
     int64_t  held_until;   /* ms, Unix epoch -- same as gps_fix.t_utc */
 } vtp_gnss_aid_caps_t;
@@ -269,9 +212,11 @@ static inline int vtp_aid_valid(const vtp_gnss_aid_caps_t *c, uint8_t bit) {
 
 /* SPEC.md §14.3 -- the detail of GNSS_AID_BEGIN. `chunk_bytes` is fixed for
  * the whole transfer so that index-to-offset is arithmetic; without that a
- * device could not place a resent chunk. */
+ * device could not place a resent chunk. `token` names the transfer: EATT
+ * lets a client hold several ATT bearers, ordered only within each, so the
+ * token is what keeps a stale chunk out of the transfer that superseded it. */
 typedef struct {
-    uint8_t  session;
+    uint8_t  token;
     uint16_t chunk_bytes;
     uint8_t  reserved_3;   /* Appendix A holds it; MUST be ignored on receive */
 } vtp_aid_begin_result_t;
@@ -322,7 +267,7 @@ int vtp_decode_control_response(const uint8_t *buf, size_t len,
 
 /* ---- Power ------------------------------------------------------------ */
 
-/* SPEC.md §9.9 -- the detail of a GET_POWER response. Measured when the
+/* SPEC.md §9.7 -- the detail of a GET_POWER response. Measured when the
  * request arrives, so it carries no timestamp of its own.
  *
  * The two fields are gated separately because a device knows them separately:
@@ -347,7 +292,7 @@ int vtp_power_source_known(uint8_t source);
 int vtp_decode_power_state(const uint8_t *buf, size_t len,
                            vtp_power_state_t *out, const char **err);
 
-/* SPEC.md §9.7 -- two readings of the device clock, so a client can take the
+/* SPEC.md §9.5 -- two readings of the device clock, so a client can take the
  * device's own processing time out of the round trip and bound its error. */
 typedef struct {
     uint64_t t_device_rx;

@@ -40,14 +40,17 @@ SECTION_TITLES = {
     "5": "GPS characteristic", "5.1": "GPS validity", "5.2": "Fix type",
     "6": "CAN characteristic", "7": "IMU characteristic",
     "8.1": "The clock", "8.2": "Sequence", "8.3": "Loss",
-    "9": "Control characteristic", "9.1": "Link parameters",
-    "9.2": "CAN subscriptions", "9.3": "Overlapping subscriptions",
-    "9.4": "Load", "9.5": "The subscription table",
-    "9.6": "The request lifecycle", "9.7": "TIME_SYNC", "9.9": "Power",
+    "9": "Control characteristic", "9.1": "CAN subscriptions",
+    "9.2": "Overlapping subscriptions", "9.3": "Load",
+    "9.4": "The request lifecycle", "9.5": "TIME_SYNC",
+    "9.6": "Setting a rate", "9.7": "Power",
     "10": "Security", "12.1": "What the corpus does not cover",
     "13.1": "The device asks; the client supplies",
     "13.2": "Channels", "13.3": "The declaration", "13.4": "Values",
-    "13.5": "Freshness",
+    "13.5": "Freshness", "14": "Aiding characteristic",
+    "14.1": "The device declares; the client supplies",
+    "14.2": "What the device already holds",
+    "14.3": "Opening a transfer, and filling it", "14.4": "Closing it",
 }
 
 

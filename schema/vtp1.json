@@ -174,7 +174,7 @@
         {
           "value": 4,
           "name": "rate_exceeded",
-          "desc": "Requested rate is above gps_max_rate_hz or imu_max_rate_hz (SPEC.md 9.8). Never used for CAN"
+          "desc": "Requested rate is above gps_max_rate_hz or imu_max_rate_hz (SPEC.md 9.6). Never used for CAN"
         },
         {
           "value": 5,
@@ -188,8 +188,8 @@
         },
         {
           "value": 7,
-          "name": "unknown_handle",
-          "desc": "No subscription with that handle"
+          "name": "unknown_subscription",
+          "desc": "No installed subscription with that id and mask"
         }
       ]
     },
@@ -205,16 +205,6 @@
           "value": 1,
           "name": "periodic",
           "desc": "arg = minimum interval, ms"
-        },
-        {
-          "value": 2,
-          "name": "on_change",
-          "desc": "arg = debounce interval, ms"
-        },
-        {
-          "value": 3,
-          "name": "every_nth",
-          "desc": "arg = N"
         }
       ]
     },
@@ -265,26 +255,6 @@
           "value": 9,
           "name": "session_time",
           "desc": "ms"
-        }
-      ]
-    },
-    "phy": {
-      "width": 1,
-      "members": [
-        {
-          "value": 1,
-          "name": "le_1m",
-          "desc": "LE 1M"
-        },
-        {
-          "value": 2,
-          "name": "le_2m",
-          "desc": "LE 2M"
-        },
-        {
-          "value": 3,
-          "name": "le_coded",
-          "desc": "LE Coded"
         }
       ]
     },
@@ -484,19 +454,12 @@
           ]
         },
         {
-          "bit": 7,
-          "name": "on_change_subscriptions",
-          "implies": [
-            "can"
-          ]
-        },
-        {
           "bit": 8,
           "name": "power",
           "implies": [
             "control"
           ],
-          "desc": "Device reports its own power state (\u00a79.9)"
+          "desc": "Device reports its own power state (SPEC.md 9.7)"
         },
         {
           "bit": 9,
@@ -574,33 +537,6 @@
       "reserved_from": 1,
       "reserved_purpose": "Validity for values added in a later minor"
     },
-    "link_validity": {
-      "width": 2,
-      "bits": [
-        {
-          "bit": 0,
-          "name": "att_mtu",
-          "desc": "att_mtu carries the negotiated value"
-        },
-        {
-          "bit": 1,
-          "name": "ll_data_length",
-          "desc": "ll_max_tx_octets and ll_max_rx_octets are valid"
-        },
-        {
-          "bit": 2,
-          "name": "conn_params",
-          "desc": "conn_interval, peripheral_latency and supervision_timeout are all valid"
-        },
-        {
-          "bit": 3,
-          "name": "phy",
-          "desc": "phy_tx and phy_rx are valid"
-        }
-      ],
-      "reserved_from": 4,
-      "reserved_purpose": "Validity for link parameters added in a later minor"
-    },
     "power_validity": {
       "width": 1,
       "bits": [
@@ -617,18 +553,6 @@
       ],
       "reserved_from": 2,
       "reserved_purpose": "Validity for power fields added in a later minor"
-    },
-    "aid_flags": {
-      "width": 1,
-      "bits": [
-        {
-          "bit": 0,
-          "name": "persists",
-          "desc": "Aiding survives a power cycle, so held_until still applies on the next connection"
-        }
-      ],
-      "reserved_from": 1,
-      "reserved_purpose": "Additional aiding properties"
     },
     "aid_validity": {
       "width": 1,
@@ -730,7 +654,7 @@
           "size": 1,
           "type": "u8",
           "reserved": true,
-          "desc": "Was can_max_payload; derived from the capability bits since (SPEC.md 4.2)"
+          "desc": "Was can_max_payload; derived from the capability bits since (SPEC.md 4.1)"
         },
         {
           "name": "clock_flags",
@@ -740,12 +664,12 @@
           "bitmask": "clock_flags"
         },
         {
-          "name": "max_notify_bytes",
+          "name": "reserved_22",
           "offset": 22,
           "size": 2,
           "type": "u16",
-          "units": "bytes",
-          "desc": "Largest notification this device will ever send; a fixed device ceiling, NOT the negotiated ATT payload (SPEC.md 4.2)"
+          "reserved": true,
+          "desc": "Was max_notify_bytes; a notification is bounded by the negotiated ATT payload, which the client's stack already knows (SPEC.md 2)"
         }
       ]
     },
@@ -1249,84 +1173,6 @@
         }
       ]
     },
-    "can_list_page": {
-      "access": "control",
-      "size": 6,
-      "desc": "One page of the CAN subscription table. Followed by `count` can_subscription entries.",
-      "fields": [
-        {
-          "name": "total",
-          "offset": 0,
-          "size": 2,
-          "type": "u16",
-          "desc": "Subscriptions installed, across all pages"
-        },
-        {
-          "name": "index",
-          "offset": 2,
-          "size": 2,
-          "type": "u16",
-          "desc": "Table index of the first entry in this page"
-        },
-        {
-          "name": "count",
-          "offset": 4,
-          "size": 1,
-          "type": "u8",
-          "desc": "Entries in this page"
-        },
-        {
-          "name": "reserved",
-          "offset": 5,
-          "size": 1,
-          "type": "u8",
-          "reserved": true,
-          "desc": "Paging metadata"
-        }
-      ]
-    },
-    "can_subscription": {
-      "access": "control",
-      "size": 13,
-      "desc": "One installed CAN subscription, as the device holds it.",
-      "fields": [
-        {
-          "name": "handle",
-          "offset": 0,
-          "size": 2,
-          "type": "u16",
-          "desc": "Identifies this subscription; assigned by the device"
-        },
-        {
-          "name": "id",
-          "offset": 2,
-          "size": 4,
-          "type": "u32",
-          "desc": "bits 0-28 arbitration id; b29 extended; b30/b31 ignored"
-        },
-        {
-          "name": "mask",
-          "offset": 6,
-          "size": 4,
-          "type": "u32",
-          "desc": "A set bit is a bit of `id` that must match; bits 0-29 only"
-        },
-        {
-          "name": "mode",
-          "offset": 10,
-          "size": 1,
-          "type": "u8",
-          "enum": "sub_mode"
-        },
-        {
-          "name": "arg",
-          "offset": 11,
-          "size": 2,
-          "type": "u16",
-          "desc": "Interpretation depends on `mode`"
-        }
-      ]
-    },
     "control_response": {
       "access": "control",
       "size": 3,
@@ -1379,85 +1225,6 @@
         }
       ]
     },
-    "link_params": {
-      "access": "control",
-      "size": 16,
-      "validity": "link_validity",
-      "desc": "The device's view of the negotiated link. Reported, never negotiated here.",
-      "fields": [
-        {
-          "name": "validity",
-          "offset": 0,
-          "size": 2,
-          "type": "u16",
-          "bitmask": "link_validity"
-        },
-        {
-          "name": "att_mtu",
-          "offset": 2,
-          "size": 2,
-          "type": "u16",
-          "units": "bytes",
-          "valid_bit": "att_mtu"
-        },
-        {
-          "name": "ll_max_tx_octets",
-          "offset": 4,
-          "size": 2,
-          "type": "u16",
-          "units": "octets",
-          "valid_bit": "ll_data_length"
-        },
-        {
-          "name": "ll_max_rx_octets",
-          "offset": 6,
-          "size": 2,
-          "type": "u16",
-          "units": "octets",
-          "valid_bit": "ll_data_length"
-        },
-        {
-          "name": "conn_interval",
-          "offset": 8,
-          "size": 2,
-          "type": "u16",
-          "units": "1.25ms",
-          "valid_bit": "conn_params"
-        },
-        {
-          "name": "peripheral_latency",
-          "offset": 10,
-          "size": 2,
-          "type": "u16",
-          "desc": "Connection events the device may skip",
-          "valid_bit": "conn_params"
-        },
-        {
-          "name": "supervision_timeout",
-          "offset": 12,
-          "size": 2,
-          "type": "u16",
-          "units": "10ms",
-          "valid_bit": "conn_params"
-        },
-        {
-          "name": "phy_tx",
-          "offset": 14,
-          "size": 1,
-          "type": "u8",
-          "enum": "phy",
-          "valid_bit": "phy"
-        },
-        {
-          "name": "phy_rx",
-          "offset": 15,
-          "size": 1,
-          "type": "u8",
-          "enum": "phy",
-          "valid_bit": "phy"
-        }
-      ]
-    },
     "power_state": {
       "access": "control",
       "size": 4,
@@ -1486,7 +1253,7 @@
           "type": "u8",
           "units": "%",
           "valid_bit": "percent",
-          "desc": "Charge remaining, 0..100; a receiver MUST reject a larger value (SPEC.md 9.9)"
+          "desc": "Charge remaining, 0..100; a device MUST NOT emit a larger value (SPEC.md 9.7)"
         },
         {
           "name": "reserved",
@@ -1520,19 +1287,12 @@
           "desc": "The one format this device accepts"
         },
         {
-          "name": "flags",
+          "name": "reserved_2",
           "offset": 2,
-          "size": 1,
-          "type": "u8",
-          "bitmask": "aid_flags"
-        },
-        {
-          "name": "reserved_3",
-          "offset": 3,
-          "size": 1,
-          "type": "u8",
+          "size": 2,
+          "type": "u16",
           "reserved": true,
-          "desc": "Aiding metadata"
+          "desc": "Was aid_flags; aiding metadata"
         },
         {
           "name": "max_bytes",
@@ -1559,11 +1319,11 @@
       "desc": "The detail of a GNSS_AID_BEGIN response. Opens a transfer and fixes its chunking.",
       "fields": [
         {
-          "name": "session",
+          "name": "token",
           "offset": 0,
           "size": 1,
           "type": "u8",
-          "desc": "Identifies this transfer; quoted in every chunk and at commit"
+          "desc": "Names this transfer; echoed in every chunk. MUST differ from the previous transfer's (SPEC.md 14.3)"
         },
         {
           "name": "chunk_bytes",
@@ -1591,7 +1351,7 @@
       "desc": "One chunk of an aiding transfer, written without a response.",
       "fields": [
         {
-          "name": "session",
+          "name": "token",
           "offset": 0,
           "size": 1,
           "type": "u8",
@@ -1654,7 +1414,7 @@
         "name": "CAN_SUBSCRIBE",
         "capability": "can",
         "params": "id:u32, mode:u8, arg:u16",
-        "response": "handle:u16",
+        "response": "",
         "desc": "Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF"
       },
       {
@@ -1662,23 +1422,15 @@
         "name": "CAN_SUBSCRIBE_MASK",
         "capability": "masked_subscriptions",
         "params": "id:u32, mask:u32, mode:u8, arg:u16",
-        "response": "handle:u16"
+        "response": ""
       },
       {
         "value": 4,
         "name": "CAN_UNSUBSCRIBE",
         "capability": "can",
-        "params": "handle:u16",
+        "params": "id:u32, mask:u32",
         "response": "",
-        "desc": "Removes one subscription by the handle its install returned"
-      },
-      {
-        "value": 5,
-        "name": "CAN_LIST",
-        "capability": "can",
-        "params": "start:u16",
-        "response": "can_list_page record",
-        "desc": "One page of the table, starting at index `start`"
+        "desc": "Removes the subscription whose id and mask these are (SPEC.md 9.1)"
       },
       {
         "value": 16,
@@ -1686,7 +1438,7 @@
         "capability": "gps",
         "params": "hz:u16",
         "response": "",
-        "desc": "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8)"
+        "desc": "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.6)"
       },
       {
         "value": 17,
@@ -1702,23 +1454,15 @@
         "capability": "gnss_aiding",
         "params": "format:u8, total_bytes:u32",
         "response": "aid_begin_result record",
-        "desc": "Open a transfer; the response fixes the session and the chunk size (SPEC.md 14.3)"
+        "desc": "Open a transfer; the response fixes the chunk size (SPEC.md 14.3)"
       },
       {
         "value": 19,
         "name": "GNSS_AID_COMMIT",
         "capability": "gnss_aiding",
-        "params": "session:u8, chunks:u16, crc32:u32",
+        "params": "crc32:u32",
         "response": "aid_commit_result record",
-        "desc": "Close a transfer and report what became of it (SPEC.md 14.4)"
-      },
-      {
-        "value": 20,
-        "name": "GNSS_AID_ABORT",
-        "capability": "gnss_aiding",
-        "params": "session:u8",
-        "response": "",
-        "desc": "Discard a transfer in progress and free the session"
+        "desc": "Close the open transfer and report what became of it (SPEC.md 14.4)"
       },
       {
         "value": 32,
@@ -1726,7 +1470,7 @@
         "capability": "imu",
         "params": "hz:u16",
         "response": "",
-        "desc": "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.8)"
+        "desc": "0 stops the stream; unsupported rates answer bad_params (SPEC.md 9.6)"
       },
       {
         "value": 48,
@@ -1734,14 +1478,7 @@
         "capability": null,
         "params": "",
         "response": "time_sync record",
-        "desc": "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.7)"
-      },
-      {
-        "value": 49,
-        "name": "GET_LINK_PARAMS",
-        "capability": null,
-        "params": "",
-        "response": "link_params record"
+        "desc": "The device clock when the request arrived and when the answer was prepared (SPEC.md 9.5)"
       },
       {
         "value": 64,
@@ -1757,7 +1494,7 @@
         "capability": "power",
         "params": "",
         "response": "power_state record",
-        "desc": "What the device knows about its own supply, measured when asked (SPEC.md 9.9)"
+        "desc": "What the device knows about its own supply, measured when asked (SPEC.md 9.7)"
       }
     ]
   }

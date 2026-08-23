@@ -246,136 +246,106 @@ async def _pipelined_second(s, c):
        title="A request refused busy did not take effect")
 async def control_busy_not_applied(s):
     c = _control(s)
-    entries, _, last = await c.pages(refdec.OPCODE["CAN_LIST"], "can_list")
-    if not last.ok:
-        raise Skip(f"CAN_LIST was answered {last.status_name}")
-    applied = [e for e in entries if e["id"] == BUSY_PROBE_ID]
-    if applied:
+    # §9.1 makes (id, mask) the subscription's identity, so removal is also the
+    # probe: an install that was refused busy leaves nothing to remove.
+    probe = await c.unsubscribe_can(BUSY_PROBE_ID)
+    if probe.ok:
         # The failure the whole lifecycle is built to prevent: the client is
         # told the request was refused, the device did it anyway, and the two
         # disagree about the device's state for as long as the link lasts.
         raise Fail(
-            f"a subscription written while the device owed a response is "
-            f"installed as handle {applied[0]['handle']}. A device MUST NOT "
-            f"apply a request it answers busy",
-            entry=applied[0])
+            "a subscription written while the device owed a response was "
+            "installed. A device MUST NOT apply a request it answers busy",
+            response=probe.raw.hex())
+    if probe.status != refdec.STATUS_VALUE["unknown_subscription"]:
+        raise Skip(f"the probe unsubscribe was answered {probe.status_name}, "
+                   f"so whether the busy request took effect cannot be told")
 
 
 # ---------------------------------------------------------------------------
 # CAN subscriptions
 # ---------------------------------------------------------------------------
 
-@check(id="can.subscribe_handle", section="9.2", phase="control", severity="MUST",
+@check(id="can.subscribe_ok", section="9.1", phase="control", severity="MUST",
        requires=("control", "can"),
-       title="Installing a subscription returns a handle")
-async def can_subscribe_handle(s):
+       title="Installing a subscription is answered ok with no detail")
+async def can_subscribe_ok(s):
     c = _control(s)
     response = await c.subscribe_can(PROBE_ID)
     if not response.ok:
         raise Fail(f"CAN_SUBSCRIBE was answered {response.status_name}",
                    response=response.raw.hex())
-    if len(response.detail) != 2:
-        raise Fail(f"the handle detail is {len(response.detail)} bytes; 9 "
-                   f"defines handle:u16", detail=response.detail.hex())
-    handle = struct.unpack("<H", response.detail)[0]
-    s.state["probe_handle"] = handle
-    s.state.setdefault("installed", {})[PROBE_ID] = handle
+    if response.detail:
+        raise Fail(f"CAN_SUBSCRIBE answered ok with {len(response.detail)} "
+                   f"detail byte(s); §9 gives it none",
+                   detail=response.detail.hex())
+    s.state["probe_installed"] = True
+    s.state.setdefault("installed", {})[PROBE_ID] = refdec.MASK_EXACT
 
 
-@check(id="can.subscribe_idempotent", section="9.2", phase="control",
+@check(id="can.subscribe_idempotent", section="9.1", phase="control",
        severity="MUST", requires=("control", "can"),
        title="Re-installing the same id and mask updates in place")
 async def can_subscribe_idempotent(s):
     c = _control(s)
-    handle = s.state.get("probe_handle")
-    if handle is None:
+    if not s.state.get("probe_installed"):
         raise Skip("the first subscription did not install")
     response = await c.subscribe_can(PROBE_ID, mode=0, arg=0)
     if not response.ok:
+        # table_full here is the specific failure §9.1 rules out: the same
+        # (id, mask) MUST update in place, so a client that reprograms
+        # unconditionally on every connection -- which §4 already forces on
+        # it -- can never exhaust the table.
         raise Fail(f"re-installing an identical subscription was answered "
-                   f"{response.status_name}", response=response.raw.hex())
-    again = struct.unpack("<H", response.detail)[0]
-    if again != handle:
+                   f"{response.status_name}; the same id and mask MUST update "
+                   f"in place rather than consume a slot",
+                   response=response.raw.hex())
+    # `ok` alone cannot tell an update-in-place from a device that quietly
+    # created a second entry -- both answer ok. The table can: remove the
+    # subscription once, and a device that updated in place has nothing left
+    # under that name, so a second removal MUST find nothing. (Whether the
+    # duplicate consumed a physical SLOT is can.table_full's arithmetic.)
+    first = await c.unsubscribe_can(PROBE_ID)
+    if not first.ok:
+        raise Fail(f"removing the twice-installed subscription was answered "
+                   f"{first.status_name}", response=first.raw.hex())
+    second = await c.unsubscribe_can(PROBE_ID)
+    if second.ok:
+        s.state.pop("probe_installed", None)
+        s.state.get("installed", {}).pop(PROBE_ID, None)
         raise Fail(
-            f"the same id and mask returned handle {again}, not {handle}. A "
-            f"client that reprograms unconditionally on every connection -- "
-            f"which §4 already forces on it -- would exhaust the table",
-            first=handle, second=again)
+            "the subscription came out of the table twice, so installing the "
+            "same id and mask twice created two entries. §9.1 makes "
+            "(id, mask) the subscription's identity: the second install MUST "
+            "update the first in place",
+            response=second.raw.hex())
+    # Put the table back the way can.subscribe_ok left it, for the checks
+    # that rely on the probe being installed.
+    redo = await c.subscribe_can(PROBE_ID)
+    if not redo.ok:
+        s.state.pop("probe_installed", None)
+        s.state.get("installed", {}).pop(PROBE_ID, None)
+        raise Skip(f"could not re-install the probe subscription afterwards: "
+                   f"{redo.status_name}")
 
 
-@check(id="can.unknown_handle", section="9.2", phase="control", severity="MUST",
-       requires=("control", "can"), adversarial=True,
-       title="Unsubscribing a handle that names nothing is refused")
-async def can_unknown_handle(s):
+@check(id="can.unknown_subscription", section="9.1", phase="control",
+       severity="MUST", requires=("control", "can"), adversarial=True,
+       title="Unsubscribing an id and mask that name nothing is refused")
+async def can_unknown_subscription(s):
     c = _control(s)
-    installed = set(s.state.get("installed", {}).values())
-    handle = next(h for h in range(0xFFFF, 0, -1) if h not in installed)
-    response = await c.request(refdec.OPCODE["CAN_UNSUBSCRIBE"],
-                               struct.pack("<H", handle))
-    if response.status != refdec.STATUS_VALUE["unknown_handle"]:
+    # The probe id under a mask nothing here ever installs: the same id under
+    # a different mask is a different subscription (§9.1).
+    response = await c.unsubscribe_can(PROBE_ID, mask=refdec.MASK_EXACT & ~0x10)
+    if response.status != refdec.STATUS_VALUE["unknown_subscription"]:
         raise Fail(
-            f"unsubscribing handle {handle}, which was never issued, was "
-            f"answered {response.status_name} rather than unknown_handle. A "
-            f"client that cannot verify what it removed has not removed it",
+            f"unsubscribing an id and mask that were never installed was "
+            f"answered {response.status_name} rather than unknown_subscription. "
+            f"A client that cannot verify what it removed has not removed it",
             response=response.raw.hex())
 
 
-@check(id="can.list_matches_installed", section="9.5", phase="control",
-       severity="MUST", requires=("control", "can"),
-       title="CAN_LIST reports the table exactly as installed")
-async def can_list_matches_installed(s):
-    c = _control(s)
-    installed = s.state.get("installed", {})
-    if not installed:
-        raise Skip("no subscription was installed to list")
-    entries, pages, last = await c.pages(refdec.OPCODE["CAN_LIST"], "can_list")
-    if not last.ok:
-        raise Fail(f"CAN_LIST was answered {last.status_name}")
-    for response, page in pages:
-        if page["page"]["reserved"] != 0:
-            raise Fail("can_list_page.reserved is not zero; Appendix A holds it "
-                       "for paging metadata", page=response.detail.hex())
-    total = pages[0][1]["page"]["total"]
-    if total != len(installed):
-        raise Fail(f"CAN_LIST reports {total} subscription(s); {len(installed)} "
-                   f"were installed", installed=sorted(installed.values()))
-    by_handle = {e["handle"]: e for e in entries}
-    for can_id, handle in installed.items():
-        entry = by_handle.get(handle)
-        if entry is None:
-            raise Fail(f"handle {handle} was issued but does not appear in the "
-                       f"table", listed=sorted(by_handle))
-        if entry["id"] != can_id or entry["mask"] != refdec.MASK_EXACT:
-            # A device that normalises, reorders or summarises here defeats the
-            # only purpose CAN_LIST has.
-            raise Fail(
-                f"handle {handle} was installed as id 0x{can_id:x} mask "
-                f"0x{refdec.MASK_EXACT:x} and is reported as id "
-                f"0x{entry['id']:x} mask 0x{entry['mask']:x}", entry=entry)
-
-
-@check(id="can.list_beyond_end", section="9.5", phase="control", severity="MUST",
-       requires=("control", "can"), adversarial=True,
-       title="A start index past the end of the table is not an error")
-async def can_list_beyond_end(s):
-    c = _control(s)
-    response = await c.request(refdec.OPCODE["CAN_LIST"], struct.pack("<H", 0xFFF0))
-    if not response.ok:
-        raise Fail(f"a start index past the end was answered "
-                   f"{response.status_name}; §9.5 makes it ok with count zero",
-                   response=response.raw.hex())
-    page = _detail(response, "can_list")["page"]
-    if page["count"] != 0:
-        raise Fail(f"count is {page['count']} for a start index past the end",
-                   page=page)
-    expected = len(s.state.get("installed", {}))
-    if page["total"] != expected:
-        raise Fail(f"total is {page['total']}; {expected} subscription(s) are "
-                   f"installed. total MUST be the number installed at the "
-                   f"moment the page was produced", page=page)
-
-
-@check(id="can.table_full", section="9.2", phase="control", severity="MUST",
+@check(id="can.table_full", section="9.1", phase="control", severity="MUST",
        requires=("control", "can"), adversarial=True,
        title="A subscription beyond the declared slot count is refused table_full")
 async def can_table_full(s):
@@ -394,7 +364,7 @@ async def can_table_full(s):
                 continue
             response = await c.subscribe_can(can_id)
             if response.ok:
-                installed[can_id] = struct.unpack("<H", response.detail)[0]
+                installed[can_id] = refdec.MASK_EXACT
             else:
                 refusals.append((can_id, response))
             if len(installed) > slots:
@@ -407,10 +377,10 @@ async def can_table_full(s):
                 installed=len(installed), slots=slots)
         first = refusals[0][1]
         if first.status == refdec.STATUS_VALUE["rate_exceeded"]:
-            # 9.4 -- the prediction this status once implied cannot be made,
+            # 9.3 -- the prediction this status once implied cannot be made,
             # and the specification removed the rule rather than patch it again.
             raise Fail(
-                "a CAN subscription was refused rate_exceeded. §9.4 forbids "
+                "a CAN subscription was refused rate_exceeded. §9.3 forbids "
                 "refusing one on rate grounds: a device admits, and sheds if it "
                 "must, reporting the loss in dropped",
                 response=first.raw.hex())
@@ -418,15 +388,30 @@ async def can_table_full(s):
             raise Fail(f"the {len(installed) + 1}th subscription against "
                        f"{slots} slot(s) was answered {first.status_name}, not "
                        f"table_full", response=first.raw.hex())
+        # EXACTLY at capacity, not merely eventually. Every distinct (id,
+        # mask) this connection installed is accounted for here, so a refusal
+        # with fewer than `slots` of them accepted means a slot went to
+        # something the client never asked to keep -- a duplicate install
+        # that consumed a second entry, or a ceiling one short of Info's
+        # declaration. Either way Info and the table disagree, and the table
+        # full arriving "eventually" is what let both hide.
+        if len(installed) != slots:
+            raise Fail(
+                f"table_full arrived with {len(installed)} distinct "
+                f"subscription(s) accepted against a declared {slots}. Info "
+                f"promises {slots} slots and §9.1 gives every one a distinct "
+                f"(id, mask); {slots - len(installed)} slot(s) are held by "
+                f"something this client never installed",
+                response=first.raw.hex())
     finally:
         # Leave the table as this phase found it, so the stream checks are not
         # reading a bus the harness saturated.
         await c.request(refdec.OPCODE["CAN_RESET"])
         s.state["installed"] = {}
-        s.state.pop("probe_handle", None)
+        s.state.pop("probe_installed", None)
 
 
-@check(id="control.applies_only_if_answerable", section="9.6", phase="control",
+@check(id="control.applies_only_if_answerable", section="9.4", phase="control",
        severity="MUST", requires=("control", "can"), adversarial=True,
        title="A request whose response cannot be delivered is not applied")
 async def control_applies_only_if_answerable(s):
@@ -434,8 +419,7 @@ async def control_applies_only_if_answerable(s):
     install = await c.subscribe_can(PROBE_ID)
     if not install.ok:
         raise Skip("could not install a subscription to test against")
-    s.state.setdefault("installed", {})[PROBE_ID] = struct.unpack(
-        "<H", install.detail)[0]
+    s.state.setdefault("installed", {})[PROBE_ID] = refdec.MASK_EXACT
 
     try:
         await c.disable()
@@ -453,8 +437,14 @@ async def control_applies_only_if_answerable(s):
     await c.enable()
     await asyncio.sleep(0.5)
 
-    entries, _, last = await c.pages(refdec.OPCODE["CAN_LIST"], "can_list")
-    survived = bool(entries)
+    # §9.1 makes removal by (id, mask) the probe for whether the reset took
+    # effect: ok means the probe subscription was still installed.
+    probe = await c.unsubscribe_can(PROBE_ID)
+    survived = probe.ok
+    if survived:
+        s.state.get("installed", {}).pop(PROBE_ID, None)
+    else:
+        s.state["installed"] = {}
     answered = any(r.tag == 0x42 for r in c.history[before:])
 
     if refused_at_att:
@@ -465,12 +455,12 @@ async def control_applies_only_if_answerable(s):
     if answered:
         # The device held the request until its answer could be delivered and
         # then applied it. Deliverability was still decided before dispatch,
-        # which is what §9.6 asks for.
+        # which is what §9.4 asks for.
         raise Observe("the request was held until indications returned, then "
                       "applied and answered")
     raise Fail(
         "CAN_RESET took effect while indications were disabled and was never "
-        "answered. §9.6 makes deliverability a precondition of dispatch: a "
+        "answered. §9.4 makes deliverability a precondition of dispatch: a "
         "client that retries a request it believes was lost applies it twice")
 
 
@@ -478,7 +468,7 @@ async def control_applies_only_if_answerable(s):
 # Rates
 # ---------------------------------------------------------------------------
 
-@check(id="control.rate_ceiling", section="9.4", phase="control", severity="MUST",
+@check(id="control.rate_ceiling", section="9.6", phase="control", severity="MUST",
        requires=("control",), adversarial=True,
        title="A rate above the declared maximum is refused rate_exceeded")
 async def control_rate_ceiling(s):
@@ -515,7 +505,7 @@ async def control_rate_ceiling(s):
         raise Skip("; ".join(skipped))
 
 
-@check(id="control.rate_readback", section="9.8", phase="control", severity="MUST",
+@check(id="control.rate_readback", section="9.6", phase="control", severity="MUST",
        requires=("control",),
        title="A rate that was accepted is the rate Info then reports")
 async def control_rate_readback(s):
@@ -534,7 +524,7 @@ async def control_rate_readback(s):
         response = await c.request(opcode, struct.pack("<H", ceiling))
         if response.status in (refdec.STATUS_VALUE["unsupported_opcode"],
                                refdec.STATUS_VALUE["bad_params"]):
-            # §9.8 -- a device MAY support only a discrete set of rates, and
+            # §9.6 -- a device MAY support only a discrete set of rates, and
             # refusing one it does not support is exactly right.
             continue
         if not response.ok:
@@ -567,7 +557,7 @@ async def control_rate_readback(s):
 TIME_SYNC_SAMPLES = 6
 
 
-@check(id="control.time_sync", section="9.7", phase="control", severity="MUST",
+@check(id="control.time_sync", section="9.5", phase="control", severity="MUST",
        requires=("control",),
        title="TIME_SYNC carries two distinct readings of one clock")
 async def control_time_sync(s):
@@ -597,7 +587,7 @@ async def control_time_sync(s):
     s.state["time_sync"] = samples
 
     if all(ts["processing_us"] == 0 for _, ts in samples):
-        # 9.7 is explicit about this one: a device that reads its clock once and
+        # 9.5 is explicit about this one: a device that reads its clock once and
         # reports it as both timestamps has silently implemented the
         # single-timestamp form while appearing to implement this one, and the
         # client's whole error bound goes with it.
@@ -609,7 +599,7 @@ async def control_time_sync(s):
             samples=[ts["t_device_rx"] for _, ts in samples])
 
 
-@check(id="control.time_sync_offset", section="9.7", phase="control",
+@check(id="control.time_sync_offset", section="9.5", phase="control",
        severity="OBSERVE", requires=("control",),
        title="Clock offset and round-trip delay")
 async def control_time_sync_offset(s):
@@ -624,7 +614,7 @@ async def control_time_sync_offset(s):
         if best is None or delay < best[0]:
             best = (delay, offset, ts["processing_us"])
     delay, offset, processing = best
-    # 9.7 -- keep the sample with the smallest delay: least time in flight
+    # 9.5 -- keep the sample with the smallest delay: least time in flight
     # means least room for the two halves to differ.
     raise Observe(
         f"best of {len(samples)} samples: delay {delay / 1000:.2f} ms, device "

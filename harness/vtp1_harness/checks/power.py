@@ -1,4 +1,4 @@
-"""SPEC.md §9.9 -- what a device knows about its own supply.
+"""SPEC.md §9.7 -- what a device knows about its own supply.
 
 One opcode, three independently valid fields, and a rule no byte vector can
 reach: a device that declares the capability and then reports nothing valid has
@@ -24,7 +24,7 @@ def _power(s):
     return power
 
 
-@check(id="power.get_power", section="9.9", phase="control", severity="MUST",
+@check(id="power.get_power", section="9.7", phase="control", severity="MUST",
        requires=("power",),
        title="GET_POWER is answered with a power_state record")
 async def power_get_power(s):
@@ -48,15 +48,30 @@ async def power_get_power(s):
     try:
         s.state["power"] = response.detail_as("power_state")
     except refdec.Reject as exc:
-        # `percent-out-of-range` lands here, and it is the interesting one: a
-        # percentage above 100 is rejected whole rather than clamped (§9.9),
-        # so the whole record is refused and this is where that surfaces.
         raise Fail(f"the power_state detail did not decode: {exc}",
                    detail=response.detail.hex()) from None
     s.state["power_raw"] = response.detail
 
 
-@check(id="power.something_valid", section="9.9", phase="control",
+@check(id="power.percent_in_range", section="9.7", phase="control",
+       severity="MUST", requires=("power",),
+       title="A reported charge percentage is 0..100")
+async def power_percent_in_range(s):
+    power = _power(s)
+    if "percent" in power["absent"]:
+        raise Skip("this device does not report a charge percentage")
+    if power["percent"] > 100:
+        # The record still DECODES -- it is well formed, and rejecting it
+        # would leave the client with nothing at all -- so this is where the
+        # violation surfaces: §9.7 forbids a device emitting it, and a client
+        # MUST NOT clamp it, because a clamp shows a full battery on a device
+        # that has lost track of its own pack.
+        raise Fail(f"percent is {power['percent']} with its validity bit set; "
+                   f"§9.7 bounds the field at 100 and a device MUST NOT emit "
+                   f"a larger value", detail=s.state["power_raw"].hex())
+
+
+@check(id="power.something_valid", section="9.7", phase="control",
        severity="MUST", requires=("power",),
        title="A device declaring `power` reports at least one valid field")
 async def power_something_valid(s):
@@ -68,13 +83,13 @@ async def power_something_valid(s):
                 if n not in power["absent"]),
             validity=f"0x{power['validity']:02x}")
     raise Fail(
-        "every power_validity bit is clear. §9.9 -- with nothing valid this "
+        "every power_validity bit is clear. §9.7 -- with nothing valid this "
         "device has said what a device without the capability says by not "
         "declaring it, and a client has spent a round trip to learn nothing",
         detail=s.state["power_raw"].hex())
 
 
-@check(id="power.absent_fields_zero", section="9.9", phase="control",
+@check(id="power.absent_fields_zero", section="9.7", phase="control",
        severity="MUST", requires=("power",),
        title="Power fields the device does not measure are written as zero")
 async def power_absent_fields_zero(s):
@@ -85,13 +100,13 @@ async def power_absent_fields_zero(s):
         raise Fail(
             f"{', '.join(f'{n}={v}' for n, v in stale)} "
             f"{'is' if len(stale) == 1 else 'are'} non-zero with the governing "
-            f"validity bit clear. §9.9 holds these to the same rule as §5.1, "
+            f"validity bit clear. §9.7 holds these to the same rule as §5.1, "
             f"and a stale reading behind a cleared bit is exactly what §1.1 "
             f"exists to keep off the wire",
             detail=s.state["power_raw"].hex())
 
 
-@check(id="power.reserved", section="9.9", phase="control", severity="MUST",
+@check(id="power.reserved", section="9.7", phase="control", severity="MUST",
        requires=("power",),
        title="Reserved power_validity bits and the reserved byte are zero")
 async def power_reserved(s):
@@ -111,7 +126,7 @@ async def power_reserved(s):
                    detail=s.state["power_raw"].hex())
 
 
-@check(id="power.source_defined", section="9.9", phase="control",
+@check(id="power.source_defined", section="9.7", phase="control",
        severity="OBSERVE", requires=("power",),
        title="The reported source is a member this version defines")
 async def power_source_defined(s):

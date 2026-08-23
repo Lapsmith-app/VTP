@@ -6,11 +6,11 @@
       "name": "gps-and-can-device",
       "desc": "A typical dual-role module.",
       "record": "info",
-      "hex": "010093000000190019004000a00f0000000000000001f400",
+      "hex": "010053000000190019004000a00f00000000000000010000",
       "expect": {
         "protocol_major": 1,
         "protocol_minor": 0,
-        "capabilities": 147,
+        "capabilities": 83,
         "gps_rate_hz": 25,
         "gps_max_rate_hz": 25,
         "can_subscription_slots": 64,
@@ -19,14 +19,14 @@
         "imu_max_rate_hz": 0,
         "reserved_20": 0,
         "clock_flags": 1,
-        "max_notify_bytes": 244
+        "reserved_22": 0
       }
     },
     {
       "name": "gps-only-no-control",
-      "desc": "A GPS-only board with no control channel. Every CAN capacity figure is zero and the largest CAN payload follows from the capability bits (SPEC.md 4.2) rather than from a field -- and a client MUST NOT infer a default.",
+      "desc": "A GPS-only board with no control channel. Every CAN capacity figure is zero and the largest CAN payload follows from the capability bits (SPEC.md 4.1) rather than from a field -- and a client MUST NOT infer a default.",
       "record": "info",
-      "hex": "0100010000000a000a00000000000000000000000000b900",
+      "hex": "0100010000000a000a000000000000000000000000000000",
       "expect": {
         "protocol_major": 1,
         "protocol_minor": 0,
@@ -39,14 +39,14 @@
         "imu_max_rate_hz": 0,
         "reserved_20": 0,
         "clock_flags": 0,
-        "max_notify_bytes": 185
+        "reserved_22": 0
       }
     },
     {
       "name": "future-minor-unknown-capability",
       "desc": "Minor 7 with a capability bit this client has never heard of. A client MUST ignore the unknown bit and use everything it does understand, and a VTP/1.0 encoder MUST NOT reproduce it (SPEC.md 2).",
       "record": "info",
-      "hex": "010737000800190019002000a00f0000410341030003f201",
+      "hex": "010737000800190019002000a00f00004103410300030000",
       "expect": {
         "protocol_major": 1,
         "protocol_minor": 7,
@@ -59,17 +59,17 @@
         "imu_max_rate_hz": 833,
         "reserved_20": 0,
         "clock_flags": 3,
-        "max_notify_bytes": 498
+        "reserved_22": 0
       },
       "note": "This vector used to declare CAN with no Control bit, which SPEC.md 4.1 now forbids and which conformance/run.py had been quietly assuming the opposite of. `can_fd` requires `can` and `can` requires `control`, so the whole chain is present here.",
       "canonical": false,
-      "expect_roundtrip_hex": "010737000000190019002000a00f0000410341030003f201"
+      "expect_roundtrip_hex": "010737000000190019002000a00f00004103410300030000"
     },
     {
       "name": "rate-below-maximum",
       "desc": "A device running below its ceiling: 10 Hz of a possible 25, 100 Hz of a possible 833. Current rate and maximum rate are separate fields and a client MUST NOT read one for the other.",
       "record": "info",
-      "hex": "0100150000000a001900000000000000640041030000f400",
+      "hex": "0100150000000a0019000000000000006400410300000000",
       "expect": {
         "protocol_major": 1,
         "protocol_minor": 0,
@@ -82,43 +82,100 @@
         "imu_max_rate_hz": 833,
         "reserved_20": 0,
         "clock_flags": 0,
-        "max_notify_bytes": 244
+        "reserved_22": 0
       },
       "note": "The only vector where the current and maximum rates differ. Without it a decoder can read gps_rate_hz from gps_max_rate_hz's offset and pass the whole corpus -- found by tools/mutate.py, not by review."
     },
     {
       "name": "can-without-control",
-      "desc": "SPEC.md 4.1 -- `can` requires `control`. A CAN device with no Control characteristic forwards nothing, because CAN_SUBSCRIBE is the only way to ask it to, so this advertises a role no client can use.",
+      "desc": "SPEC.md 4.1 -- `can` requires `control`, so this Info is a device-side violation: it advertises a role no client can use, because CAN_SUBSCRIBE is the only way to receive a frame. A client MUST decode it, MUST NOT use the CAN role, and SHOULD report the contradiction.",
       "record": "info",
-      "hex": "0100030000000a000a002000d0070000000000000000f400",
-      "must_reject": "capabilities"
+      "hex": "0100030000000a000a002000d00700000000000000000000",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 3,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_subscription_slots": 32,
+        "can_max_frames_per_s": 2000,
+        "imu_rate_hz": 0,
+        "imu_max_rate_hz": 0,
+        "reserved_20": 0,
+        "clock_flags": 0,
+        "reserved_22": 0
+      },
+      "note": "No round-trip: the decode is required and the re-encode is forbidden, because a conforming encoder refuses to publish an Info that breaks the matrix.",
+      "no_roundtrip": true
     },
     {
       "name": "monitor-without-control",
-      "desc": "SPEC.md 4.1 -- `monitor` requires `control`. MONITOR_LIST is the only way a device can say which channels it wants.",
+      "desc": "SPEC.md 4.1 -- `monitor` requires `control`; MONITOR_LIST is the only way a device can say which channels it wants. Decodes; the Monitor role MUST NOT be used.",
       "record": "info",
-      "hex": "0100090000000a000a00000000000000000000000000f400",
-      "must_reject": "capabilities"
+      "hex": "0100090000000a000a000000000000000000000000000000",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 9,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_subscription_slots": 0,
+        "can_max_frames_per_s": 0,
+        "imu_rate_hz": 0,
+        "imu_max_rate_hz": 0,
+        "reserved_20": 0,
+        "clock_flags": 0,
+        "reserved_22": 0
+      },
+      "no_roundtrip": true
     },
     {
       "name": "can-fd-without-can",
-      "desc": "SPEC.md 4.1 -- `can_fd` qualifies how CAN frames are carried, and qualifies nothing on a device with no CAN.",
+      "desc": "SPEC.md 4.1 -- `can_fd` qualifies how CAN frames are carried, and qualifies nothing on a device with no CAN. Decodes; SHOULD be flagged.",
       "record": "info",
-      "hex": "01003000000000000000000000000000000000000000f400",
-      "must_reject": "capabilities"
+      "hex": "010030000000000000000000000000000000000000000000",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 48,
+        "gps_rate_hz": 0,
+        "gps_max_rate_hz": 0,
+        "can_subscription_slots": 0,
+        "can_max_frames_per_s": 0,
+        "imu_rate_hz": 0,
+        "imu_max_rate_hz": 0,
+        "reserved_20": 0,
+        "clock_flags": 0,
+        "reserved_22": 0
+      },
+      "no_roundtrip": true
     },
     {
       "name": "capacity-without-capability",
-      "desc": "SPEC.md 4.1 -- every CAN capacity MUST be zero while the `can` bit is clear. A client sizing a buffer from can_max_frames_per_s here has been told something false about a role the device does not have.",
+      "desc": "SPEC.md 4.1 -- every CAN capacity MUST be zero while the `can` bit is clear, so this device has published a capability it does not have. Decodes; a client MUST NOT size anything from these figures and SHOULD report them.",
       "record": "info",
-      "hex": "0100010000000a000a002000a00f0000000000000000b900",
-      "must_reject": "capabilities"
+      "hex": "0100010000000a000a002000a00f00000000000000000000",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 1,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_subscription_slots": 32,
+        "can_max_frames_per_s": 4000,
+        "imu_rate_hz": 0,
+        "imu_max_rate_hz": 0,
+        "reserved_20": 0,
+        "clock_flags": 0,
+        "reserved_22": 0
+      },
+      "no_roundtrip": true
     },
     {
-      "name": "reserved-byte-nonzero",
-      "desc": "Byte 20 carries a value assigned by a future minor. It held can_max_payload until SPEC.md 4.2 derived the CAN payload ceiling from the capability bits instead, so it is reserved now -- and both halves of SPEC.md 2 apply: a decoder MUST ignore it, and an encoder MUST normalise it to zero.",
+      "name": "reserved-bytes-nonzero",
+      "desc": "Bytes 20 and 22-23 carry values assigned by a future minor. Byte 20 held can_max_payload until SPEC.md 4.1 derived the CAN payload ceiling from the capability bits; bytes 22-23 held max_notify_bytes until it was removed as a restatement of the negotiated ATT payload. Both halves of SPEC.md 2 apply: a decoder MUST ignore them, and an encoder MUST normalise them to zero.",
       "record": "info",
-      "hex": "0100010000000a000a00000000000000000000004000f400",
+      "hex": "0100010000000a000a00000000000000000000004000efbe",
       "expect": {
         "protocol_major": 1,
         "protocol_minor": 0,
@@ -131,10 +188,10 @@
         "imu_max_rate_hz": 0,
         "reserved_20": 64,
         "clock_flags": 0,
-        "max_notify_bytes": 244
+        "reserved_22": 48879
       },
       "canonical": false,
-      "expect_roundtrip_hex": "0100010000000a000a00000000000000000000000000f400"
+      "expect_roundtrip_hex": "0100010000000a000a000000000000000000000000000000"
     },
     {
       "name": "short-payload",

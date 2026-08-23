@@ -46,7 +46,7 @@
         "source_known": true
       },
       "expect_absent": [],
-      "note": "percent is 100, the top of the field's range and a legal value; 101 is the first that is not (SPEC.md 9.9)."
+      "note": "percent is 100, the top of the field's range and a legal value; 101 is the first that is not (SPEC.md 9.7)."
     },
     {
       "name": "gauge-failed-mid-session",
@@ -166,10 +166,19 @@
     },
     {
       "name": "percent-above-full",
-      "desc": "200%. Rejected whole rather than clamped to 100: the byte came out of the same four as the source, so neither is trustworthy, and a client that clamps shows a full battery on a device that has lost track of its own pack.",
+      "desc": "200%, a device-side violation of SPEC.md 9.7. The record is well-formed, so a receiver MUST decode it -- and SHOULD report the value as a device defect rather than clamp it: a client that clamps shows a full battery on a device that has lost track of its own pack.",
       "record": "power_state",
       "hex": "0302c800",
-      "must_reject": "percent-out-of-range"
+      "expect": {
+        "validity": 3,
+        "source": 2,
+        "percent": 200,
+        "reserved": 0,
+        "source_known": true
+      },
+      "expect_absent": [],
+      "note": "No round-trip: a conforming encoder refuses this percent, which is the device-side half of the same rule.",
+      "no_roundtrip": true
     },
     {
       "name": "short-payload",

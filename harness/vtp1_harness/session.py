@@ -31,8 +31,8 @@ class ControlEchoMismatch(Exception):
 
     SPEC.md §9 makes the device echo both. Correlation only needs the tag, so
     nothing downstream would notice a mangled opcode -- every check reads
-    `status` and `detail` and none of them re-reads the echo. Raised here so the
-    one guard covers all ten opcodes rather than each check testing its own.
+    `status` and `detail` and none of them re-reads the echo. Raised here so
+    the one guard covers every opcode rather than each check testing its own.
     """
 
     def __init__(self, sent, response):
@@ -132,7 +132,7 @@ class ControlClient:
         self.history = []
 
     async def enable(self):
-        """SPEC.md §9.6 -- indications before the first write, always."""
+        """SPEC.md §9.4 -- indications before the first write, always."""
         await self._transport.subscribe(self._uuid, self._on_indication)
         self.enabled = True
 
@@ -176,9 +176,9 @@ class ControlClient:
     async def send(self, opcode, params=b"", tag=None):
         """Write a request and return the future its response will land in.
 
-        Separate from `request` so a check can hold several requests
-        outstanding at once, which is the only way to test the floor of four
-        that SPEC.md §9 sets.
+        Separate from `request` so a check can hold two requests outstanding
+        at once, which is the only way to test what a device does with a
+        client that pipelines despite SPEC.md §9's one-outstanding rule.
         """
         tag = self._next_tag() if tag is None else tag
         loop = asyncio.get_running_loop()
@@ -219,28 +219,10 @@ class ControlClient:
             refdec.OPCODE["CAN_SUBSCRIBE_MASK"],
             struct.pack("<IIBH", can_id, mask, mode, arg))
 
-    async def pages(self, opcode, record):
-        """Read every page of a paged table (SPEC.md §9.5, 13.3).
-
-        Returns (entries, pages). Raises Fail-worthy conditions to the caller
-        as ordinary values; paging correctness is a check's business, not this
-        helper's.
-        """
-        entries, pages, start, guard = [], [], 0, 0
-        while True:
-            guard += 1
-            if guard > 64:
-                raise RuntimeError("paging did not terminate")
-            response = await self.request(opcode, struct.pack("<H", start))
-            if not response.ok:
-                return entries, pages, response
-            page = response.detail_as(record)
-            pages.append((response, page))
-            entries.extend(page["entries"])
-            head = page["page"]
-            if head["count"] == 0 or len(entries) >= head["total"]:
-                return entries, pages, response
-            start = head["index"] + head["count"]
+    async def unsubscribe_can(self, can_id, mask=refdec.MASK_EXACT):
+        """SPEC.md §9.1 -- removal names the same (id, mask) that installed."""
+        return await self.request(
+            refdec.OPCODE["CAN_UNSUBSCRIBE"], struct.pack("<II", can_id, mask))
 
 
 class Session:
@@ -293,10 +275,10 @@ class Session:
         try:
             self.info = refdec.decode("info", self.info_raw)
         except refdec.Reject as exc:
-            # Kept rather than reduced to None: the reason IS the finding, and
-            # SPEC.md §4.1 gives the decoder more ways to refuse an Info than a
-            # wrong length -- a capability bit without the bit it requires is
-            # one of them.
+            # Kept rather than reduced to None: the reason IS the finding. A
+            # wrong length is the only way a well-formed read fails to decode;
+            # everything else about Info -- the §4.1 matrix included -- decodes
+            # and is judged by the info checks.
             self.info = None
             self.info_reject = str(exc)
             self.capabilities = frozenset()

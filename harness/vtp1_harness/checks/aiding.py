@@ -13,7 +13,6 @@ from ..transport import DeviceRefused
 from . import Fail, Observe, Skip, check
 
 _HELD_UNTIL = 1 << refdec.bit("aid_validity", "held_until")
-_PERSISTS = 1 << refdec.bit("aid_flags", "persists")
 _FIRST_MISSING = 1 << refdec.bit("commit_validity", "first_missing")
 
 _RESULT = refdec.enum_values("aid_result")
@@ -68,9 +67,9 @@ async def _begin(s, total, fmt=None):
                            struct.pack("<BI", fmt, total))
 
 
-async def _write_chunk(s, session, index, body):
+async def _write_chunk(s, token, index, body):
     """A chunk, written without a response. Nothing comes back by design."""
-    payload = struct.pack("<BH", session, index) + body
+    payload = struct.pack("<BH", token, index) + body
     try:
         await s.transport.write(refdec.CHAR["aiding"], payload, response=False)
     except DeviceRefused as exc:
@@ -79,15 +78,14 @@ async def _write_chunk(s, session, index, body):
                    f"any kind: {exc}") from None
 
 
-async def _commit(s, session, chunks, blob):
+async def _commit(s, blob):
     c = _control(s)
-    return await c.request(
-        refdec.OPCODE["GNSS_AID_COMMIT"],
-        struct.pack("<BHI", session, chunks, zlib.crc32(blob)))
+    return await c.request(refdec.OPCODE["GNSS_AID_COMMIT"],
+                           struct.pack("<I", zlib.crc32(blob)))
 
 
 async def _open_transfer(s, want=None):
-    """Open a transfer sized to this device, returning (session, blob, chunks).
+    """Open a transfer sized to this device: (token, blob, chunks).
 
     Deliberately not a round number of chunks: the last chunk carries the
     remainder, and a transfer that divided exactly would never exercise
@@ -108,7 +106,7 @@ async def _open_transfer(s, want=None):
                    f"{response.status_name}", response=response.raw.hex())
     result = _detail(response, "aid_begin_result")
     blob = _payload(total)
-    return result["session"], blob, _split(blob, result["chunk_bytes"])
+    return result["token"], blob, _split(blob, result["chunk_bytes"])
 
 
 # ---------------------------------------------------------------------------
@@ -126,8 +124,8 @@ async def aiding_declaration(s):
                    f"device declaring the aiding capability has to be able to "
                    f"say what it accepts", response=response.raw.hex())
     caps = _detail(response, "gnss_aid_caps")
-    if caps["reserved_3"] != 0:
-        raise Fail("gnss_aid_caps.reserved_3 is not zero; Appendix A holds it "
+    if caps["reserved_2"] != 0:
+        raise Fail("gnss_aid_caps.reserved_2 is not zero; Appendix A holds it "
                    "for aiding metadata", detail=response.detail.hex())
     # SPEC.md §14.2 -- a client sizes its transfer against this before it
     # fetches anything, so zero means no transfer is ever possible.
@@ -161,13 +159,10 @@ async def aiding_format(s):
                       f"{caps['max_bytes']} bytes", format=caps["format"])
     held = ("holds nothing" if not caps["validity"] & _HELD_UNTIL
             else f"holds data until {caps['held_until']} ms Unix")
-    persists = ("survives a power cycle" if caps["flags"] & _PERSISTS
-                else "does not survive a power cycle")
     # RAISED, not returned. Observe is an exception the runner collects; a
     # returned one is discarded and the check reports PASS with no message, so
     # the most useful line the role produces never reaches the report.
-    raise Observe(f"{name}, ceiling {caps['max_bytes']} bytes, {held}, "
-                  f"{persists}",
+    raise Observe(f"{name}, ceiling {caps['max_bytes']} bytes, {held}",
                   format=name, max_bytes=caps["max_bytes"])
 
 
@@ -194,9 +189,8 @@ async def aiding_chunk_size(s):
                    f"(three bytes of ATT header, three of chunk header). A "
                    f"client cannot write a chunk this size")
     s.state["aiding_begin"] = result
-    # Leave nothing open behind this check.
-    await _control(s).request(refdec.OPCODE["GNSS_AID_ABORT"],
-                              struct.pack("<B", result["session"]))
+    # The transfer is left open on purpose: the next GNSS_AID_BEGIN discards
+    # it (SPEC.md 14.3), which is also the only way to abandon one.
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +209,6 @@ async def aiding_rejects_undeclared_format(s):
         raise Skip("the device declares the value this check probes with")
     response = await _begin(s, min(caps["max_bytes"], 1024), fmt=bogus)
     if response.ok:
-        detail = _detail(response, "aid_begin_result")
-        await _control(s).request(refdec.OPCODE["GNSS_AID_ABORT"],
-                                  struct.pack("<B", detail["session"]))
         raise Fail(f"GNSS_AID_BEGIN naming format {bogus}, which this device "
                    f"did not declare, was accepted. The bytes of a transfer "
                    f"are opaque, so this refusal is the only place a client "
@@ -239,9 +230,6 @@ async def aiding_rejects_oversized(s):
                    "is no value above it to try")
     response = await _begin(s, caps["max_bytes"] + 1)
     if response.ok:
-        detail = _detail(response, "aid_begin_result")
-        await _control(s).request(refdec.OPCODE["GNSS_AID_ABORT"],
-                                  struct.pack("<B", detail["session"]))
         raise Fail(f"a transfer of {caps['max_bytes'] + 1} bytes was accepted "
                    f"against a declared ceiling of {caps['max_bytes']}. A "
                    f"ceiling discovered by running out of memory part way "
@@ -259,12 +247,12 @@ async def aiding_rejects_oversized(s):
        requires=("gnss_aiding",),
        title="A complete transfer commits as applied")
 async def aiding_transfer(s):
-    session, blob, chunks = await _open_transfer(s)
+    token, blob, chunks = await _open_transfer(s)
     for index, body in enumerate(chunks):
-        await _write_chunk(s, session, index, body)
-    response = await _commit(s, session, len(chunks), blob)
+        await _write_chunk(s, token, index, body)
+    response = await _commit(s, blob)
     if not response.ok:
-        raise Fail(f"GNSS_AID_COMMIT on an open session with well-formed "
+        raise Fail(f"GNSS_AID_COMMIT on an open transfer with well-formed "
                    f"parameters was answered {response.status_name}. SPEC.md "
                    f"§14.5 -- the status is about the request, and this request "
                    f"was applied", response=response.raw.hex())
@@ -296,61 +284,11 @@ async def aiding_transfer(s):
     s.state["aiding_applied"] = True
 
 
-@check(id="aiding.rejects_count_mismatch", section="14.4", phase="aiding",
-       severity="MUST", requires=("gnss_aiding",), adversarial=True,
-       title="A commit whose chunk count contradicts the transfer is refused")
-async def aiding_rejects_count_mismatch(s):
-    session, blob, chunks = await _open_transfer(s)
-    for index, body in enumerate(chunks):
-        await _write_chunk(s, session, index, body)
-
-    # Every chunk arrived; the count says otherwise. SPEC.md §14.4 -- this is
-    # a bad parameter and not an incomplete transfer, and the distinction is
-    # not pedantry: a device that answers `incomplete` has to name a
-    # first_missing it actually holds, and a client resending from it commits
-    # again with the same wrong count and never converges.
-    response = await _control(s).request(
-        refdec.OPCODE["GNSS_AID_COMMIT"],
-        struct.pack("<BHI", session, len(chunks) + 1, zlib.crc32(blob)))
-    if response.ok:
-        result = _detail(response, "aid_commit_result")
-        name = _RESULT.get(result["result"], result["result"])
-        if result["result"] == _RESULT_VALUE["incomplete"]:
-            raise Fail(f"a commit claiming {len(chunks) + 1} chunks against a "
-                       f"{len(chunks)}-chunk transfer was answered incomplete "
-                       f"from index {result['first_missing']}, which the device "
-                       f"holds. A client resends it, commits again with the "
-                       f"same count, and gets the same answer forever",
-                       detail=response.detail.hex())
-        raise Fail(f"a commit whose chunk count contradicts the transfer was "
-                   f"answered ok/{name}. The count is carried so a "
-                   f"disagreement is caught rather than acted on",
-                   detail=response.detail.hex())
-    if response.status_name != "bad_params":
-        raise Fail(f"a contradictory chunk count was answered "
-                   f"{response.status_name}, not bad_params",
-                   response=response.raw.hex())
-
-    # SPEC.md §14.4 -- refused, so nothing was applied and the transfer is
-    # still open. A client that miscounted gets to commit again.
-    response = await _commit(s, session, len(chunks), blob)
-    if not response.ok:
-        raise Fail(f"the corrected commit was answered {response.status_name}. "
-                   f"A refused request MUST NOT have changed the transfer",
-                   response=response.raw.hex())
-    result = _detail(response, "aid_commit_result")
-    if result["result"] == _RESULT_VALUE["incomplete"]:
-        raise Fail(f"the corrected commit reports chunk "
-                   f"{result['first_missing']} missing, so the refused commit "
-                   f"discarded chunks it should not have touched",
-                   detail=response.detail.hex())
-
-
 @check(id="aiding.reports_missing_chunk", section="14.4", phase="aiding",
        severity="MUST", requires=("gnss_aiding",), adversarial=True,
        title="A gap is reported by index, and the transfer stays open")
 async def aiding_reports_missing_chunk(s):
-    session, blob, chunks = await _open_transfer(s)
+    token, blob, chunks = await _open_transfer(s)
     if len(chunks) < 2:
         raise Skip("this device's chunk size makes the transfer a single "
                    "chunk, so there is no gap to leave")
@@ -359,11 +297,11 @@ async def aiding_reports_missing_chunk(s):
     hole = 1
     for index, body in enumerate(chunks):
         if index != hole:
-            await _write_chunk(s, session, index, body)
+            await _write_chunk(s, token, index, body)
 
-    response = await _commit(s, session, len(chunks), blob)
+    response = await _commit(s, blob)
     if not response.ok:
-        raise Fail(f"a commit naming an open session was answered "
+        raise Fail(f"a commit on an open transfer was answered "
                    f"{response.status_name}. An incomplete transfer is a "
                    f"result, not a refused request (SPEC.md §14.5)",
                    response=response.raw.hex())
@@ -387,12 +325,12 @@ async def aiding_reports_missing_chunk(s):
 
     # SPEC.md §14.4 -- incomplete leaves the transfer OPEN. Filling the gap and
     # committing again is the entire point of reporting an index.
-    await _write_chunk(s, session, hole, chunks[hole])
-    response = await _commit(s, session, len(chunks), blob)
+    await _write_chunk(s, token, hole, chunks[hole])
+    response = await _commit(s, blob)
     if not response.ok:
         raise Fail(f"the second commit was answered {response.status_name}. "
                    f"SPEC.md §14.4 keeps the transfer open after `incomplete`, "
-                   f"so the session was still this device's to hold",
+                   f"so it was still this device's to close",
                    response=response.raw.hex())
     result = _detail(response, "aid_commit_result")
     if result["result"] == _RESULT_VALUE["incomplete"]:
@@ -405,14 +343,14 @@ async def aiding_reports_missing_chunk(s):
        severity="MUST", requires=("gnss_aiding",), adversarial=True,
        title="A transfer whose CRC does not match is refused bad_crc")
 async def aiding_detects_corruption(s):
-    session, blob, chunks = await _open_transfer(s)
+    token, blob, chunks = await _open_transfer(s)
     for index, body in enumerate(chunks):
-        await _write_chunk(s, session, index, body)
+        await _write_chunk(s, token, index, body)
     # Every chunk arrived; the client's CRC says the bytes are not the ones it
     # meant to send. Without this check a device could apply anything.
     response = await _control(s).request(
         refdec.OPCODE["GNSS_AID_COMMIT"],
-        struct.pack("<BHI", session, len(chunks), zlib.crc32(blob) ^ 0xFFFF))
+        struct.pack("<I", zlib.crc32(blob) ^ 0xFFFF))
     if not response.ok:
         raise Fail(f"the commit was answered {response.status_name}; a failed "
                    f"integrity check is a result, not a refused request",
@@ -431,25 +369,71 @@ async def aiding_detects_corruption(s):
                    detail=response.detail.hex())
 
 
-@check(id="aiding.abort", section="14.4", phase="aiding", severity="MUST",
-       requires=("gnss_aiding",), adversarial=True,
-       title="An aborted session is no longer the device's to commit")
-async def aiding_abort(s):
-    session, blob, chunks = await _open_transfer(s)
-    await _write_chunk(s, session, 0, chunks[0])
-    response = await _control(s).request(refdec.OPCODE["GNSS_AID_ABORT"],
-                                         struct.pack("<B", session))
+@check(id="aiding.begin_supersedes", section="14.3", phase="aiding",
+       severity="MUST", requires=("gnss_aiding",), adversarial=True,
+       title="A new BEGIN discards the open transfer and takes a fresh token")
+async def aiding_begin_supersedes(s):
+    begin = s.state.get("aiding_begin")
+    if begin is None:
+        raise Skip("no chunk size to work from")
+    chunk_bytes = begin["chunk_bytes"]
+    caps = _caps(s)
+
+    # Open a transfer and leave a chunk in it, then open a SMALLER one over
+    # it. If any of the first transfer survives -- its size, its chunks --
+    # the second commit cannot come back clean: the leftover chunk 0 is the
+    # wrong length for the new shape, and the old total wants more chunks
+    # than the new transfer has.
+    first = min(caps["max_bytes"], chunk_bytes * 3 + max(1, chunk_bytes // 2))
+    response = await _begin(s, first)
     if not response.ok:
-        raise Fail(f"GNSS_AID_ABORT on an open session was answered "
-                   f"{response.status_name}", response=response.raw.hex())
-    # SPEC.md §14.4 -- the session is freed, so a commit naming it is a commit
-    # on a session the device does not hold.
-    response = await _commit(s, session, len(chunks), blob)
-    if response.ok:
-        raise Fail("a commit naming an aborted session was accepted. The "
-                   "device is holding a transfer it was told to discard, and "
-                   "§14.3 allows it only one")
-    if response.status_name != "bad_params":
-        raise Fail(f"a commit on an unknown session was answered "
-                   f"{response.status_name}, not bad_params",
+        raise Fail(f"GNSS_AID_BEGIN was answered {response.status_name}",
                    response=response.raw.hex())
+    old = _detail(response, "aid_begin_result")
+    await _write_chunk(s, old["token"], 0, _payload(min(first, chunk_bytes)))
+
+    second = min(caps["max_bytes"], chunk_bytes + max(1, chunk_bytes // 2))
+    response = await _begin(s, second)
+    if not response.ok:
+        raise Fail(f"a GNSS_AID_BEGIN over an open transfer was answered "
+                   f"{response.status_name}. SPEC.md §14.3 -- it MUST discard "
+                   f"the open transfer and start the new one",
+                   response=response.raw.hex())
+    result = _detail(response, "aid_begin_result")
+    # SPEC.md §14.3 -- the fresh token MUST differ. With EATT a chunk of the
+    # discarded transfer can still be queued on another bearer; a reused
+    # token lets it into the new transfer at whatever offset its index names.
+    if result["token"] == old["token"]:
+        raise Fail(f"the superseding BEGIN reused token {old['token']}. A "
+                   f"chunk of the discarded transfer still in flight on "
+                   f"another ATT bearer would be accepted into this one "
+                   f"(SPEC.md §14.3)", detail=response.detail.hex())
+    blob = _payload(second)
+    chunks = _split(blob, result["chunk_bytes"])
+    for index, body in enumerate(chunks):
+        await _write_chunk(s, result["token"], index, body)
+
+    # The stale-chunk arrival EATT makes possible, replayed deliberately: a
+    # chunk carrying the OLD token arriving after the new transfer opened.
+    # Its bytes are the complement of the real chunk 0, so a device that
+    # wrongly accepts it corrupts the transfer and the CRC below catches it;
+    # a device that ignores it, as SPEC.md §14.3 requires, commits clean.
+    stale = bytes(b ^ 0xFF for b in chunks[0])
+    await _write_chunk(s, old["token"], 0, stale)
+
+    response = await _commit(s, blob)
+    if not response.ok:
+        raise Fail(f"the commit of the superseding transfer was answered "
+                   f"{response.status_name}", response=response.raw.hex())
+    result = _detail(response, "aid_commit_result")
+    if result["result"] == _RESULT_VALUE["incomplete"]:
+        raise Fail(f"every chunk of the new transfer was written and the "
+                   f"device reports chunk {result['first_missing']} missing "
+                   f"-- it is still holding the transfer the BEGIN was "
+                   f"required to discard (SPEC.md §14.3)",
+                   detail=response.detail.hex())
+    if result["result"] == _RESULT_VALUE["bad_crc"]:
+        raise Fail("the CRC of the new transfer did not match, so bytes from "
+                   "the discarded transfer -- or a stale chunk carrying its "
+                   "token -- leaked into the one that superseded it "
+                   "(SPEC.md §14.3)", detail=response.detail.hex())

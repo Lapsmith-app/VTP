@@ -415,7 +415,8 @@ def spec_tables(schema):
 
     for name, bm in schema["bitmasks"].items():
         lines = ["| Bit | Name | Meaning |", "| --- | --- | --- |"]
-        for b in bm["bits"]:
+        named = {b["bit"] for b in bm["bits"]}
+        for b in sorted(bm["bits"], key=lambda b: b["bit"]):
             meaning = b.get("desc", "")
             if b.get("implies"):
                 # Rendered here as well as in the 4.1 matrix, because a reader
@@ -425,6 +426,13 @@ def spec_tables(schema):
                           f"**Requires {req}.**"
             lines.append(f"| {b['bit']} | `{b['name']}` | {meaning or '—'} |")
         if "reserved_from" in bm:
+            # A bit below reserved_from that no entry names is a retired
+            # assignment -- reserved exactly like the range above, and listed
+            # so the table accounts for every bit rather than skipping one.
+            for hole in sorted(set(range(bm["reserved_from"])) - named):
+                lines.insert(2 + sum(b < hole for b in named),
+                             f"| {hole} | *reserved* | MUST be zero on "
+                             f"transmit; MUST be ignored on receive |")
             lines.append(f"| {bm['reserved_from']}+ | *reserved* | MUST be zero on transmit; "
                          f"MUST be ignored on receive |")
         out[f"bitmask:{name}"] = "\n".join(lines)
@@ -466,9 +474,6 @@ def spec_tables(schema):
             "can_record": "Up to 4000 per second",
             "imu_header": "One per notification",
             "imu_sample": "Up to 833 per second",
-            "can_list_page": "One per CAN_LIST page",
-            "can_subscription": "One per table entry",
-            "link_params": "On request",
             "power_state": "On request"}
     for name, rec in schema["records"].items():
         mark = ("**Yes** — `ext_count` trailer (§5.5)" if rec.get("extensible")
@@ -528,6 +533,12 @@ def spec_tables(schema):
         where = [f"`{r}.{f['name']}`" for r, rec in schema["records"].items()
                  for f in rec["fields"] if f.get("bitmask") == name]
         span = f"bit {rf}" if rf == top else f"bits {rf}–{top}"
+        # A bit below reserved_from that no entry names is a retired
+        # assignment (capabilities bit 7) and is reserved too, so this table
+        # must account for it or Appendix A under-reports the reserved space.
+        holes = sorted(set(range(rf)) - {b["bit"] for b in bm["bits"]})
+        if holes:
+            span = ", ".join(f"bit {h}" for h in holes) + f", {span}"
         lines.append(f"| {', '.join(where) or '`' + name + '`'} | {span} | "
                      f"{bm.get('reserved_purpose', '—')} |")
     for rname, rec in schema["records"].items():
@@ -621,7 +632,12 @@ def c_header(schema):
             # assigned in a later minor leaves the reserved region by editing
             # the schema and nothing else.
             width = bm["width"] * 8
-            assigned = ((1 << width) - 1) & ~((1 << bm["reserved_from"]) - 1)
+            # From the NAMED bits, not from reserved_from: a bit retired
+            # below the boundary (capabilities bit 7) is reserved too.
+            named = 0
+            for b in bm["bits"]:
+                named |= 1 << b["bit"]
+            assigned = ((1 << width) - 1) & ~named
             suffix = "u" if width <= 32 else "ull"
             L.append(f"#define VTP_{name.upper()}_RESERVED "
                      f"0x{assigned:0{width // 4}X}{suffix}")
@@ -676,6 +692,15 @@ def c_header(schema):
 
 def encode(schema, record, values):
     rec = schema["records"][record]
+    # A key naming no field is refused, never dropped. Unknown keys used to be
+    # ignored, so a vector edited across a field rename kept supplying the old
+    # name, encoded a zero in its place, and tested nothing -- which happened:
+    # aid_begin_result's `session` outlived the field by a full review cycle.
+    unknown = set(values) - {f["name"] for f in rec["fields"]}
+    if unknown:
+        sys.exit(f"encode: {record} has no field named "
+                 f"{', '.join(sorted(unknown))}; a vector is supplying a "
+                 f"value nothing will carry")
     buf = bytearray(rec["size"])
     for f in rec["fields"]:
         v = values.get(f["name"], 0)
@@ -717,10 +742,15 @@ def reserved_mask(schema, bitmask):
     are the only bytes on the wire that a later minor version may redefine.
     """
     spec = schema["bitmasks"][bitmask]
-    rf = spec.get("reserved_from")
-    if rf is None:
+    if "reserved_from" not in spec:
         return (1 << (spec["width"] * 8)) - 1
-    return (1 << rf) - 1
+    # Derived from the NAMED bits rather than from reserved_from, so a bit
+    # retired below the boundary -- capabilities bit 7, which a pre-1.0 draft
+    # assigned -- is reserved exactly like the range above it.
+    known = 0
+    for b in spec["bits"]:
+        known |= 1 << b["bit"]
+    return known
 
 
 def _normalise(schema, record, values):
@@ -745,8 +775,17 @@ def _normalise(schema, record, values):
     return out
 
 
+#: (vector name, producer case name) for every no_roundtrip vector, filled by
+#: case() and checked against encoders.json before anything is written. A
+#: content rule is two claims -- the receiver decodes it, the encoder refuses
+#: it -- and holding them in one place is what stops either half going
+#: untested: exactly that happened when four encoder guards had vectors and no
+#: producer case, so deleting the guards failed nothing.
+NO_ROUNDTRIP_PAIRS = []
+
+
 def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=None,
-         canonical=True):
+         canonical=True, no_roundtrip=False, refused_by=None):
     # SPEC.md 5.1: a field whose validity bit is clear MUST be written as zero.
     # Applied here so the corpus cannot hold a non-conforming vector by
     # accident -- it already did once, and only the encoder round-trip found it.
@@ -756,6 +795,16 @@ def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=Non
     # from the round-trip: it asserts that re-encoding NORMALISES those bytes to
     # zero, which is the only coverage the encoder's gating rule gets. Exempting
     # it left that rule completely untested.
+    if no_roundtrip and not refused_by:
+        sys.exit(f"case {name}: no_roundtrip declares a content rule, whose "
+                 f"device-side half is an encoder refusal -- name the "
+                 f"encoders.json case that holds it via refused_by=")
+    if refused_by and not no_roundtrip:
+        sys.exit(f"case {name}: refused_by without no_roundtrip -- a case the "
+                 f"encoder may reproduce has no refusal to pair with")
+    if no_roundtrip:
+        NO_ROUNDTRIP_PAIRS.append((name, refused_by))
+
     gated = _normalise(schema, record, values)
     if canonical:
         # A canonical vector IS its own normal form. Asserting that rather
@@ -808,6 +857,12 @@ def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=Non
             c["expect_scaled"] = scaled
     if note:
         c["note"] = note
+    # A payload a receiver MUST decode but a conforming encoder MUST refuse to
+    # produce -- an out-of-range coordinate, an Info that breaks the profile
+    # matrix. The round-trip cannot apply: the decode is required and the
+    # re-encode is forbidden, and both being right is the point of the case.
+    if no_roundtrip:
+        c["no_roundtrip"] = True
     if not canonical and not reject:
         c["canonical"] = False
         # What a conforming encoder MUST turn these bytes into: SPEC.md 5.1's
@@ -864,7 +919,7 @@ def _reserved_case(schema, record, field, value):
                 + encode(schema, "imu_sample", gated))
     if record == "info":
         clean = dict(protocol_major=1, protocol_minor=0, capabilities=1,
-                     gps_rate_hz=10, gps_max_rate_hz=10, max_notify_bytes=244)
+                     gps_rate_hz=10, gps_max_rate_hz=10)
         return (dict(clean, **{field: value}),
                 encode(schema, "info", dict(clean, **{field: value})))
     if record == "monitor_value":
@@ -877,7 +932,7 @@ def _reserved_case(schema, record, field, value):
         return ({"header": hdr, "values": [val]},
                 encode(schema, "monitor_header", hdr)
                 + encode(schema, "monitor_value", gated))
-    if record in ("link_params", "power_state"):
+    if record == "power_state":
         return ({field: value}, encode(schema, record, {field: value}))
     if record == "gnss_aid_caps":
         # `format` has no zero member (SPEC.md 14.1), so a case about the
@@ -934,7 +989,13 @@ def reserved_bit_cases(schema):
             # + solution_epoch, which is a real receiver's flags rather than an
             # impossible one. The case is about the RESERVED bits, and a
             # baseline the encoder must refuse for another reason tests nothing.
-            assigned = LEGAL_ASSIGNED.get(bm, (1 << reserved_from) - 1)
+            named = 0
+            for b in spec["bits"]:
+                named |= 1 << b["bit"]
+            # From the NAMED bits, not (1 << reserved_from) - 1: a bit retired
+            # below the boundary (capabilities bit 7) is reserved, and a
+            # baseline carrying it would be a payload the encoder must refuse.
+            assigned = LEGAL_ASSIGNED.get(bm, named)
             # The TOP reserved bit, because an encoder masking at the wrong
             # width passes on the lowest reserved bit and fails on the highest.
             dirty = assigned | (1 << top)
@@ -1029,21 +1090,31 @@ def vectors(schema):
              note="Falling back to a plausible default is the sentinel mistake in a "
                   "different costume."),
         # SPEC.md 5.3 -- the two RTK bits are exclusive, and either implies
-        # differential. Both were legal until this existed, and the natural
-        # client reading of both-set is "fixed wins", which upgrades a device's
-        # accuracy claim on the strength of a bug.
+        # differential. A device MUST NOT emit either combination, and the
+        # reference ENCODER refuses both (conformance/encoders.json). A
+        # receiver decodes the fix -- the bytes are well-formed -- and SHOULD
+        # surface the contradiction as a device defect rather than trust
+        # either bit.
         case(schema, "gps_fix", "rtk-float-and-fixed",
              dict(nominal, seq=11, fix_flags=0b0000_0111),
-             "Both RTK bits set. MUST be rejected: a carrier-phase solution "
-             "has either resolved its integer ambiguities or it has not, so "
-             "the pair is a quality claim that means nothing.",
-             reject="rtk-both"),
+             "Both RTK bits set: a device-side violation of SPEC.md 5.3. The "
+             "fix is well-formed, so a receiver MUST decode it -- and SHOULD "
+             "flag the contradiction rather than read the pair as 'fixed "
+             "wins', which upgrades a device's accuracy claim on the strength "
+             "of a bug.",
+             refused_by="gps-rtk-float-and-fixed",
+             no_roundtrip=True,
+             note="No round-trip: the decode is required and the re-encode is "
+                  "forbidden, because a conforming encoder refuses to produce "
+                  "these flags."),
         case(schema, "gps_fix", "rtk-without-differential",
              dict(nominal, seq=12, fix_flags=0b0000_0100),
-             "rtk_fixed without differential. MUST be rejected: an RTK "
-             "solution IS a differentially corrected one, so this describes "
-             "no receiver.",
-             reject="rtk-without-differential"),
+             "rtk_fixed without differential: a device-side violation of "
+             "SPEC.md 5.3, since an RTK solution IS a differentially "
+             "corrected one. A receiver MUST decode the fix and SHOULD flag "
+             "the contradiction.",
+             refused_by="gps-rtk-without-differential",
+             no_roundtrip=True),
         case(schema, "gps_fix", "rtk-fixed-well-formed",
              dict(nominal, seq=13, fix_flags=0b0000_1101),
              "rtk_fixed with differential and a disciplined clock, which is "
@@ -1084,40 +1155,42 @@ def vectors(schema):
              dict(nominal, seq=31, head_mot=35_999_999),
              "SPEC.md 5.4 -- heading is 0 to 360 exclusive of 360, so this is "
              "the largest legal value and 36000000 is not."),
-        {"name": "latitude-beyond-the-pole",
-         "desc": "A latitude of 91 degrees with the position bit set. MUST be "
-                 "rejected, never clamped: 91 degrees is not a place a clamp "
-                 "could move closer to, it is a corrupted field -- and every "
-                 "other field in the record came from the same bytes. Clamping "
-                 "to 90 puts the vehicle at the pole and lets the client draw "
-                 "it there. SPEC.md 5.4.",
-         "record": "gps_fix",
-         "hex": encode(schema, "gps_fix",
-                       dict(nominal, seq=32, lat=910_000_000)).hex(),
-         "must_reject": "lat-out-of-range"},
-        {"name": "longitude-beyond-the-antimeridian",
-         "desc": "A longitude of 181 degrees. MUST be rejected. SPEC.md 5.4.",
-         "record": "gps_fix",
-         "hex": encode(schema, "gps_fix",
-                       dict(nominal, seq=33, lon=1_810_000_000)).hex(),
-         "must_reject": "lon-out-of-range"},
-        {"name": "heading-at-360",
-         "desc": "A heading of exactly 360 degrees. MUST be rejected: 360 and 0 "
-                 "are the same bearing, and a range that admits both has two "
-                 "encodings for one direction. SPEC.md 5.4.",
-         "record": "gps_fix",
-         "hex": encode(schema, "gps_fix",
-                       dict(nominal, seq=34, head_mot=36_000_000)).hex(),
-         "must_reject": "head-out-of-range"},
+        # SPEC.md 5.4 -- the range rules bind the DEVICE: it MUST NOT emit a
+        # coordinate outside them, and the reference encoder refuses to
+        # (conformance/encoders.json). A receiver decodes the fix and SHOULD
+        # surface the violation; it MUST NOT clamp, because 91 degrees is not
+        # a place a clamp could move closer to and clamping to 90 puts the
+        # vehicle at the pole.
+        case(schema, "gps_fix", "latitude-beyond-the-pole",
+             dict(nominal, seq=32, lat=910_000_000),
+             "A latitude of 91 degrees with the position bit set: a "
+             "device-side violation of SPEC.md 5.4. The fix is well-formed, "
+             "so a receiver MUST decode it -- and SHOULD report the value as "
+             "a device defect rather than clamp it or plot it.",
+             refused_by="gps-latitude-beyond-the-pole",
+             no_roundtrip=True,
+             note="No round-trip: a conforming encoder refuses this latitude, "
+                  "which is the device-side half of the same rule."),
+        case(schema, "gps_fix", "longitude-beyond-the-antimeridian",
+             dict(nominal, seq=33, lon=1_810_000_000),
+             "A longitude of 181 degrees. Decodes; SHOULD be flagged. "
+             "SPEC.md 5.4.",
+             refused_by="gps-longitude-beyond-the-antimeridian",
+             no_roundtrip=True),
+        case(schema, "gps_fix", "heading-at-360",
+             dict(nominal, seq=34, head_mot=36_000_000),
+             "A heading of exactly 360 degrees, which SPEC.md 5.4 excludes -- "
+             "360 and 0 are the same bearing, and a range admitting both has "
+             "two encodings for one direction. Decodes; SHOULD be flagged.",
+             refused_by="gps-heading-at-360",
+             no_roundtrip=True),
         case(schema, "gps_fix", "out-of-range-but-not-claimed",
              dict(nominal, seq=35, validity=V["t_utc"], lat=910_000_000),
              "A latitude of 91 degrees with the position bit CLEAR. The range "
              "rule of SPEC.md 5.4 applies only where a validity bit claims the "
-             "field means something, so this MUST decode and MUST report "
-             "position absent. A receiver that rejected it would be refusing a "
-             "fix over a field it has already been told to ignore, and SPEC.md "
-             "5.1 puts the duty to write zero on the device rather than the "
-             "duty to police it on the receiver.",
+             "field means something, so there is nothing here even to flag: "
+             "this MUST decode and MUST report position absent. SPEC.md 5.1 "
+             "puts the duty to write zero on the device.",
              canonical=False,
              note="Not byte-canonical, so exempt from the round-trip: a "
                   "conforming encoder normalises the ungated latitude to zero, "
@@ -1546,18 +1619,17 @@ def vectors(schema):
     files["info.json"] = [
         case(schema, "info", "gps-and-can-device",
              dict(protocol_major=1, protocol_minor=0,
-                  capabilities=C["gps"] | C["can"] | C["control"] | C["on_change_subscriptions"],
+                  capabilities=C["gps"] | C["can"] | C["control"] | C["masked_subscriptions"],
                   gps_rate_hz=25, gps_max_rate_hz=25, can_subscription_slots=64,
                   can_max_frames_per_s=4000, imu_rate_hz=0, imu_max_rate_hz=0,
-                  clock_flags=0b01, max_notify_bytes=244),
+                  clock_flags=0b01),
              "A typical dual-role module."),
         case(schema, "info", "gps-only-no-control",
              dict(protocol_major=1, protocol_minor=0, capabilities=C["gps"],
-                  gps_rate_hz=10, gps_max_rate_hz=10,
-                  max_notify_bytes=185),
+                  gps_rate_hz=10, gps_max_rate_hz=10),
              "A GPS-only board with no control channel. Every CAN capacity figure is zero "
              "and the largest CAN payload follows from the capability bits "
-             "(SPEC.md 4.2) rather than from a field -- and a "
+             "(SPEC.md 4.1) rather than from a field -- and a "
              "client MUST NOT infer a default."),
         case(schema, "info", "future-minor-unknown-capability",
              dict(protocol_major=1, protocol_minor=7,
@@ -1565,7 +1637,7 @@ def vectors(schema):
                                 | C["control"] | (1 << 19)),
                   gps_rate_hz=25, gps_max_rate_hz=25, can_subscription_slots=32,
                   can_max_frames_per_s=4000, imu_rate_hz=833, imu_max_rate_hz=833,
-                  clock_flags=0b11, max_notify_bytes=498),
+                  clock_flags=0b11),
              "Minor 7 with a capability bit this client has never heard of. A client MUST "
              "ignore the unknown bit and use everything it does understand, and a "
              "VTP/1.0 encoder MUST NOT reproduce it (SPEC.md 2).",
@@ -1578,71 +1650,85 @@ def vectors(schema):
              dict(protocol_major=1, protocol_minor=0,
                   capabilities=C["gps"] | C["imu"] | C["control"],
                   gps_rate_hz=10, gps_max_rate_hz=25,
-                  imu_rate_hz=100, imu_max_rate_hz=833, max_notify_bytes=244),
+                  imu_rate_hz=100, imu_max_rate_hz=833),
              "A device running below its ceiling: 10 Hz of a possible 25, 100 Hz of a "
              "possible 833. Current rate and maximum rate are separate fields and a "
              "client MUST NOT read one for the other.",
              note="The only vector where the current and maximum rates differ. Without "
                   "it a decoder can read gps_rate_hz from gps_max_rate_hz's offset and "
                   "pass the whole corpus -- found by tools/mutate.py, not by review."),
-        # SPEC.md 4.1 -- the capability matrix, in the direction that catches a
-        # device rather than a client. Each of these decoded happily before the
-        # matrix existed.
+        # SPEC.md 4.1 -- the capability matrix binds the DEVICE: it MUST NOT
+        # publish an Info that breaks an implication, and the reference
+        # encoder refuses to (conformance/encoders.json). A client decodes the
+        # Info -- the bytes are well-formed -- and MUST NOT use a role whose
+        # required bit is missing; it SHOULD surface the contradiction as a
+        # device defect rather than guess which half was meant.
         case(schema, "info", "can-without-control",
              dict(protocol_major=1, protocol_minor=0,
                   capabilities=C["gps"] | C["can"],
                   gps_rate_hz=10, gps_max_rate_hz=10, can_subscription_slots=32,
-                  can_max_frames_per_s=2000,
-                  max_notify_bytes=244),
-             "SPEC.md 4.1 -- `can` requires `control`. A CAN device with no Control "
-             "characteristic forwards nothing, because CAN_SUBSCRIBE is the only way "
-             "to ask it to, so this advertises a role no client can use.",
-             reject="capabilities"),
+                  can_max_frames_per_s=2000),
+             "SPEC.md 4.1 -- `can` requires `control`, so this Info is a "
+             "device-side violation: it advertises a role no client can use, "
+             "because CAN_SUBSCRIBE is the only way to receive a frame. A "
+             "client MUST decode it, MUST NOT use the CAN role, and SHOULD "
+             "report the contradiction.",
+             refused_by="info-can-without-control",
+             no_roundtrip=True,
+             note="No round-trip: the decode is required and the re-encode is "
+                  "forbidden, because a conforming encoder refuses to publish "
+                  "an Info that breaks the matrix."),
         case(schema, "info", "monitor-without-control",
              dict(protocol_major=1, protocol_minor=0,
                   capabilities=C["gps"] | C["monitor"],
-                  gps_rate_hz=10, gps_max_rate_hz=10, max_notify_bytes=244),
-             "SPEC.md 4.1 -- `monitor` requires `control`. MONITOR_LIST is the only "
-             "way a device can say which channels it wants.",
-             reject="capabilities"),
+                  gps_rate_hz=10, gps_max_rate_hz=10),
+             "SPEC.md 4.1 -- `monitor` requires `control`; MONITOR_LIST is the "
+             "only way a device can say which channels it wants. Decodes; the "
+             "Monitor role MUST NOT be used.",
+             refused_by="info-monitor-without-control",
+             no_roundtrip=True),
         case(schema, "info", "can-fd-without-can",
              dict(protocol_major=1, protocol_minor=0,
-                  capabilities=C["can_fd"] | C["control"],
-                  max_notify_bytes=244),
+                  capabilities=C["can_fd"] | C["control"]),
              "SPEC.md 4.1 -- `can_fd` qualifies how CAN frames are carried, and "
-             "qualifies nothing on a device with no CAN.",
-             reject="capabilities"),
+             "qualifies nothing on a device with no CAN. Decodes; SHOULD be "
+             "flagged.",
+             refused_by="info-can-fd-without-can",
+             no_roundtrip=True),
         case(schema, "info", "capacity-without-capability",
              dict(protocol_major=1, protocol_minor=0, capabilities=C["gps"],
                   gps_rate_hz=10, gps_max_rate_hz=10,
-                  can_subscription_slots=32, can_max_frames_per_s=4000,
-                  max_notify_bytes=185),
-             "SPEC.md 4.1 -- every CAN capacity MUST be zero while the `can` bit is "
-             "clear. A client sizing a buffer from can_max_frames_per_s here has been "
-             "told something false about a role the device does not have.",
-             reject="capabilities"),
-        {"name": "reserved-byte-nonzero",
-         "desc": "Byte 20 carries a value assigned by a future minor. It held "
-                 "can_max_payload until SPEC.md 4.2 derived the CAN payload "
-                 "ceiling from the capability bits instead, so it is reserved "
-                 "now -- and both halves of SPEC.md 2 apply: a decoder MUST "
-                 "ignore it, and an encoder MUST normalise it to zero.",
+                  can_subscription_slots=32, can_max_frames_per_s=4000),
+             "SPEC.md 4.1 -- every CAN capacity MUST be zero while the `can` "
+             "bit is clear, so this device has published a capability it does "
+             "not have. Decodes; a client MUST NOT size anything from these "
+             "figures and SHOULD report them.",
+             refused_by="info-capacity-without-capability",
+             no_roundtrip=True),
+        {"name": "reserved-bytes-nonzero",
+         "desc": "Bytes 20 and 22-23 carry values assigned by a future minor. "
+                 "Byte 20 held can_max_payload until SPEC.md 4.1 derived the "
+                 "CAN payload ceiling from the capability bits; bytes 22-23 "
+                 "held max_notify_bytes until it was removed as a restatement "
+                 "of the negotiated ATT payload. Both halves of SPEC.md 2 "
+                 "apply: a decoder MUST ignore them, and an encoder MUST "
+                 "normalise them to zero.",
          "record": "info",
          "hex": encode(schema, "info",
                        dict(protocol_major=1, protocol_minor=0,
                             capabilities=C["gps"], gps_rate_hz=10,
                             gps_max_rate_hz=10, reserved_20=0x40,
-                            max_notify_bytes=244)).hex(),
+                            reserved_22=0xBEEF)).hex(),
          "expect": {f["name"]: dict(protocol_major=1, protocol_minor=0,
                                     capabilities=C["gps"], gps_rate_hz=10,
                                     gps_max_rate_hz=10, reserved_20=0x40,
-                                    max_notify_bytes=244).get(f["name"], 0)
+                                    reserved_22=0xBEEF).get(f["name"], 0)
                     for f in schema["records"]["info"]["fields"]},
          "canonical": False,
          "expect_roundtrip_hex": encode(schema, "info",
                        dict(protocol_major=1, protocol_minor=0,
                             capabilities=C["gps"], gps_rate_hz=10,
-                            gps_max_rate_hz=10, max_notify_bytes=244)).hex()},
+                            gps_max_rate_hz=10)).hex()},
         {"name": "short-payload",
          "desc": "23 bytes. Info is fixed-size; a truncated read MUST be rejected.",
          "record": "info",
@@ -1654,88 +1740,6 @@ def vectors(schema):
          "record": "info",
          "hex": (encode(schema, "info", dict(protocol_major=1)) + b"\x00").hex(),
          "must_reject": "length"},
-    ]
-
-    # ---- CAN subscription table -----------------------------------------
-    EXACT = 0x3FFFFFFF  # SPEC.md 9.2
-
-    def sub(handle, cid, mask, mode, arg):
-        return dict(handle=handle, id=cid, mask=mask, mode=mode, arg=arg)
-
-    def can_list(name, desc, page, entries, **kw):
-        raw = encode(schema, "can_list_page", page) + b"".join(
-            encode(schema, "can_subscription", e) for e in entries)
-        exp_entries = []
-        for e in entries:
-            row = {f["name"]: e.get(f["name"], 0)
-                   for f in schema["records"]["can_subscription"]["fields"]}
-            known = {m["value"] for m in SCHEMA_ENUMS["sub_mode"]}
-            row["mode_known"] = row["mode"] in known
-            exp_entries.append(row)
-        c = {"name": name, "desc": desc, "record": "can_list", "hex": raw.hex(),
-             "expect": {"page": {f["name"]: page.get(f["name"], 0)
-                                 for f in schema["records"]["can_list_page"]["fields"]},
-                        "entries": exp_entries}}
-        c.update(kw)
-        return c
-
-    files["can-list.json"] = [
-        can_list("empty-table",
-                 "No subscriptions installed. total 0, count 0 -- a legal answer, "
-                 "and the state a device MUST be in after CAN_RESET or a reconnect.",
-                 dict(total=0, index=0, count=0), []),
-        can_list("one-exact-id",
-                 "A single exact-id subscription. CAN_SUBSCRIBE is CAN_SUBSCRIBE_MASK "
-                 "with mask 0x3FFFFFFF, so that is what the table reports.",
-                 dict(total=1, index=0, count=1),
-                 [sub(1, 0x0C0, EXACT, 0, 0)]),
-        can_list("mask-and-exact-overlapping",
-                 "A mask covering 0x100-0x10F alongside an exact subscription for "
-                 "0x105. Both match frame 0x105; SPEC.md 9.3 says the more specific "
-                 "one governs, and both terms are visible here so a client can work "
-                 "out which.",
-                 dict(total=2, index=0, count=2),
-                 [sub(7, 0x100, 0x1FFFFFF0, 1, 100),
-                  sub(9, 0x105, EXACT, 0, 0)]),
-        can_list("first-page-of-many",
-                 "Six entries of fourteen: the most that fit beside a page header in "
-                 "a 97-byte response at the minimum ATT MTU. The client repeats from "
-                 "index + count.",
-                 dict(total=14, index=0, count=6),
-                 [sub(h, 0x200 + h, EXACT, 3, 4) for h in range(1, 7)]),
-        can_list("later-page",
-                 "The continuation: index 6 of the same fourteen. `total` is the whole "
-                 "table, not the page.",
-                 dict(total=14, index=6, count=6),
-                 [sub(h, 0x200 + h, EXACT, 3, 4) for h in range(7, 13)]),
-        can_list("start-beyond-end",
-                 "A client asked for index 99 of a 2-entry table. Not an error: ok, "
-                 "count 0, and the true total so the client can tell it overshot.",
-                 dict(total=2, index=99, count=0), []),
-        can_list("unknown-mode-in-table",
-                 "The device reports a subscription mode from a later minor. A client "
-                 "MUST report it unknown and MUST NOT read it as every_frame.",
-                 dict(total=1, index=0, count=1),
-                 [sub(3, 0x1A0, EXACT, 200, 0)]),
-        {"name": "short-payload",
-         "desc": "5 bytes: shorter than the page header. MUST be rejected.",
-         "record": "can_list",
-         "hex": encode(schema, "can_list_page", dict(total=0, index=0, count=0))[:-1].hex(),
-         "must_reject": "length"},
-        {"name": "long-payload",
-         "desc": "One entry declared, one present, plus a trailing byte. The length "
-                 "MUST equal the header plus count entries exactly.",
-         "record": "can_list",
-         "hex": (encode(schema, "can_list_page", dict(total=1, index=0, count=1))
-                 + encode(schema, "can_subscription", sub(1, 0x0C0, EXACT, 0, 0))
-                 + b"\x00").hex(),
-         "must_reject": "length"},
-        {"name": "count-exceeds-payload",
-         "desc": "Header claims three entries, one is present. MUST be rejected.",
-         "record": "can_list",
-         "hex": (encode(schema, "can_list_page", dict(total=3, index=0, count=3))
-                 + encode(schema, "can_subscription", sub(1, 0x0C0, EXACT, 0, 0))).hex(),
-         "must_reject": "truncated-record"},
     ]
 
     # ---- Monitor ---------------------------------------------------------
@@ -1951,91 +1955,6 @@ def vectors(schema):
                         dict(slot=0, validity=PRESENT, value=2)],
                        must_reject="duplicate-slot"))
 
-    # ---- Link params -----------------------------------------------------
-    L = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["link_validity"]["bits"]}
-    all_valid = L["att_mtu"] | L["ll_data_length"] | L["conn_params"] | L["phy"]
-    files["link-params.json"] = [
-        case(schema, "link_params", "well-configured-link",
-             dict(validity=all_valid, att_mtu=247, ll_max_tx_octets=251,
-                  ll_max_rx_octets=251, conn_interval=12, peripheral_latency=0,
-                  supervision_timeout=500, phy_tx=2, phy_rx=2),
-             "A device that did everything SPEC.md 2 asks: link-layer payload raised to "
-             "match the MTU, 2M PHY, 15 ms interval.",
-             note="conn_interval is in 1.25 ms units, so 12 is 15 ms."),
-        case(schema, "link_params", "mtu-without-data-length",
-             dict(validity=all_valid, att_mtu=247, ll_max_tx_octets=27,
-                  ll_max_rx_octets=27, conn_interval=24, peripheral_latency=0,
-                  supervision_timeout=500, phy_tx=1, phy_rx=1),
-             "A large ATT MTU over the default 27-octet link-layer payload. Conforming, "
-             "decodable, and roughly three times the radio airtime per byte.",
-             note="This is the condition SPEC.md 2.1 exists to prevent and which a "
-                  "client cannot observe from its own BLE stack on any platform. It "
-                  "is a diagnostic, not a reject: the device is not malformed, it is "
-                  "expensive."),
-        case(schema, "link_params", "asymmetric-data-length",
-             dict(validity=all_valid, att_mtu=247, ll_max_tx_octets=251,
-                  ll_max_rx_octets=27, conn_interval=12, peripheral_latency=0,
-                  supervision_timeout=500, phy_tx=2, phy_rx=2),
-             "Link-layer payload negotiated asymmetrically: the device may send 251 "
-             "octets but may only receive 27. Legal, and the two fields are distinct.",
-             note="The only vector where ll_max_tx_octets and ll_max_rx_octets differ. "
-                  "Without it, a decoder that reads both from the same offset passes "
-                  "the whole corpus -- the tx/rx pair is otherwise symmetric in every "
-                  "case, which is exactly the kind of hole mutation testing finds and "
-                  "review does not."),
-        case(schema, "link_params", "phy-not-determinable",
-             dict(validity=L["att_mtu"] | L["ll_data_length"] | L["conn_params"],
-                  att_mtu=185, ll_max_tx_octets=251, ll_max_rx_octets=251,
-                  conn_interval=24, peripheral_latency=0, supervision_timeout=500),
-             "A controller that does not expose its PHY. The phy bit is clear, so phy_tx "
-             "and phy_rx MUST be reported absent -- NOT decoded as LE 1M.",
-             note="LE 1M is 1 and there is no zero member, precisely so that a zeroed "
-                  "byte cannot pass for the most common PHY."),
-        case(schema, "link_params", "stale-values-behind-cleared-bits",
-             dict(validity=0, att_mtu=247, ll_max_tx_octets=251,
-                  ll_max_rx_octets=251, conn_interval=12, peripheral_latency=4,
-                  supervision_timeout=500, phy_tx=2, phy_rx=2),
-             "A non-conforming device that clears every validity bit but leaves the "
-             "previous values in the bytes. A decoder MUST report every field absent on "
-             "the strength of the mask alone, and MUST NOT read LE 2M or a 247-byte MTU "
-             "out of them.",
-             canonical=False,
-             note="Not byte-canonical, so the round-trip asserts that a conforming "
-                  "encoder NORMALISES these bytes to zero. Every validity bit is clear "
-                  "in one case deliberately: this is the only coverage the link_params "
-                  "encoder's gating rule gets, and a case that cleared just one bit "
-                  "would leave the other three gates untested — which is exactly how "
-                  "the gps_fix encoder gate went uncovered in the first corpus."),
-        case(schema, "link_params", "nothing-determinable",
-             dict(validity=0),
-             "A stack that exposes none of it. Every field is zero AND every validity "
-             "bit is clear; a client MUST conclude 'unknown', not 'MTU 0 on no PHY'."),
-        case(schema, "link_params", "unknown-phy-value",
-             dict(validity=all_valid, att_mtu=247, ll_max_tx_octets=251,
-                  ll_max_rx_octets=251, conn_interval=12, peripheral_latency=0,
-                  supervision_timeout=500, phy_tx=9, phy_rx=2),
-             "A PHY value from a future Bluetooth revision. A decoder MUST report it "
-             "unknown and MUST NOT fall back to LE 1M."),
-        case(schema, "link_params", "reserved-validity-bit-set",
-             dict(validity=all_valid | (1 << 9), att_mtu=247, ll_max_tx_octets=251,
-                  ll_max_rx_octets=251, conn_interval=12, peripheral_latency=0,
-                  supervision_timeout=500, phy_tx=2, phy_rx=2),
-             "A future minor set link_validity bit 9. A decoder MUST ignore the unknown "
-             "bit and decode every known field normally, and a VTP/1.0 encoder MUST "
-             "normalise the bit away on transmit (SPEC.md 2).",
-             canonical=False),
-        {"name": "short-payload",
-         "desc": "15 bytes. A truncated control response MUST be rejected whole.",
-         "record": "link_params",
-         "hex": encode(schema, "link_params", dict(validity=all_valid))[:-1].hex(),
-         "must_reject": "length"},
-        {"name": "long-payload",
-         "desc": "17 bytes. link_params is a fixed-size record with no extension "
-                 "mechanism, so trailing bytes MUST be rejected.",
-         "record": "link_params",
-         "hex": (encode(schema, "link_params", dict(validity=all_valid)) + b"\x00").hex(),
-         "must_reject": "length"},
-    ]
     # ---- Power -----------------------------------------------------------
     P = {b["name"]: 1 << b["bit"]
          for b in schema["bitmasks"]["power_validity"]["bits"]}
@@ -2063,7 +1982,7 @@ def vectors(schema):
              "`charged` is a distinct member so a device with the information "
              "does not have to keep saying `charging`.",
              note="percent is 100, the top of the field's range and a legal "
-                  "value; 101 is the first that is not (SPEC.md 9.9)."),
+                  "value; 101 is the first that is not (SPEC.md 9.7)."),
         case(schema, "power_state", "gauge-failed-mid-session",
              dict(validity=P["source"], source=2),
              "A device that knows it is on its battery and has lost the gauge "
@@ -2124,11 +2043,15 @@ def vectors(schema):
                   "of those instead."),
         case(schema, "power_state", "percent-above-full",
              dict(validity=all_power, source=2, percent=200),
-             "200%. Rejected whole rather than clamped to 100: the byte came out "
-             "of the same four as the source, so neither is trustworthy, and a "
-             "client that clamps shows a full battery on a device that has lost "
+             "200%, a device-side violation of SPEC.md 9.7. The record is "
+             "well-formed, so a receiver MUST decode it -- and SHOULD report "
+             "the value as a device defect rather than clamp it: a client "
+             "that clamps shows a full battery on a device that has lost "
              "track of its own pack.",
-             reject="percent-out-of-range"),
+             refused_by="power-percent-above-full",
+             no_roundtrip=True,
+             note="No round-trip: a conforming encoder refuses this percent, "
+                  "which is the device-side half of the same rule."),
         {"name": "short-payload",
          "desc": "3 bytes. A truncated control response MUST be rejected whole.",
          "record": "power_state",
@@ -2147,32 +2070,28 @@ def vectors(schema):
     # SPEC.md 14. Three records reach the wire: what the device declares, what
     # opening a transfer returns, and what closing one reports.
     AV = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["aid_validity"]["bits"]}
-    AF = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["aid_flags"]["bits"]}
     CV = {b["name"]: 1 << b["bit"] for b in schema["bitmasks"]["commit_validity"]["bits"]}
     files["aiding.json"] = [
         case(schema, "gnss_aid_caps", "caps-holding-a-window",
-             dict(validity=AV["held_until"], format=1, flags=AF["persists"],
+             dict(validity=AV["held_until"], format=1,
                   max_bytes=131_072, held_until=1_766_000_000_000),
-             "A device that accepts UBX-MGA, keeps it across a power cycle, and is "
-             "already holding orbit data valid to a stated instant.",
+             "A device that accepts UBX-MGA and is already holding orbit data "
+             "valid to a stated instant. What it holds NOW is the whole "
+             "declaration: a client learns what survives a power cycle by "
+             "asking again on the next connection (SPEC.md 14.2).",
              note="held_until uses the same type and units as gps_fix.t_utc, so a "
                   "client comparing the two converts nothing."),
         case(schema, "gnss_aid_caps", "caps-holding-nothing",
-             dict(validity=0, format=1, flags=0, max_bytes=131_072),
+             dict(validity=0, format=1, max_bytes=65_536),
              "A device with no aiding loaded. held_until is zero AND its validity bit "
              "is clear; a client MUST conclude 'holds nothing', never 'valid until the "
              "Unix epoch'.",
-             note="validity, format and flags all differ from each other across this "
-                  "file's three caps vectors. Without that a decoder reading any one "
-                  "of the three from another's offset passes the whole corpus -- the "
-                  "hole mutation testing found in link_params' tx/rx pair."),
-        case(schema, "gnss_aid_caps", "caps-without-persistence",
-             dict(validity=AV["held_until"], format=1, flags=0,
-                  max_bytes=65_536, held_until=1_766_000_000_000),
-             "A device holding a window that will not survive a power cycle. A client "
-             "MUST NOT carry held_until forward to the next connection (SPEC.md 14.2)."),
+             note="validity, format and max_bytes all differ from "
+                  "caps-holding-a-window's values. Without that a decoder reading one "
+                  "field from another's offset passes the whole corpus -- a hole "
+                  "mutation testing has found in look-alike field pairs before."),
         case(schema, "gnss_aid_caps", "caps-stale-value-behind-cleared-bit",
-             dict(validity=0, format=1, flags=AF["persists"],
+             dict(validity=0, format=1,
                   max_bytes=131_072, held_until=1_766_000_000_000),
              "A non-conforming device that clears the held_until bit but leaves the "
              "previous window in the bytes. A decoder MUST report held_until absent on "
@@ -2182,29 +2101,21 @@ def vectors(schema):
                   "conforming encoder normalises the field to zero. This is the only "
                   "coverage the gnss_aid_caps encoder gate gets."),
         case(schema, "gnss_aid_caps", "caps-unknown-format",
-             dict(validity=0, format=9, flags=0, max_bytes=131_072),
+             dict(validity=0, format=9, max_bytes=131_072),
              "A format from a later minor version. A decoder MUST report it unknown, "
              "and a client MUST NOT open a transfer it cannot fill (SPEC.md 14.1)."),
-        case(schema, "gnss_aid_caps", "caps-reserved-flag-set",
-             dict(validity=AV["held_until"], format=1, flags=AF["persists"] | (1 << 4),
-                  max_bytes=131_072, held_until=1_766_000_000_000),
-             "A later minor assigned aid_flags bit 4. A decoder MUST ignore the unknown "
-             "bit and decode every known field normally, and a VTP/1.0 encoder MUST "
-             "normalise it away on transmit (SPEC.md 2).",
-             canonical=False),
-        case(schema, "gnss_aid_caps", "caps-reserved-byte-set",
-             dict(validity=AV["held_until"], format=1, flags=AF["persists"],
-                  reserved_3=0x5A, max_bytes=131_072,
+        case(schema, "gnss_aid_caps", "caps-reserved-bytes-set",
+             dict(validity=AV["held_until"], format=1,
+                  reserved_2=0x5A5A, max_bytes=131_072,
                   held_until=1_766_000_000_000),
-             "A later minor assigned gnss_aid_caps.reserved_3. A decoder MUST read "
-             "the byte and report it, MUST NOT reject the record, and MUST decode "
-             "every known field normally.",
+             "A later minor assigned gnss_aid_caps.reserved_2 -- the bytes that held "
+             "aid_flags in a pre-1.0 draft. A decoder MUST read them and report them, "
+             "MUST NOT reject the record, and MUST decode every known field normally; "
+             "a VTP/1.0 encoder MUST normalise them to zero.",
              canonical=False,
-             note="The C decoder used to omit this field from its struct and print a "
-                  "literal zero while the Python decoder read the byte, so the two "
-                  "references disagreed about the same payload -- the defect class "
-                  "this corpus exists to prevent. No vector carried a non-zero "
-                  "reserved byte, so nothing noticed."),
+             note="A decoder that omits a reserved field from its output while "
+                  "another reads it has two references disagreeing about the same "
+                  "payload -- the defect class this corpus exists to prevent."),
         {"name": "caps-short-payload",
          "desc": "15 bytes. A truncated control response MUST be rejected whole.",
          "record": "gnss_aid_caps",
@@ -2218,31 +2129,33 @@ def vectors(schema):
          "must_reject": "length"},
 
         case(schema, "aid_begin_result", "begin-at-full-mtu",
-             dict(session=7, chunk_bytes=241),
+             dict(token=7, chunk_bytes=241),
              "A transfer opened at a 247-byte ATT MTU: 247 - 3 bytes of Write Command "
              "header - 3 bytes of chunk header (SPEC.md 14.3).",
              note="chunk_bytes is fixed for the transfer because index-to-offset must "
-                  "be arithmetic; SPEC.md 14.3 gives the reason."),
+                  "be arithmetic, and the token names the transfer so a stale chunk "
+                  "on another EATT bearer cannot land in it; SPEC.md 14.3 has both "
+                  "arguments."),
         case(schema, "aid_begin_result", "begin-at-minimum-mtu",
-             dict(session=1, chunk_bytes=94),
+             dict(token=1, chunk_bytes=94),
              "The same transfer at the 100-byte minimum ATT MTU this protocol requires. "
              "A device MUST NOT return a chunk_bytes a client cannot write."),
 
         case(schema, "aid_begin_result", "begin-reserved-byte-set",
-             dict(session=7, chunk_bytes=241, reserved_3=0xA5),
+             dict(token=7, chunk_bytes=241, reserved_3=0xA5),
              "The same for aid_begin_result.reserved_3: read, reported, and "
              "normalised away by a VTP/1.0 encoder on transmit.",
              canonical=False),
         {"name": "begin-short-payload",
          "desc": "3 bytes. A truncated begin result MUST be rejected whole.",
          "record": "aid_begin_result",
-         "hex": encode(schema, "aid_begin_result", dict(session=7, chunk_bytes=241))[:-1].hex(),
+         "hex": encode(schema, "aid_begin_result", dict(token=7, chunk_bytes=241))[:-1].hex(),
          "must_reject": "length"},
         {"name": "begin-long-payload",
          "desc": "5 bytes. aid_begin_result is fixed-size, so trailing bytes MUST be "
                  "rejected.",
          "record": "aid_begin_result",
-         "hex": (encode(schema, "aid_begin_result", dict(session=7, chunk_bytes=241))
+         "hex": (encode(schema, "aid_begin_result", dict(token=7, chunk_bytes=241))
                  + b"\x00").hex(),
          "must_reject": "length"},
 
@@ -2271,6 +2184,33 @@ def vectors(schema):
              "that succeeded.",
              canonical=False,
              note="The only coverage the aid_commit_result encoder gate gets."),
+        case(schema, "aid_begin_result", "begin-zero-chunk-bytes",
+             dict(token=3, chunk_bytes=0),
+             "A chunk size of zero: a device-side violation of SPEC.md 14.3. "
+             "The record is well-formed, so a receiver MUST decode it -- and "
+             "SHOULD report it as a device defect, since no chunk of such a "
+             "transfer can carry a byte.",
+             refused_by="aid-begin-zero-chunk-size",
+             no_roundtrip=True,
+             note="No round-trip: a conforming encoder refuses a zero "
+                  "chunk_bytes, which is the device-side half of the rule."),
+        case(schema, "aid_commit_result", "commit-index-beside-applied",
+             dict(validity=CV["first_missing"], result=1, first_missing=7),
+             "first_missing named beside `applied`: a device-side violation "
+             "of SPEC.md 14.4's if-and-only-if rule. The record decodes; a "
+             "client MUST NOT tell a user chunk 7 was lost from a transfer "
+             "that succeeded, and SHOULD flag the contradiction.",
+             refused_by="aid-commit-index-without-incomplete",
+             no_roundtrip=True),
+        case(schema, "aid_commit_result", "commit-incomplete-without-index",
+             dict(validity=0, result=2),
+             "`incomplete` with the first_missing bit clear: the device says "
+             "something is missing and refuses to say what. The record "
+             "decodes -- first_missing reads absent -- and a client has no "
+             "index to resend from, so it SHOULD flag the defect rather than "
+             "guess one (SPEC.md 14.4).",
+             refused_by="aid-commit-incomplete-without-index",
+             no_roundtrip=True),
         case(schema, "aid_commit_result", "commit-unknown-result",
              dict(validity=0, result=9, first_missing=0),
              "A result from a later minor version. A decoder MUST report it unknown and "
@@ -2305,17 +2245,18 @@ def vectors(schema):
 
     files["control-response.json"] = [
         cr("ok-with-detail",
-           "A successful CAN_SUBSCRIBE: three envelope bytes and the handle it "
-           "assigned. SPEC.md 9 -- detail is present because status is ok.",
-           0x02, 1, 0, struct.pack("<H", 7)),
+           "A successful MONITOR_LIST: three envelope bytes and the empty "
+           "declaration it returned. SPEC.md 9 -- detail is present because "
+           "status is ok.",
+           0x40, 1, 0, struct.pack("<BB", 0, 0)),
         cr("ok-without-detail",
            "A successful CAN_RESET. The opcode has no response detail, so an ok "
            "response is three bytes and that is not a truncated one.",
            0x01, 2, 0),
         cr("refused-is-three-bytes",
-           "CAN_SUBSCRIBE refused with bad_params. Exactly three bytes: a client "
-           "reading the five it would get on success takes a handle from a "
-           "request that failed.",
+           "CAN_SUBSCRIBE refused with bad_params. Exactly three bytes: a "
+           "refusal never carries a detail, so a client reading further takes "
+           "bytes from a request that failed.",
            0x02, 3, 2),
         cr("busy-is-not-a-refusal",
            "busy says nothing about the request itself. SPEC.md 9 -- a client "
@@ -2341,7 +2282,7 @@ def vectors(schema):
         cr("detail-on-error",
            "bad_params carrying two bytes of detail. MUST be rejected: detail is "
            "present if and only if status is ok, and a client that has already "
-           "decided the request succeeded would read those bytes as a handle.",
+           "decided the request succeeded would read those bytes as a detail.",
            0x02, 8, 2, struct.pack("<H", 7), must_reject="detail-on-error"),
         cr("short-payload",
            "Two bytes: an opcode and a tag with no status. MUST be rejected "
@@ -2402,22 +2343,29 @@ def vectors(schema):
     # emit a perfectly valid frame for a DIFFERENT one, and no decode input
     # reaches that.
     files["encoders.json"] = [
+        {"name": "power-percent-above-full",
+         "record": "power_state", "must_refuse": True, "vector": "percent-above-full",
+         "desc": "SPEC.md 9.7 -- a percent of 200 with its validity bit set. "
+                 "The device-side half of the range rule: the decode corpus "
+                 "carries the same bytes and requires a receiver to decode "
+                 "and flag them, so the refusal lives here.",
+         "input": dict(validity=2, source=0, percent=200)},
         {"name": "aid-begin-zero-chunk-size",
-         "record": "aid_begin_result", "must_refuse": True,
+         "record": "aid_begin_result", "must_refuse": True, "vector": "begin-zero-chunk-bytes",
          "desc": "A chunk size of zero. SPEC.md 14.3 forbids it, and a client "
                  "cannot tell it from a device that will not say: it writes "
                  "chunks carrying nothing until the commit reports every one "
                  "of them missing.",
-         "input": dict(session=1, chunk_bytes=0)},
+         "input": dict(chunk_bytes=0)},
         {"name": "aid-commit-index-without-incomplete",
-         "record": "aid_commit_result", "must_refuse": True,
+         "record": "aid_commit_result", "must_refuse": True, "vector": "commit-index-beside-applied",
          "desc": "first_missing named beside `applied`. SPEC.md 14.4 sets the "
                  "bit if and only if the result is `incomplete`, so this "
                  "reports a chunk lost from a transfer that lost none -- a "
                  "plausible wrong value a client will show a user.",
          "input": dict(validity=1, result=1, first_missing=7)},
         {"name": "aid-commit-incomplete-without-index",
-         "record": "aid_commit_result", "must_refuse": True,
+         "record": "aid_commit_result", "must_refuse": True, "vector": "commit-incomplete-without-index",
          "desc": "`incomplete` with the first_missing bit clear. The device "
                  "says something is missing and refuses to say what, so the "
                  "client has no index to resend from -- the one thing that "
@@ -2425,7 +2373,7 @@ def vectors(schema):
                  "14.4).",
          "input": dict(validity=0, result=2, first_missing=0)},
         {"name": "can-id-above-arbitration-field",
-         "record": "can_batch", "must_refuse": True,
+         "record": "can_batch", "must_refuse": True, "structural": True,
          "desc": "An identifier of 0x3FFFFFFF. MUST be refused, not masked: "
                  "masking silently produced 0x1FFFFFFF, a frame the caller "
                  "never asked for, on the field a client uses to decide what "
@@ -2435,7 +2383,7 @@ def vectors(schema):
                    "records": [dict(dt=0, id=0x3FFFFFFF, extended=True, fd=False,
                                     rtr=False, len=1, payload="00")]}},
         {"name": "can-id-negative",
-         "record": "can_batch", "must_refuse": True,
+         "record": "can_batch", "must_refuse": True, "structural": True,
          "desc": "An identifier of -1. Masking turned it into 0x1FFFFFFF -- the "
                  "same frame an over-large identifier became, so two different "
                  "mistakes produced one wrong answer.",
@@ -2443,13 +2391,13 @@ def vectors(schema):
                    "records": [dict(dt=0, id=-1, extended=True, fd=False,
                                     rtr=False, len=1, payload="00")]}},
         {"name": "can-first-record-dt-nonzero",
-         "record": "can_batch", "must_refuse": True,
+         "record": "can_batch", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 6.1 -- t_base IS record 0's arrival time.",
          "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
                    "records": [dict(dt=5, id=0x1A0, extended=False, fd=False,
                                     rtr=False, len=1, payload="00")]}},
         {"name": "can-classic-nine-bytes",
-         "record": "can_batch", "must_refuse": True,
+         "record": "can_batch", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 6.10 -- a Classic frame carries 0..8.",
          "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
                    "records": [dict(dt=0, id=0x1A0, extended=False, fd=False,
@@ -2461,7 +2409,7 @@ def vectors(schema):
         # different symptoms -- and the C adapter did one of each before these
         # existed, answering `ok` to both.
         {"name": "can-len-longer-than-payload",
-         "record": "can_batch", "must_refuse": True,
+         "record": "can_batch", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 6 -- len 8 with one byte of payload. Padding to "
                  "eight publishes seven bytes the caller never supplied, on a "
                  "bus signal a client will decode as a measurement.",
@@ -2469,54 +2417,67 @@ def vectors(schema):
                    "records": [dict(dt=0, id=0x1A0, extended=False, fd=False,
                                     rtr=False, len=8, payload="00")]}},
         {"name": "can-len-shorter-than-payload",
-         "record": "can_batch", "must_refuse": True,
+         "record": "can_batch", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 6 -- len 0 with one byte of payload. Discarding it "
                  "silently drops data the caller asked to send.",
          "input": {"header": dict(seq=0, dropped=0, t_base=0, count=1, flags=0),
                    "records": [dict(dt=0, id=0x1A0, extended=False, fd=False,
                                     rtr=False, len=0, payload="aa")]}},
         {"name": "gps-latitude-beyond-the-pole",
-         "record": "gps_fix", "must_refuse": True,
+         "record": "gps_fix", "must_refuse": True, "vector": "latitude-beyond-the-pole",
          "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position "
                  "bit set so the range rule applies.",
          "input": {"fix": dict(seq=0, validity=V["position"], lat=910_000_000,
                                lon=0, ext_count=0)}},
+        {"name": "gps-longitude-beyond-the-antimeridian",
+         "record": "gps_fix", "must_refuse": True, "vector": "longitude-beyond-the-antimeridian",
+         "desc": "SPEC.md 5.4 -- a longitude of 181 degrees, with the position "
+                 "bit set so the range rule applies.",
+         "input": {"fix": dict(seq=0, validity=V["position"], lat=0,
+                               lon=1_810_000_000, ext_count=0)}},
+        {"name": "gps-heading-at-360",
+         "record": "gps_fix", "must_refuse": True, "vector": "heading-at-360",
+         "desc": "SPEC.md 5.4 -- a heading of exactly 360 degrees, which the "
+                 "range excludes: 360 and 0 are the same bearing, and a range "
+                 "admitting both has two encodings for one direction.",
+         "input": {"fix": dict(seq=0, validity=V["head_mot"],
+                               head_mot=36_000_000, ext_count=0)}},
         {"name": "gps-rtk-float-and-fixed",
-         "record": "gps_fix", "must_refuse": True,
+         "record": "gps_fix", "must_refuse": True, "vector": "rtk-float-and-fixed",
          "desc": "SPEC.md 5.3 -- the two RTK bits are exclusive.",
          "input": {"fix": dict(seq=0, validity=0, fix_flags=0b0000_0111,
                                ext_count=0)}},
         {"name": "gps-rtk-without-differential",
-         "record": "gps_fix", "must_refuse": True,
+         "record": "gps_fix", "must_refuse": True, "vector": "rtk-without-differential",
          "desc": "SPEC.md 5.3 -- an RTK solution is a differentially "
                  "corrected one, so the bit is implied and not optional.",
          "input": {"fix": dict(seq=0, validity=0, fix_flags=0b0000_0010,
                                ext_count=0)}},
         {"name": "gps-ext-count-disagrees",
-         "record": "gps_fix", "must_refuse": True,
+         "record": "gps_fix", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 5.5 -- three extensions declared, none supplied.",
          "input": {"fix": dict(seq=0, validity=0, ext_count=3), "ext_hex": ""}},
         {"name": "imu-period-zero",
-         "record": "imu_batch", "must_refuse": True,
+         "record": "imu_batch", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 7 -- zero says every sample was taken at one instant.",
          "input": {"header": dict(seq=0, dropped=0, t_base=0, period=0, count=1,
                                   flags=0b011),
                    "samples": [dict(ax=1, ay=2, az=3, gx=4, gy=5, gz=6)]}},
         {"name": "can-empty-batch",
-         "record": "can_batch", "must_refuse": True,
+         "record": "can_batch", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 6.2 -- t_base names record 0, so a batch with no "
                  "records timestamps a frame that does not exist.",
          "input": {"header": dict(seq=0, dropped=0, t_base=0, count=0, flags=0),
                    "records": []}},
         {"name": "imu-empty-batch",
-         "record": "imu_batch", "must_refuse": True,
+         "record": "imu_batch", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 7 -- t_base names sample 0, so a batch with no "
                  "samples timestamps one that does not exist.",
          "input": {"header": dict(seq=0, dropped=0, t_base=0, period=1000,
                                   count=0, flags=0b011),
                    "samples": []}},
         {"name": "monitor-declaration-repeats-a-slot",
-         "record": "monitor_list", "must_refuse": True,
+         "record": "monitor_list", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 13.3 -- the decoder already rejected this, so an "
                  "encoder emitting it produced a declaration its own reader "
                  "refuses.",
@@ -2524,7 +2485,7 @@ def vectors(schema):
                    "entries": [dict(slot=0, channel=1, max_age=10),
                                dict(slot=0, channel=7, max_age=10)]}},
         {"name": "monitor-channel-with-no-deadline",
-         "record": "monitor_list", "must_refuse": True,
+         "record": "monitor_list", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 13.5 -- every declared channel carries a deadline. "
                  "A channel with none is a value a device can go on "
                  "displaying forever after the client stopped sending it.",
@@ -2532,28 +2493,28 @@ def vectors(schema):
                    "entries": [dict(slot=0, channel=1, max_age=20),
                                dict(slot=1, channel=3, max_age=0)]}},
         {"name": "monitor-asks-for-more-than-fits",
-         "record": "monitor_list", "must_refuse": True,
+         "record": "monitor_list", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 13.4 -- more channels than fit in one complete write.",
          "input": {"declaration": dict(count=16),
                    "entries": [dict(slot=i, channel=1, max_age=10)
                                for i in range(16)]}},
         {"name": "monitor-update-with-no-values",
-         "record": "monitor_update", "must_refuse": True,
+         "record": "monitor_update", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 13.4 -- an empty write is not a complete statement "
                  "of what the client can supply.",
          "input": {"header": dict(seq=1, count=0, reserved=0), "values": []}},
         {"name": "monitor-update-repeats-a-slot",
-         "record": "monitor_update", "must_refuse": True,
+         "record": "monitor_update", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 13.4 -- nothing says which of the two wins.",
          "input": {"header": dict(seq=0, count=2, reserved=0),
                    "values": [dict(slot=3, validity=PRESENT, value=1),
                               dict(slot=3, validity=PRESENT, value=2)]}},
         {"name": "control-detail-on-a-refusal",
-         "record": "control_response", "must_refuse": True,
+         "record": "control_response", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 9 -- detail is present if and only if status is ok.",
          "input": {"opcode": 0x02, "tag": 1, "status": 2, "detail_hex": "0700"}},
         {"name": "time-sync-answered-before-asked",
-         "record": "time_sync", "must_refuse": True,
+         "record": "time_sync", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 9.7 -- a negative round trip halved into an offset is "
                  "a confidently wrong clock.",
          "input": {"t_device_rx": 9_000_000, "t_device_tx": 8_999_000}},
@@ -2613,36 +2574,95 @@ def vectors(schema):
                                    t_device_tx=9_000_000)).hex()},
         # SPEC.md 4.1, in the producer direction.
         {"name": "info-can-without-control",
-         "record": "info", "must_refuse": True,
+         "record": "info", "must_refuse": True, "vector": "can-without-control",
          "desc": "SPEC.md 4.1 -- `can` requires `control`. A device that "
                  "publishes this has advertised a role no client can use, "
                  "because CAN_SUBSCRIBE is the only way to install one.",
          "input": dict(protocol_major=1, protocol_minor=0,
                        capabilities=C["gps"] | C["can"],
                        gps_rate_hz=10, gps_max_rate_hz=10,
-                       can_subscription_slots=32, can_max_frames_per_s=2000,
-                       max_notify_bytes=244)},
+                       can_subscription_slots=32, can_max_frames_per_s=2000)},
+        {"name": "info-monitor-without-control",
+         "record": "info", "must_refuse": True, "vector": "monitor-without-control",
+         "desc": "SPEC.md 4.1 -- `monitor` requires `control`; MONITOR_LIST "
+                 "is the only way a device can say which channels it wants.",
+         "input": dict(protocol_major=1, protocol_minor=0,
+                       capabilities=C["gps"] | C["monitor"],
+                       gps_rate_hz=10, gps_max_rate_hz=10)},
+        {"name": "info-can-fd-without-can",
+         "record": "info", "must_refuse": True, "vector": "can-fd-without-can",
+         "desc": "SPEC.md 4.1 -- `can_fd` qualifies how CAN frames are "
+                 "carried, and qualifies nothing on a device with no CAN.",
+         "input": dict(protocol_major=1, protocol_minor=0,
+                       capabilities=C["can_fd"] | C["control"])},
         {"name": "info-capacity-without-capability",
-         "record": "info", "must_refuse": True,
+         "record": "info", "must_refuse": True, "vector": "capacity-without-capability",
          "desc": "SPEC.md 4.1 -- every CAN capacity is zero while the `can` "
                  "bit is clear. Masking the capacity instead would publish a "
                  "different device from the one the caller described.",
          "input": dict(protocol_major=1, protocol_minor=0,
                        capabilities=C["gps"], gps_rate_hz=10,
-                       gps_max_rate_hz=10, can_max_frames_per_s=4000,
-                       max_notify_bytes=185)},
+                       gps_max_rate_hz=10, can_max_frames_per_s=4000)},
         *reserved_bit_cases(schema),
         {"name": "control-detail-on-ok",
          "record": "control_response", "must_refuse": False,
          "desc": "SPEC.md 9 -- detail accompanies `ok`, and only `ok`. The "
                  "refusal case above is only half the rule.",
-         "input": {"opcode": 0x02, "tag": 1, "status": 0, "detail_hex": "0700"},
+         "input": {"opcode": 0x40, "tag": 1, "status": 0, "detail_hex": "0000"},
          "expect_hex": (encode(schema, "control_response",
-                               dict(opcode=0x02, tag=1, status=0))
-                        + bytes.fromhex("0700")).hex()},
+                               dict(opcode=0x40, tag=1, status=0))
+                        + bytes.fromhex("0000")).hex()},
     ]
 
+    _check_content_rule_pairs(files["encoders.json"])
     return files
+
+
+def _check_content_rule_pairs(producers):
+    """Both halves of every content rule, or neither artefact is written.
+
+    A content rule -- a well-formed payload the specification forbids a device
+    to emit -- makes two testable claims: the receiver decodes it
+    (`no_roundtrip` vector) and the encoder refuses it (`must_refuse` producer
+    case naming that vector). Either half alone passes silently when the other
+    is broken: with four refusals unwritten, deleting the matching encoder
+    guards failed nothing, and with three vectors unwritten, a decoder
+    rejecting what it must accept failed nothing. A `must_refuse` case that is
+    NOT a content rule -- one whose bytes the decoder also rejects -- says so
+    with `structural: True`, and must say one or the other.
+    """
+    vectors = {name: producer for name, producer in NO_ROUNDTRIP_PAIRS}
+    if len(vectors) != len(NO_ROUNDTRIP_PAIRS):
+        sys.exit("content-rule pairing: duplicate no_roundtrip vector names")
+    claimed = {}
+    for c in producers:
+        if not c.get("must_refuse"):
+            if "vector" in c or "structural" in c:
+                sys.exit(f"producer case {c['name']}: vector/structural are "
+                         f"claims about a refusal, and this case refuses "
+                         f"nothing")
+            continue
+        has_vector, is_structural = "vector" in c, c.get("structural", False)
+        if has_vector == is_structural:
+            sys.exit(f"producer case {c['name']}: a refusal is either a "
+                     f"content rule (name its no_roundtrip vector) or a "
+                     f"structural one the decoder also rejects (structural: "
+                     f"True) -- exactly one, so the claim is checkable")
+        if is_structural:
+            continue
+        if c["vector"] not in vectors:
+            sys.exit(f"producer case {c['name']}: names vector "
+                     f"{c['vector']!r}, which is not a no_roundtrip vector")
+        if vectors[c["vector"]] != c["name"]:
+            sys.exit(f"producer case {c['name']}: vector {c['vector']!r} "
+                     f"names {vectors[c['vector']]!r} as its refusal, not "
+                     f"this case")
+        claimed[c["vector"]] = c["name"]
+    unpaired = set(vectors) - set(claimed)
+    if unpaired:
+        sys.exit(f"content-rule pairing: no_roundtrip vector(s) with no "
+                 f"producer refusal: {', '.join(sorted(unpaired))} -- the "
+                 f"device-side half of these rules is untested")
 
 
 # --------------------------------------------------------------------------
