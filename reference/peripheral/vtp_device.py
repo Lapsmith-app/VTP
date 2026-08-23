@@ -48,18 +48,38 @@ FIX_3D = 3
 # SPEC.md §5.6 — fix_flags bit 4.
 FIX_FLAG_SOLUTION_EPOCH = 1 << 4
 
-# Control opcodes (SPEC.md §9).
-CAN_RESET, CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK = 0x01, 0x02, 0x03
-CAN_UNSUBSCRIBE = 0x04
-GPS_SET_RATE, IMU_SET_RATE, TIME_SYNC = 0x10, 0x20, 0x30
-MONITOR_LIST = 0x40
-GET_POWER = 0x50
+# Control opcodes (SPEC.md §9), read from the schema rather than restated, so
+# the one place they are defined stays the only place -- as MIN_ATT_MTU and
+# OPCODE_CAPABILITY below already are.
+#
+# Each lookup also asserts its name still exists in the schema, so a rename
+# arrives here as a KeyError at import. That is the failure a peripheral wants:
+# a restated constant survives a rename holding its old value, and a device
+# that answers an opcode the specification no longer defines is diagnosed from
+# the wire, weeks later, by whoever is holding the client.
+#
+# Named one per line rather than bound in a loop. These are the names the
+# dispatch in handle_control reads, and a name that cannot be grepped for is
+# worse than the number it replaced.
+_OPCODE = {op["name"]: op["value"] for op in enc.SCHEMA["control"]["opcodes"]}
+
+CAN_RESET = _OPCODE["CAN_RESET"]
+CAN_SUBSCRIBE = _OPCODE["CAN_SUBSCRIBE"]
+CAN_SUBSCRIBE_MASK = _OPCODE["CAN_SUBSCRIBE_MASK"]
+CAN_UNSUBSCRIBE = _OPCODE["CAN_UNSUBSCRIBE"]
+GPS_SET_RATE = _OPCODE["GPS_SET_RATE"]
+IMU_SET_RATE = _OPCODE["IMU_SET_RATE"]
+TIME_SYNC = _OPCODE["TIME_SYNC"]
+MONITOR_LIST = _OPCODE["MONITOR_LIST"]
+GET_POWER = _OPCODE["GET_POWER"]
+GNSS_AID_INFO = _OPCODE["GNSS_AID_INFO"]
+GNSS_AID_BEGIN = _OPCODE["GNSS_AID_BEGIN"]
+# 0x14 was GNSS_AID_ABORT; unassigned.
+GNSS_AID_COMMIT = _OPCODE["GNSS_AID_COMMIT"]
 
 # SPEC.md 9.7 -- power_source members and power_validity bits.
 SRC_EXTERNAL, SRC_DISCHARGING, SRC_CHARGING, SRC_CHARGED = 1, 2, 3, 4
 PWR_SOURCE, PWR_PERCENT = 1 << 0, 1 << 1
-GNSS_AID_INFO, GNSS_AID_BEGIN = 0x11, 0x12
-GNSS_AID_COMMIT = 0x13           # 0x14 was GNSS_AID_ABORT; unassigned
 
 # SPEC.md §14.1 — the one aiding format this device accepts. It forwards the
 # bytes to its receiver without interpreting them, so this names what the

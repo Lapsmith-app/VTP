@@ -39,9 +39,11 @@ import time
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT / "reference" / "python"))
 
 import vtp_device as dev  # noqa: E402
 import display as disp  # noqa: E402
+import vtp1_encode as enc  # noqa: E402
 
 # Imported lazily, in _load_bless(), rather than at module scope. Half this
 # file is transport-independent -- the advertisement budget, the connection
@@ -85,17 +87,17 @@ def _in_app_bundle():
 # Names for the log. A control write that arrives as eleven hex bytes tells a
 # reader nothing; the same write named as CAN_SUBSCRIBE with its parameters is
 # the difference between diagnosing a client and guessing at one.
-OPCODES = {
-    0x01: "CAN_RESET", 0x02: "CAN_SUBSCRIBE", 0x03: "CAN_SUBSCRIBE_MASK",
-    0x04: "CAN_UNSUBSCRIBE", 0x10: "GPS_SET_RATE",
-    0x20: "IMU_SET_RATE", 0x30: "TIME_SYNC",
-    0x40: "MONITOR_LIST",
-}
-STATUSES = {
-    0: "ok", 1: "unsupported_opcode", 2: "bad_params", 3: "table_full",
-    4: "rate_exceeded", 5: "busy", 6: "needs_encryption",
-    7: "unknown_subscription",
-}
+#
+# Read from the schema rather than restated. Hand-written, this named eight of
+# the twelve opcodes: GET_POWER and the three GNSS aiding opcodes were added to
+# the specification and never added here, so every aiding exchange and every
+# power read reached the log as a bare `0x50` -- unnamed in the one artefact a
+# client is diagnosed from, and unnamed in the way that invites the reader to
+# conclude the device did not recognise it. A table that has to be edited in
+# step with the schema is a table that will not be.
+OPCODES = {op["value"]: op["name"] for op in enc.SCHEMA["control"]["opcodes"]}
+STATUSES = {m["value"]: m["name"]
+            for m in enc.SCHEMA["enums"]["status"]["members"]}
 CHAR_NAMES = {}
 
 #: How long to wait after a refused notification before trying again anyway.
