@@ -2301,6 +2301,14 @@ Total: **4 bytes**. All fields little-endian.
 `chunk_bytes` MUST NOT be zero and MUST NOT exceed `ATT_MTU - 6` — three bytes
 of ATT Write Command header and the three-byte chunk header below.
 
+**A transfer MUST NOT require more than 65535 chunks.** `chunks` in
+`GNSS_AID_COMMIT` and `first_missing` in §14.4 are both `u16`, so a transfer
+needing more than that has a count no client can commit and a gap no device can
+name. `total_bytes` is `u32` and nothing else bounds the pair, so the device
+enforces it where both numbers are first known: a device MUST answer
+`bad_params` to a `GNSS_AID_BEGIN` whose `total_bytes` would need more chunks
+than that at the `chunk_bytes` it would have chosen.
+
 **A device holds at most one transfer open.** A `GNSS_AID_BEGIN` arriving while
 one is open MUST discard the open transfer and start a new one, and the new
 `session` MUST differ from the discarded one so that a chunk still in flight

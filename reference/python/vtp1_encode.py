@@ -458,11 +458,37 @@ def encode_gnss_aid_caps(caps):
 
 def encode_aid_begin_result(begin):
     """SPEC.md §14.3. The detail of a GNSS_AID_BEGIN response."""
+    # §14.3 -- MUST NOT be zero. A zero chunk size is a transfer that cannot
+    # carry a byte, and the client has no way to tell it from a device that
+    # simply will not say: it would write chunks of nothing until the commit
+    # reported everything missing.
+    if not begin.get("chunk_bytes"):
+        raise EncodeError("aid_begin_result.chunk_bytes MUST NOT be zero "
+                          "(SPEC.md 14.3)")
     return _pack("aid_begin_result", begin)
 
 
 def encode_aid_commit_result(commit):
     """SPEC.md §14.4. The detail of a GNSS_AID_COMMIT response."""
+    # §14.4 -- the first_missing bit is set if and only if the result is
+    # `incomplete`. Set beside any other result it names a chunk as lost from a
+    # transfer that did not lose one; clear beside `incomplete` it says
+    # something is missing and refuses to say what, which is the one thing that
+    # makes a write-without-response path recoverable.
+    #
+    # The enum VALUE is deliberately not checked: SPEC.md 11.4 lets a minor
+    # version add results, and the corpus carries an unknown one on purpose.
+    incomplete = next(m["value"] for m in SCHEMA["enums"]["aid_result"]["members"]
+                      if m["name"] == "incomplete")
+    bit = 1 << next(b["bit"] for b in SCHEMA["bitmasks"]["commit_validity"]["bits"]
+                    if b["name"] == "first_missing")
+    named = bool(_known_bits("commit_validity") & commit.get("validity", 0) & bit)
+    if named != (commit.get("result") == incomplete):
+        raise EncodeError(
+            f"aid_commit_result: first_missing is "
+            f"{'set' if named else 'clear'} beside result "
+            f"{commit.get('result')}; SPEC.md 14.4 sets it if and only if the "
+            f"result is incomplete ({incomplete})")
     return _pack("aid_commit_result", _gate("aid_commit_result", commit))
 
 

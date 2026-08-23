@@ -3,6 +3,38 @@
   "generated_by": "tools/generate.py",
   "cases": [
     {
+      "name": "aid-begin-zero-chunk-size",
+      "record": "aid_begin_result",
+      "must_refuse": true,
+      "desc": "A chunk size of zero. SPEC.md 14.3 forbids it, and a client cannot tell it from a device that will not say: it writes chunks carrying nothing until the commit reports every one of them missing.",
+      "input": {
+        "session": 1,
+        "chunk_bytes": 0
+      }
+    },
+    {
+      "name": "aid-commit-index-without-incomplete",
+      "record": "aid_commit_result",
+      "must_refuse": true,
+      "desc": "first_missing named beside `applied`. SPEC.md 14.4 sets the bit if and only if the result is `incomplete`, so this reports a chunk lost from a transfer that lost none -- a plausible wrong value a client will show a user.",
+      "input": {
+        "validity": 1,
+        "result": 1,
+        "first_missing": 7
+      }
+    },
+    {
+      "name": "aid-commit-incomplete-without-index",
+      "record": "aid_commit_result",
+      "must_refuse": true,
+      "desc": "`incomplete` with the first_missing bit clear. The device says something is missing and refuses to say what, so the client has no index to resend from -- the one thing that makes a write-without-response path recoverable (SPEC.md 14.4).",
+      "input": {
+        "validity": 0,
+        "result": 2,
+        "first_missing": 0
+      }
+    },
+    {
       "name": "can-id-above-arbitration-field",
       "record": "can_batch",
       "must_refuse": true,
@@ -781,11 +813,11 @@
       "must_refuse": false,
       "desc": "SPEC.md 2 -- aid_commit_result.validity bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
-        "result": 1,
-        "first_missing": 0,
+        "result": 2,
+        "first_missing": 7,
         "validity": 129
       },
-      "expect_hex": "01010000"
+      "expect_hex": "01020700"
     },
     {
       "name": "control-detail-on-ok",

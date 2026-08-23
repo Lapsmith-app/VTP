@@ -74,6 +74,11 @@ AID_MAX_BYTES = 131_072
 # header come off the negotiated MTU before any payload fits.
 AID_CHUNK_OVERHEAD = 6
 
+# SPEC.md §14.3 — `chunks` and `first_missing` are u16, so this is the most a
+# transfer may need. Derived from the field rather than written as a number
+# somebody has to keep in step with it.
+AID_MAX_CHUNKS = 0xFFFF
+
 # SPEC.md §13.2 — channels a Monitor device may ask the client for.
 CH_LAP_TIME, CH_LAST_LAP_TIME, CH_BEST_LAP_TIME = 1, 2, 3
 CH_DELTA_BEST, CH_PREDICTED_LAP_TIME, CH_LAP_NUMBER = 4, 5, 6
@@ -262,6 +267,9 @@ class VtpDevice:
         # device: the ATT payload at the largest MTU this build will ever
         # accept. `self.mtu` moves with the link; this does not.
         self._device_mtu_ceiling = mtu
+        # False until a backend tells us what the link actually negotiated.
+        # `--mtu` is what this build was CONFIGURED for, not what it got.
+        self._mtu_observed = False
         self._max_notify_bytes = mtu - 3
         self.gps_hz = gps_hz
         self.imu_hz = imu_hz
@@ -854,6 +862,12 @@ class VtpDevice:
         configured for does not silently get batches bigger than Info promised.
         """
         self.mtu = min(att_mtu, self._device_mtu_ceiling)
+        # Recorded because SPEC.md §14.3 needs the difference. Sizing a
+        # notification from an assumed MTU costs a refused packet the pump
+        # retries; sizing a CHUNK from one costs every chunk of the transfer,
+        # silently, because the client writes what the device asked for and
+        # the device then rejects its own arithmetic.
+        self._mtu_observed = True
         self.set_link_params(att_mtu=att_mtu)
 
     def handle_control(self, request, t_rx=None):
@@ -1035,8 +1049,16 @@ class VtpDevice:
             if total == 0 or total > self.AID_MAX_BYTES_DECLARED:
                 return reply(ST_BAD_PARAMS)
 
-            chunk_bytes = self.mtu - AID_CHUNK_OVERHEAD
+            chunk_bytes = self._aid_chunk_bytes()
             if chunk_bytes <= 0:
+                return reply(ST_BAD_PARAMS)
+
+            # SPEC.md §14.3 -- `chunks` and `first_missing` are both u16 while
+            # total_bytes is u32, so a large enough transfer has a count that
+            # cannot be committed and a gap that cannot be named. Refused here,
+            # where both numbers are first known, rather than discovered at a
+            # commit the client cannot express.
+            if -(-total // chunk_bytes) > AID_MAX_CHUNKS:
                 return reply(ST_BAD_PARAMS)
 
             # SPEC.md §14.3 -- one transfer open. A BEGIN arriving over an open
@@ -1147,6 +1169,27 @@ class VtpDevice:
             "max_bytes": self.AID_MAX_BYTES_DECLARED,
             "held_until": held or 0,
         })
+
+    def _aid_chunk_bytes(self):
+        """SPEC.md §14.3 — the payload size every chunk but the last carries.
+
+        `self.mtu` is only the negotiated value once a backend has observed it.
+        Bless learns it on CoreBluetooth and nowhere else, so on BlueZ and
+        WinRT this device is holding whatever `--mtu` said -- 247 by default.
+        Sizing chunks from that on a link that negotiated 185 asks the client
+        for 241-byte writes it cannot make, and the 179-byte ones it can make
+        are then rejected by this device as the wrong length: every chunk of
+        the transfer discarded, with the only symptom a commit that reports
+        everything missing.
+
+        So when the MTU has not been observed, chunks are sized from the
+        minimum ATT MTU this protocol requires (§2.1). That is smaller than
+        necessary on a link that negotiated more, and it is writable on every
+        conforming link, which is the correct way round for a number the client
+        cannot second-guess.
+        """
+        mtu = self.mtu if self._mtu_observed else MIN_ATT_MTU
+        return mtu - AID_CHUNK_OVERHEAD
 
     def _aid_expected_chunks(self, transfer):
         return -(-transfer["total_bytes"] // transfer["chunk_bytes"])

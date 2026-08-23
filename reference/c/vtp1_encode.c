@@ -433,6 +433,10 @@ int vtp_encode_gnss_aid_caps(const vtp_gnss_aid_caps_t *c, uint8_t *out, size_t 
 
 int vtp_encode_aid_begin_result(const vtp_aid_begin_result_t *b, uint8_t *out, size_t cap) {
     if (cap < VTP_AID_BEGIN_RESULT_SIZE) return -1;
+    /* SPEC.md 14.3 -- MUST NOT be zero. A transfer that cannot carry a byte,
+     * and indistinguishable to the client from a device that will not say: it
+     * writes chunks of nothing until the commit reports everything missing. */
+    if (b->chunk_bytes == 0) return -1;
     memset(out, 0, VTP_AID_BEGIN_RESULT_SIZE);
 
     out[VTP_AID_BEGIN_RESULT_OFF_SESSION] = b->session;
@@ -442,9 +446,21 @@ int vtp_encode_aid_begin_result(const vtp_aid_begin_result_t *b, uint8_t *out, s
 
 int vtp_encode_aid_commit_result(const vtp_aid_commit_result_t *c, uint8_t *out, size_t cap) {
     if (cap < VTP_AID_COMMIT_RESULT_SIZE) return -1;
-    memset(out, 0, VTP_AID_COMMIT_RESULT_SIZE);
 
     const uint32_t v = KNOWN_BITS(c->validity, VTP_COMMIT_VALIDITY_KNOWN);
+
+    /* SPEC.md 14.4 -- set if and only if the result is `incomplete`. Set
+     * beside any other result it names a chunk as lost from a transfer that
+     * lost none; clear beside `incomplete` it says something is missing and
+     * refuses to say what, which is the one thing that makes a
+     * write-without-response path recoverable.
+     *
+     * The enum VALUE is deliberately not checked: SPEC.md 11.4 lets a minor
+     * version add results, and the corpus carries an unknown one on purpose. */
+    const int named = (v & VTP_COMMIT_VALIDITY_FIRST_MISSING) != 0;
+    if (named != (c->result == VTP_AID_RESULT_INCOMPLETE)) return -1;
+
+    memset(out, 0, VTP_AID_COMMIT_RESULT_SIZE);
 
     out[VTP_AID_COMMIT_RESULT_OFF_VALIDITY] = (uint8_t)v;
     out[VTP_AID_COMMIT_RESULT_OFF_RESULT]   = c->result;

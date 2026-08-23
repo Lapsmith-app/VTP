@@ -885,7 +885,13 @@ def _reserved_case(schema, record, field, value):
         return (dict(clean, **{field: value}),
                 encode(schema, "gnss_aid_caps", dict(clean, **{field: value})))
     if record == "aid_commit_result":
-        clean = dict(result=1, first_missing=0)
+        # `incomplete`, because the reserved-bit case sets every ASSIGNED bit
+        # of the mask alongside the reserved one -- and SPEC.md 14.4 sets
+        # first_missing if and only if the result is incomplete. With `applied`
+        # here the corpus required a conforming encoder to emit a record the
+        # specification forbids: a chunk reported lost from a transfer that
+        # succeeded, which is the §1.1 failure this record is shaped against.
+        clean = dict(result=2, first_missing=7)
         return (dict(clean, **{field: value}),
                 encode(schema, "aid_commit_result", dict(clean, **{field: value})))
     sys.exit(f"reserved_bit_cases: no builder for record {record!r}; a bitmask "
@@ -2288,6 +2294,28 @@ def vectors(schema):
     # emit a perfectly valid frame for a DIFFERENT one, and no decode input
     # reaches that.
     files["encoders.json"] = [
+        {"name": "aid-begin-zero-chunk-size",
+         "record": "aid_begin_result", "must_refuse": True,
+         "desc": "A chunk size of zero. SPEC.md 14.3 forbids it, and a client "
+                 "cannot tell it from a device that will not say: it writes "
+                 "chunks carrying nothing until the commit reports every one "
+                 "of them missing.",
+         "input": dict(session=1, chunk_bytes=0)},
+        {"name": "aid-commit-index-without-incomplete",
+         "record": "aid_commit_result", "must_refuse": True,
+         "desc": "first_missing named beside `applied`. SPEC.md 14.4 sets the "
+                 "bit if and only if the result is `incomplete`, so this "
+                 "reports a chunk lost from a transfer that lost none -- a "
+                 "plausible wrong value a client will show a user.",
+         "input": dict(validity=1, result=1, first_missing=7)},
+        {"name": "aid-commit-incomplete-without-index",
+         "record": "aid_commit_result", "must_refuse": True,
+         "desc": "`incomplete` with the first_missing bit clear. The device "
+                 "says something is missing and refuses to say what, so the "
+                 "client has no index to resend from -- the one thing that "
+                 "makes a write-without-response path recoverable (SPEC.md "
+                 "14.4).",
+         "input": dict(validity=0, result=2, first_missing=0)},
         {"name": "can-id-above-arbitration-field",
          "record": "can_batch", "must_refuse": True,
          "desc": "An identifier of 0x3FFFFFFF. MUST be refused, not masked: "

@@ -297,6 +297,60 @@ class ControlQueue:
 ENCRYPTION_POSTURES = ("all", "control", "none")
 
 
+#: What bless 0.3.0 -- the pinned backend, and the newest that exists -- can
+#: actually enforce, read from its source rather than its documentation.
+#:
+#:   bluezdbus  `transform_flags_with_permissions()` converts exactly two
+#:              flags: READ -> ENCRYPT_READ and WRITE -> ENCRYPT_WRITE. A
+#:              characteristic whose write property is write-without-response,
+#:              or whose only property is notify or indicate, keeps its plain
+#:              D-Bus flag however its permissions are set.
+#:   winrt      `permissions_to_protection_level()` shifts the permission word
+#:              right by 3 for reads and 4 for writes, while the bits it is
+#:              looking for are 0x4 and 0x8. Both shifts land on zero, so every
+#:              characteristic is PLAIN whatever the posture says.
+#:   corebluetooth
+#:              Permissions are handed to CBMutableCharacteristic unchanged and
+#:              cover reads and both write forms. Notification delivery is not
+#:              governed by CB permissions at all.
+#:
+#: SPEC.md §10 is about what a device REQUIRES, and a peripheral that reports a
+#: posture it does not deliver is the plausible wrong value §1.1 exists to
+#: prevent, aimed at whoever is deciding whether this link is safe.
+_BACKEND_ENFORCES = {
+    "corebluetooth": {"read", "write", "write-without-response"},
+    "bluezdbus": {"read", "write"},
+    "winrt": set(),
+}
+
+
+def backend_for(platform):
+    """The bless backend `platform` selects. `None` if bless has none."""
+    if platform.startswith("darwin"):
+        return "corebluetooth"
+    if platform.startswith("linux"):
+        return "bluezdbus"
+    if platform.startswith("win"):
+        return "winrt"
+    return None
+
+
+def unenforced_characteristics(posture, backend):
+    """Names `posture` says to protect that `backend` will not protect.
+
+    Pure, so the selftest checks it without a radio -- which is the only way it
+    ever gets checked, because the gap is invisible from this side of the link:
+    the peripheral asks for encryption and is told nothing went wrong.
+    """
+    enforceable = _BACKEND_ENFORCES.get(backend)
+    if enforceable is None:
+        return set()
+    properties = {c["name"]: set(c["properties"])
+                  for c in dev.enc.SCHEMA["profile"]["characteristics"]}
+    return {name for name in encrypted_characteristics(posture)
+            if not (properties[name] & enforceable)}
+
+
 def encrypted_characteristics(posture):
     """Names of the characteristics that require an encrypted link.
 
@@ -807,6 +861,24 @@ class Peripheral:
         log.info("encryption posture: %s — encrypted: %s (SPEC.md 10 leaves "
                  "this to the device; a client MUST support all of them)",
                  self.encrypt, ", ".join(sorted(encrypted)) or "nothing")
+
+        # Said out loud, because nothing else will say it. The permission is
+        # accepted, the server starts, and the characteristic is writable
+        # without encryption -- there is no error anywhere in that sequence,
+        # and from this side of the link a protected attribute and an
+        # unprotected one look identical.
+        backend = backend_for(sys.platform)
+        unenforced = unenforced_characteristics(self.encrypt, backend)
+        if unenforced:
+            log.warning("NOT ENCRYPTED on this backend (%s): %s. bless 0.3.0 "
+                        "translates the encryption permission only for "
+                        "characteristics carrying %s, and 0.3.0 is the newest "
+                        "there is. Treat --encrypt %s as a statement of intent "
+                        "here, not as a control; the posture holds on "
+                        "CoreBluetooth for everything but the notify streams.",
+                        backend, ", ".join(sorted(unenforced)),
+                        ", ".join(sorted(_BACKEND_ENFORCES[backend])) or
+                        "nothing at all", self.encrypt)
 
         # SPEC.md §10.2 — Info stays readable whatever the posture, so a client
         # that cannot pair can still identify what it has found and say so,

@@ -40,6 +40,11 @@ ROLES = {
     "can":     {"can_batch", "can_list"},
     "imu":     {"imu_batch"},
     "monitor": {"monitor_list", "monitor_update"},
+    # §14 — the aiding role's three control-detail records. Named after the
+    # capability bit, like every other role here, so `--roles gnss_aiding`
+    # works and IMPLIES picks up its `gps` and `control` requirement from the
+    # schema without another hard-coded table.
+    "gnss_aiding": {"gnss_aid_caps", "aid_begin_result", "aid_commit_result"},
 }
 
 # A role whose records only exist if another one does. This is not the runner's

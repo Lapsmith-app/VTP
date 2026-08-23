@@ -70,6 +70,52 @@ Also in this change:
   The harness is the only mechanical coverage the role has, which is the same
   position Monitor is in and worth stating rather than discovering.
 
+Five more found by review of the pull request:
+
+- **`--encrypt all` did not protect Aiding on Linux or Windows.** bless 0.3.0
+  translates the encryption permission only for characteristics carrying
+  `read` or `write`: BlueZ leaves write-without-response and the notify streams
+  in clear, and WinRT shifts its permission word past the bit it is testing and
+  enforces nothing at all. 0.3.0 is the newest bless there is, so there is no
+  upgrade that fixes it. The peripheral now computes the gap from the backend
+  and the schema's own property table, names it in a `NOT ENCRYPTED on this
+  backend` warning at startup, documents it in the peripheral README, and
+  asserts it in the selftest so a future bless closing the gap fails a check
+  rather than leaving the documentation wrong. The permission is still
+  requested; what changed is that the peripheral no longer implies it took
+  effect. This is not specific to aiding — the notify streams were already
+  affected — but aiding is the first characteristic BlueZ protects *nothing*
+  on.
+- **Transfers failed whenever the real MTU was under 247.** `set_negotiated_mtu`
+  is only ever called on CoreBluetooth, so on BlueZ and WinRT the device held
+  whatever `--mtu` said and sized chunks from it. At a negotiated 185 it asked
+  for 241-byte writes the client cannot make, then rejected the 179-byte ones
+  it can as the wrong length — every chunk of the transfer discarded, with the
+  only symptom a commit reporting everything missing. The device now records
+  whether its MTU was observed or assumed, and sizes chunks from §2.1's
+  minimum when assumed: smaller than necessary on a link that negotiated more,
+  and writable on every conforming link, which is the correct way round for a
+  number the client cannot second-guess.
+- **Some valid transfers could not be committed.** `chunks` and `first_missing`
+  are `u16` while `total_bytes` is `u32`, and nothing bounded the pair, so a
+  large enough transfer had a count no client could send and a gap no device
+  could name. §14.3 now caps a transfer at 65535 chunks and requires
+  `bad_params` at `GNSS_AID_BEGIN`, where both numbers are first known.
+- **`--roles gnss_aiding` did not work.** The conformance runner's role table
+  had no entry for it, so the role could not be selected and `--roles
+  gps,control` silently skipped every aiding vector. Added; the `gps` and
+  `control` implication comes from the schema, as the other roles' do.
+- **Both encoders emitted records the specification forbids.** Neither checked
+  for a zero `chunk_bytes` (§14.3) nor for `first_missing` being set beside a
+  result other than `incomplete` (§14.4) — and the generated reserved-bit
+  producer case *required* the second, because it sets every assigned bit of
+  the mask beside a `clean` result of `applied`. So the corpus was asserting
+  that a conforming encoder must report a chunk lost from a transfer that
+  succeeded. Both encoders validate now, the generated case uses `incomplete`,
+  and three producer cases cover the refusals. The enum values are deliberately
+  not validated: §11.4 lets a minor version add results, and the corpus carries
+  an unknown one on purpose.
+
 Four defects found by reviewing the above, all in code added by it:
 
 - **A commit whose `chunks` contradicted the transfer never terminated.** With
