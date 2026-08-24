@@ -353,6 +353,16 @@ FAULTS = {
     "obd_polls_before_probe": "SPEC.md §15.4 — a poll set is accepted before any probe has answered, transmitting for PIDs nothing verified",
     "obd_delivery_needs_subscription": "SPEC.md §15.5 — poll responses are delivered only through the table, so an unsubscribed polling client transmits on the car and receives nothing",
     "obd_flag_never_set": "SPEC.md §15.6 — the poll set is non-empty and no batch carries the polling flag",
+    "obd_accepts_zero_interval": "SPEC.md §15.4 — interval_ms 0 with a non-empty set is accepted as `as fast as legal` instead of refused",
+    # The two below are SCENARIO seeds, not matrix faults: neither violates a
+    # rule any single check can catch on its own. The first is a CONFORMING
+    # car whose polled PID nothing answers (§15.4 makes that gap legal, so the
+    # claim under test is that obd.poll_and_flag does NOT fail it); the second
+    # only means anything stacked on the first, where the diagnostic re-probe
+    # it refuses MUST turn the indeterminate skip into a failure. See
+    # harness/selftest.py's targeted-scenario section.
+    "obd_pid_never_answers": "a car that answers every probe and never the polled PID — legal silence (SPEC.md §15.4), which no check may Fail",
+    "obd_reprobe_refused": "SPEC.md §15.2 — the first OBD_INFO of a connection answers ok and every later one is refused bad_params",
 }
 
 
@@ -380,6 +390,11 @@ class LoopbackTransport(Transport):
         # requests back to back has the second arrive while the first is owed.
         self._control_latency = control_latency
         self._owed = False
+        # A request the device applied but has not answered yet (OBD_INFO:
+        # the response waits for the probe, SPEC.md 15.2). Holds the raw
+        # request so the pump can hand the eventual reply through
+        # _corrupt_response exactly as a synchronous one would have gone.
+        self._pending_ctl_request = None
         self._device_kwargs = dict(device_kwargs or {})
         self._device_kwargs.setdefault("gps_hz", gps_hz)
         self._device_kwargs.setdefault("imu_hz", imu_hz)
@@ -521,8 +536,16 @@ class LoopbackTransport(Transport):
                     _dev._can_pending.append(last)
                 return payload
             dev._flush_can = duplicating_flush
+        if "obd_pid_never_answers" in self.faults:
+            # A conforming car gone quiet where it matters: the probe path
+            # appends its mask responses directly, so OBD_INFO keeps
+            # answering with both ECUs, while the poll loop's requests go
+            # unanswered forever. SPEC.md §15.4 makes that gap legal.
+            self.device._obd_transmit = lambda pid, now: None
         self._connected = True
         self._owed = False
+        self._pending_ctl_request = None
+        self._obd_info_answers = 0
         self._pump = asyncio.create_task(self._run())
 
     async def disconnect(self):
@@ -703,6 +726,20 @@ class LoopbackTransport(Transport):
         request = self._indulge_aiding(request)
         if "obd_accepts_unsupported_pid" in self.faults:
             request = self._indulge_obd(request)
+        if "obd_accepts_zero_interval" in self.faults and \
+                len(request) >= _OBD_POLL_FIXED and \
+                request[0] == refdec.OPCODE["OBD_POLL_SET"] and \
+                request[2] == 0 and request[3] == 0 and \
+                request[_OBD_POLL_FIXED - 1] != 0:
+            # SPEC.md §15.4 -- a device reading interval 0 as "as fast as
+            # legal": the request is rewritten to the declared floor before
+            # dispatch, so a supported PID rides through to an ok answer and
+            # the transmitter genuinely starts. Zero is generation without
+            # bound, and the check must see it accepted to say so.
+            floor = (getattr(self.device, "OBD_MIN_INTERVAL_MS", None)
+                     or _load_peripheral().OBD_MIN_INTERVAL_MS)
+            request = (request[:2] + struct.pack("<H", max(floor, 1))
+                       + request[4:])
         if "obd_polls_before_probe" in self.faults and \
                 len(request) >= _OBD_POLL_FIXED and \
                 request[0] == refdec.OPCODE["OBD_POLL_SET"] and \
@@ -814,6 +851,15 @@ class LoopbackTransport(Transport):
 
         response = self.device.handle_control(request, t_rx=t_rx)
         if response is None:
+            return
+        if response is _load_peripheral().RESPONSE_PENDING:
+            # SPEC.md 15.2 -- the request took effect and its answer waits
+            # for the probe. It stays the one outstanding request (anything
+            # written meanwhile is answered busy above); the pump collects
+            # the reply from due_control_response() and delivers it through
+            # _corrupt_response under the request captured here.
+            self._pending_ctl_request = bytes(request)
+            self._owed = True
             return
         if "obd_ignores_stop" in self.faults and obd_poll_before and \
                 obd_poll_before[0] and response[2] == 0 and \
@@ -982,6 +1028,17 @@ class LoopbackTransport(Transport):
             # client cannot then tell a device that implements a later minor's
             # command from one that ignored it.
             response[2] = refdec.STATUS_VALUE["ok"]
+        if "obd_reprobe_refused" in self.faults and \
+                opcode == refdec.OPCODE["OBD_INFO"] and status == 0:
+            # The first probe of the connection answers; every re-probe is
+            # refused. Stacked on obd_pid_never_answers this takes away the
+            # diagnostic a silent poll is entitled to, which §15.2 makes a
+            # failure in its own right.
+            self._obd_info_answers = getattr(self, "_obd_info_answers", 0) + 1
+            if self._obd_info_answers > 1:
+                return bytearray(
+                    response[:2]
+                    + bytes([refdec.STATUS_VALUE["bad_params"]]))
         if "obd_probe_unsupported" in self.faults and \
                 opcode == refdec.OPCODE["OBD_INFO"]:
             # SPEC.md §15.2 -- the device's own Info says bit 10; refusing the
@@ -1174,6 +1231,16 @@ class LoopbackTransport(Transport):
         loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(self._poll_interval)
+            # The deferred control response first: it is owed, the streams
+            # are offered -- the same order serve.py's pump keeps.
+            if self._pending_ctl_request is not None:
+                due = self.device.due_control_response()
+                if due is not None:
+                    request = self._pending_ctl_request
+                    self._pending_ctl_request = None
+                    self._deliver_control(bytes(
+                        self._corrupt_response(bytearray(due), request)))
+                    self._owed = False
             for stream, payload in self.device.poll():
                 uuid = refdec.CHAR[self._STREAM_CHAR[stream]]
                 cb = self._subs.get(uuid)

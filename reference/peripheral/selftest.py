@@ -1228,6 +1228,35 @@ def main():
                         batches.append(b)
         return batches
 
+    def probe_sync(device, tag):
+        """One OBD_INFO, driven to completion on the injected clock.
+
+        SPEC.md 15.2 -- the response reports a COMPLETED probe, so
+        handle_control answers RESPONSE_PENDING and the transport collects
+        the reply from due_control_response() once the collection window
+        after the last request has passed. Asserted here on every probe
+        this suite makes, not in a dedicated case: the deferral is part of
+        the opcode's contract."""
+        r = device.handle_control(bytes([dev.OBD_INFO, tag]))
+        check(r is dev.RESPONSE_PENDING,
+              "OBD_INFO MUST NOT be answered before the probe completes "
+              "(SPEC.md 15.2)")
+        if r is not dev.RESPONSE_PENDING:
+            return r
+        check(device.due_control_response() is None,
+              "the response must not be due at the instant the request "
+              "was applied; the probe has not run its windows yet")
+        for _ in range(400):
+            obd_clock[0] += 5_000
+            resp = device.due_control_response()
+            if resp is not None:
+                check(all(t <= obd_clock[0] for t, _, _ in device._obd_rx),
+                      "no probe event may remain scheduled ahead of the "
+                      "clock when the response is delivered (SPEC.md 15.2)")
+                return resp
+        check(False, "the probe never completed within 2 s of device time")
+        return b""
+
     # SPEC.md 15.4 -- nothing is pollable before a probe: declare-verify-use
     # is structural, not convention.
     early = obd_ctl(dev.OBD_POLL_SET, 0x60,
@@ -1240,7 +1269,7 @@ def main():
 
     # SPEC.md 15.2 -- the probe reports the synthetic car: 11-bit functional
     # addressing, both ECUs ascending, and the union of their masks.
-    resp = obd_ctl(dev.OBD_INFO, 0x62)
+    resp = probe_sync(car, 0x62)
     check(resp[:3] == bytes([dev.OBD_INFO, 0x62, dev.ST_OK]),
           "OBD_INFO MUST answer ok")
     probe = vtp1.decode_obd_info(resp[3:])
@@ -1327,7 +1356,7 @@ def main():
 
     # SPEC.md 15.2 -- EVERY completed probe clears the poll set, answered or
     # not: the set never outlives the probe result it was verified against.
-    re = obd_ctl(dev.OBD_INFO, 0x79)
+    re = probe_sync(car, 0x79)
     check(re[2] == dev.ST_OK
           and vtp1.decode_obd_info(re[3:])["probe"]["count"] == 2,
           "a mid-session re-probe answers ok with both ECUs")
@@ -1441,7 +1470,7 @@ def main():
     # stopped answering, and without this rule the device transmits into
     # silence with the fallback's delivery path already dead.
     car.OBD_ECUS = {}          # the gateway closes mid-session
-    silent = obd_ctl(dev.OBD_INFO, 0x77)
+    silent = probe_sync(car, 0x77)
     check(silent[2] == dev.ST_OK
           and vtp1.decode_obd_info(silent[3:])["probe"]["count"] == 0,
           "a mid-session silent probe answers ok with `responded` clear")
@@ -1467,7 +1496,7 @@ def main():
     car29.OBD_ECUS = {0x18DAF110 | (1 << 29): dev.VtpDevice.OBD_ECUS[0x7E8],
                       0x18DAF118 | (1 << 29): dev.VtpDevice.OBD_ECUS[0x7E9]}
     car29.on_connect()
-    r29 = car29.handle_control(bytes([dev.OBD_INFO, 0x7B]))
+    r29 = probe_sync(car29, 0x7B)
     p29 = vtp1.decode_obd_info(r29[3:])
     check([e["id"] for e in p29["ecus"]] == sorted(car29.OBD_ECUS),
           "a 29-bit probe reports raw entry ids, bit 29 included")
@@ -1505,7 +1534,7 @@ def main():
     gated = dev.VtpDevice(now_us=lambda: obd_clock[0], gps_hz=0, imu_hz=0)
     gated.OBD_ECUS = {}
     gated.on_connect()
-    resp = gated.handle_control(bytes([dev.OBD_INFO, 0x71]))
+    resp = probe_sync(gated, 0x71)
     silent = vtp1.decode_obd_info(resp[3:])
     check(silent["probe"]["count"] == 0 and silent["ecus"] == [],
           "a silent probe lists no ECUs")

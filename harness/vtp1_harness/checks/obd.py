@@ -261,13 +261,21 @@ async def obd_poll_refusals(s):
                     f"of {floor}, was answered {r.status_name}")
     # interval_ms 0 with a non-empty set is its own MUST: zero is not "no
     # limit" here (§15.4) -- the device would be GENERATING unbounded
-    # traffic -- and it is refused whatever PID rides beside it, so this
-    # cannot be excused by the pid checks that follow.
-    r = await poll_set(0, [0x0C])
-    if r.status != refdec.STATUS_VALUE["bad_params"]:
-        problems.append(
-            f"a non-empty set with interval_ms 0 was answered "
-            f"{r.status_name}; §15.4 refuses unbounded generation outright")
+    # traffic. Carried on a SUPPORTED PID, so the interval rule is the only
+    # one left to refuse it: on an unverified PID a device could answer
+    # bad_params for the PID alone and this assertion would pass without
+    # the zero-interval rule ever being consulted.
+    zero_pid = next((pid for pid in range(0x01, 0x61)
+                     if probe["probe"]["validity"] & RESPONDED
+                     and _union_bit(probe, pid)), None)
+    if zero_pid is not None:
+        r = await poll_set(0, [zero_pid])
+        if r.status != refdec.STATUS_VALUE["bad_params"]:
+            problems.append(
+                f"a non-empty set with interval_ms 0 (PID "
+                f"0x{zero_pid:02X}, which the probe's union claims) was "
+                f"answered {r.status_name}; §15.4 refuses unbounded "
+                f"generation outright")
     if slots < 0xFF:
         r = await poll_set(interval, [0x01] * (slots + 1))
         if r.status != refdec.STATUS_VALUE["table_full"]:
@@ -345,9 +353,10 @@ async def obd_poll_and_flag(s):
         if not heard:
             # §15.4 -- an unanswered request is abandoned and the gap IS the
             # truth, so silence alone must not fail a conforming device: the
-            # car may have gone quiet since the probe. A fresh probe tells
-            # the two apart -- §15.2 makes each one a fresh measurement (and
-            # clears the poll set, which the cleanup below covers anyway).
+            # car may have gone quiet since the probe, or this one PID may
+            # simply never be answered. A fresh probe tells a dead bus from
+            # a quiet PID -- §15.2 makes each one a fresh measurement (and
+            # clears the poll set, so the second look below re-arms it).
             try:
                 again = await c.request(refdec.OPCODE["OBD_INFO"],
                                         timeout=_probe_timeout(s))
@@ -355,26 +364,68 @@ async def obd_poll_and_flag(s):
                 raise Fail("OBD_INFO went unanswered while diagnosing a "
                            "silent poll; §9 requires a response to every "
                            "request") from None
-            silent_car = True
-            if again.ok:
-                try:
-                    fresh = refdec.decode("obd_info", again.detail)
-                except refdec.Reject as exc:
-                    raise Fail(f"the re-probe's detail did not decode: "
-                               f"{exc}", detail=again.detail.hex()) from None
-                silent_car = not fresh["probe"]["validity"] & RESPONDED
-            if silent_car:
+            if not again.ok:
+                raise Fail(
+                    f"the diagnostic re-probe was answered "
+                    f"{again.status_name}; §15.2 -- a device that declares "
+                    f"`obd` answers OBD_INFO on every request, and refusing "
+                    f"it mid-connection leaves a silent poll undiagnosable")
+            try:
+                fresh = refdec.decode("obd_info", again.detail)
+            except refdec.Reject as exc:
+                raise Fail(f"the re-probe's detail did not decode: "
+                           f"{exc}", detail=again.detail.hex()) from None
+            if not fresh["probe"]["validity"] & RESPONDED:
                 raise Skip(
                     "the car stopped answering between the probe and the "
                     "poll -- nothing was delivered because nothing was on "
                     "the bus, which §15.4 makes the honest outcome")
-            raise Fail(
-                f"the car still answers a probe, yet no poll response was "
-                f"delivered within {settle:.2f} s of an accepted poll set "
-                f"(PID 0x{supported:02X}, {interval} ms) with nothing "
-                f"subscribed; §15.5 -- the fallback delivers on the probe's "
-                f"reported identifiers, so this device is either not "
-                f"transmitting or discarding the answers it asked for")
+            # The car still answers a probe, yet the poll delivered nothing.
+            # §15.4 lets a device abandon every request the bus does not
+            # answer, so the silence alone proves nothing: failing here
+            # needs independent evidence that answers exist and are being
+            # discarded. Second look: subscribe the fresh probe's response
+            # identifiers and re-arm the set (the re-probe cleared it,
+            # §15.2). Frames arriving NOW are answers the fallback withheld.
+            fresh_pid = next((pid for pid in range(0x01, 0x61)
+                              if _union_bit(fresh, pid)), None)
+            if fresh_pid is None:
+                raise Skip("the re-probe's union claims no PID at all, so "
+                           "no request can be polled for evidence")
+            fresh_ids = {e["id"] for e in fresh["ecus"]}
+            for cid in sorted(fresh_ids):
+                r2 = await c.request(refdec.OPCODE["CAN_SUBSCRIBE"],
+                                     struct.pack("<IBH", cid, 0, 0))
+                if not r2.ok:
+                    raise Fail(f"subscribing reported response identifier "
+                               f"0x{cid:X} was answered {r2.status_name} "
+                               f"while diagnosing a silent poll")
+            r2 = await c.request(
+                refdec.OPCODE["OBD_POLL_SET"],
+                struct.pack("<HB", interval, 1) + bytes([fresh_pid]))
+            if not r2.ok:
+                raise Fail(f"re-arming the poll set against the fresh probe "
+                           f"result was answered {r2.status_name}; §15.2 "
+                           f"left that result standing")
+            t_second = time.monotonic()
+            await asyncio.sleep(settle)
+            evidence = [rec for _, b in batches_since(t_second)
+                        for rec in b["records"]
+                        if _identity(rec) in fresh_ids]
+            if evidence:
+                raise Fail(
+                    f"{len(evidence)} response frame(s) arrived once the "
+                    f"probe's reported identifiers were subscribed, and "
+                    f"none arrived with nothing subscribed; §15.5 -- the "
+                    f"accepted poll set alone is the delivery path, and "
+                    f"this device delivers the answers only through the "
+                    f"table")
+            raise Skip(
+                f"the poll went unanswered with and without subscriptions "
+                f"installed (PID 0x{supported:02X}, then "
+                f"0x{fresh_pid:02X}); §15.4 lets a device abandon every "
+                f"unanswered request, so nothing observable separates a "
+                f"quiet PID from a discarded answer")
         strays = [f for f in frames if _identity(f) not in ecu_ids]
         if strays:
             raise Fail(

@@ -66,7 +66,11 @@ deliberately not a minor version, which v0.x exists to permit.
   probe is scoped to a probe that answered — a gated request_id is absent
   and cannot reject the response it rides in — and every completed probe
   replaces the probe result and clears the poll set, so a transmitter
-  never outlives the result it was verified against. The two OBD
+  never outlives the result it was verified against. The `OBD_INFO`
+  response reports a COMPLETED probe: the reference peripheral applies
+  the request at once (9.6's order) and holds the indication until the
+  last request's collection window has passed, the request staying the
+  one outstanding (busy to anything written meanwhile). The two OBD
   capacities MUST be non-zero while bit 10 is set (`capacity_required` in
   the schema, a generated rules table beside the zero-when-clear one),
   with the decode-and-flag / encoder-refusal halves paired in the corpus
@@ -90,10 +94,16 @@ deliberately not a minor version, which v0.x exists to permit.
   The OBD checks drive the poll loop live: an accepted poll set delivers
   the answers with nothing subscribed and on no identifier the probe did
   not report, the polling flag rides every batch and falls on the stop,
-  and the empty poll set actually silences the transmitter. Every
-  MUST/SHOULD is held by a seeded fault or an explicit excuse; 73 faults,
-  each caught by the check that claims it. (`info.reserved_fields`
-  retired with Info's last reserved bytes, which §15 assigned.)
+  and the empty poll set actually silences the transmitter. A poll the
+  bus legally never answers is reported indeterminate, not failed — §15.4
+  makes the gap the truth — and only independent evidence (a refused
+  diagnostic re-probe, or answers that appear once the reported
+  identifiers are subscribed) turns it into a failure. Every MUST/SHOULD
+  is held by a seeded fault or an explicit excuse; 74 matrix faults, each
+  caught by the check that claims it, plus two scenario seeds asserting
+  the required verdicts on that legally-silent car.
+  (`info.reserved_fields` retired with Info's last reserved bytes, which
+  §15 assigned.)
 
 ### Fixed, in aggregate
 

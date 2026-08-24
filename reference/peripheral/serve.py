@@ -471,6 +471,12 @@ class Peripheral:
         # it did. Worse, the request had already been APPLIED, so the two ends
         # disagreed about the subscription table.
         self._control = ControlQueue()
+        # A request the device has applied but not yet answered (OBD_INFO:
+        # SPEC.md 15.2 sends the response only when the probe completes).
+        # (tag, request) while one is open; the pump asks the device each
+        # tick and queues the answer when it is due. It occupies the
+        # one-outstanding slot exactly as a queued response does.
+        self._pending_control = None
         self._notify = {"gps": CHAR["gps"], "can": CHAR["can"],
                         "imu": CHAR["imu"]}
 
@@ -557,6 +563,10 @@ class Peripheral:
             return
 
         verdict = self._control.admit(tag)
+        if verdict == "apply" and self._pending_control is not None:
+            # A deferred response is a request outstanding (SPEC.md 9): the
+            # queue cannot see it, so the busy answer is decided here.
+            verdict = "busy"
         if verdict == "full":
             self._note_control(request, "discarded: queue full")
             log.warning("CTRL  %s -> DISCARDED unapplied: %d response(s) "
@@ -572,6 +582,16 @@ class Peripheral:
         else:
             response = self.device.handle_control(request, t_rx=t_rx)
             if response is None:
+                return
+            if response is dev.RESPONSE_PENDING:
+                # SPEC.md 15.2 -- the request took effect (9.6's order), and
+                # the response is owed once the probe completes. The pump
+                # collects it from due_control_response(); until then this
+                # request holds the one-outstanding slot.
+                log.info("CTRL  %s -> pending: the probe is running "
+                         "(SPEC.md 15.2)", _describe_request(request))
+                self._note_control(request, "pending")
+                self._pending_control = (tag, request)
                 return
 
         status = STATUSES.get(response[2], f"0x{response[2]:02X}")
@@ -782,6 +802,11 @@ class Peripheral:
         report what was owed and never arrived.
         """
         undelivered = self._control.discard_all()
+        if self._pending_control is not None:
+            # The probe's answer belongs to the link that asked for it; the
+            # device side died in on_connect/on_disconnect (_obd_clear).
+            self._pending_control = None
+            undelivered += 1
         self._pending.clear()
         self._observed_mtu = None
         self._ready = True
@@ -966,6 +991,21 @@ class Peripheral:
                 self._on_disconnected()
 
             subscribed = self._subscribed()
+
+            # A deferred response first: OBD_INFO is answered only when the
+            # probe completes (SPEC.md 15.2), and the device says when that
+            # is. Queued like any other response, so delivery below retries
+            # it until it lands.
+            if self._pending_control is not None:
+                due = self.device.due_control_response()
+                if due is not None:
+                    tag, request = self._pending_control
+                    self._pending_control = None
+                    status = STATUSES.get(due[2], f"0x{due[2]:02X}")
+                    log.info("CTRL  %s -> %s (probe complete)",
+                             _describe_request(request), status)
+                    self._note_control(request, status)
+                    self._control.hold(tag, due)
 
             # Control responses first, and retried until they land. They are
             # the one thing on this link that is owed rather than offered.

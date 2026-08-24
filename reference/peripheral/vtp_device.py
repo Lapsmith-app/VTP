@@ -88,6 +88,14 @@ GNSS_AID_COMMIT = _OPCODE["GNSS_AID_COMMIT"]
 OBD_INFO = _OPCODE["OBD_INFO"]
 OBD_POLL_SET = _OPCODE["OBD_POLL_SET"]
 
+#: handle_control's answer when the response is not ready to send yet.
+#: SPEC.md 15.2 -- the OBD_INFO response reports a COMPLETED probe, so it is
+#: sent only once the probe's last request has had its collection window; the
+#: transport keeps the request outstanding (busy to anything written meanwhile)
+#: and calls `due_control_response()` until the device hands the payload over.
+#: An object, not None: None already means "not addressable, answer nothing".
+RESPONSE_PENDING = object()
+
 # SPEC.md 9.7 -- power_source members and power_validity bits.
 SRC_EXTERNAL, SRC_DISCHARGING, SRC_CHARGING, SRC_CHARGED = 1, 2, 3, 4
 PWR_SOURCE, PWR_PERCENT = 1 << 0, 1 << 1
@@ -1001,6 +1009,10 @@ class VtpDevice:
         self._obd_stop(flush=flush)
         self._obd_masks = None
         self._obd_ecu_ids = frozenset()
+        # A pending OBD_INFO response belongs to the connection that asked
+        # for it: the edges run this, so it dies with the link rather than
+        # being handed to the next central as an answer to nothing.
+        self._obd_pending_info = None
 
     @staticmethod
     def _mask_has(masks, pid):
@@ -1118,9 +1130,12 @@ class VtpDevice:
         releases a frame only once the clock reaches it, so the stream
         shows the spacing and the one-outstanding bound rather than a burst
         at one instant. What stays compressed is the indication:
-        handle_control is synchronous, so the OBD_INFO response reports the
-        completed probe before its last scheduled frame has aged onto the
-        stream -- real firmware sends the indication after.
+        The indication is NOT compressed: this returns `(done_us, detail)`,
+        where `done_us` is the instant the probe completes -- the last
+        request's transmit instant plus its 50 ms collection window -- and
+        the caller holds the detail until then (`due_control_response`), so
+        the response is sent only when the probe is complete and no probe
+        event is still scheduled ahead of the clock at delivery.
 
         The mask RESPONSES are real bus frames and enter `_obd_rx` like any
         other arrival -- a client subscribed to 0x7E8 sees `41 00 ...` go
@@ -1155,18 +1170,42 @@ class VtpDevice:
                          mask_pid, _j1979_mask_bytes(masks[window]))))
             self._obd_last_tx_us = t
             t += step_us
+        # Window 0 always transmits, so `_obd_last_tx_us` names the final
+        # request whether or not anything answered; the probe is complete
+        # one collection window after it (SPEC.md 15.2), and every response
+        # frame scheduled above carries an earlier instant than this.
+        done_us = self._obd_last_tx_us + 50_000
         if not answered:
             self._obd_masks = None
             self._obd_ecu_ids = frozenset()
-            return enc.encode_obd_info(dict(validity=0, count=0), [])
+            return done_us, enc.encode_obd_info(dict(validity=0, count=0), [])
         self._obd_masks = tuple(union)
         self._obd_ecu_ids = frozenset(answered)
-        return enc.encode_obd_info(
+        return done_us, enc.encode_obd_info(
             dict(validity=1, count=len(answered),
                  request_id=self.OBD_REQUEST_ID,
                  supported_01_20=union[0], supported_21_40=union[1],
                  supported_41_60=union[2]),
             [dict(id=ecu_id) for ecu_id in sorted(answered)])
+
+    def due_control_response(self, now=None):
+        """The deferred OBD_INFO response, once its probe has completed.
+
+        None until then. SPEC.md 15.2 -- the response reports a completed
+        probe, so the transport polls this from its pump and delivers what
+        comes back; the state changes (the cleared poll set, the replaced
+        probe result) took effect when the request was applied, exactly as
+        SPEC.md 9.6 orders them, and only the indication waits.
+        """
+        if self._obd_pending_info is None:
+            return None
+        if now is None:
+            now = self.now_us()
+        done_us, response = self._obd_pending_info
+        if now < done_us:
+            return None
+        self._obd_pending_info = None
+        return response
 
     # -- Control ----------------------------------------------------------
 
@@ -1405,10 +1444,14 @@ class VtpDevice:
 
         if opcode == OBD_INFO:
             # SPEC.md 15.2 -- parameterless; probes afresh on every request,
-            # and the response is sent only when the probe is complete.
+            # and the response is sent only when the probe is complete: the
+            # probe runs NOW (the set clears, the result replaces -- 9.6's
+            # apply-then-answer order), the reply is held until `done_us`.
             if params:
                 return reply(ST_BAD_PARAMS)
-            return reply(ST_OK, self._obd_probe(self.now_us()))
+            done_us, detail = self._obd_probe(self.now_us())
+            self._obd_pending_info = (done_us, reply(ST_OK, detail))
+            return RESPONSE_PENDING
 
         if opcode == OBD_POLL_SET:
             # SPEC.md 15.4 -- refusals in the stated order: shape, capacity,
