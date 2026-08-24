@@ -43,8 +43,15 @@ iPhone on the same iCloud account hits a macOS stack fault that leaves the link
 unusable — see [When the client can see `VTP` but cannot
 connect](#when-the-client-can-see-vtp-but-cannot-connect). Drop the flag to
 exercise the real postures (`--encrypt all|control|none`), but expect that
-fault, and prefer a Linux host for posture work. Custom CAN channel CSV and the
-rest: see the README.
+fault, and prefer a Linux host for posture work.
+
+The synthetic bus runs at 80 frames/s by default, which is gentle — a real
+500 kbit/s bus carries thousands. `--can-scale FACTOR` multiplies every channel
+and `--can-rate ID=HZ` sets one outright, and the startup log reports what the
+pump will actually carry rather than what was asked for. Raise `--mtu` to 515
+alongside it: LapSmith negotiates 515 but batches are capped at the `--mtu`
+ceiling, so the default 247 leaves half the payload unused. The full option
+list is `serve.py --help`.
 
 ### Linux
 

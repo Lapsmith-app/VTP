@@ -488,6 +488,25 @@ the table is empty on every connection). Configuring a channel in a client
 should install a `CAN_SUBSCRIBE` for its id; if nothing arrives, check that
 first.
 
+The rates below are the bus's *natural* ones, and 80 frames/s in total is a
+gentle load — a 500 kbit/s bus carries a few thousand. To push a client harder,
+`--can-scale FACTOR` multiplies all three and `--can-rate ID=HZ` sets one
+outright:
+
+```sh
+python3 serve.py --can-scale 4                  # ~306 frames/s
+python3 serve.py --can-rate 0x0C0=200           # engine alone at the ceiling
+```
+
+Two limits apply, and the startup log reports what will actually be carried
+rather than what was asked for. The pump polls at 200 Hz and a frame waits for
+the first poll at or after its interval, so rates that are not a whole number
+of polls round down to ones that are — asking an id for 80 Hz gets 66.7 — and
+no id can exceed the poll rate at all. Separately, a batch holds
+`(MTU − 3 − 16) ÷ 15` frames, which is 15 at the default `--mtu 247` and 33 at
+`--mtu 515`, so raise the MTU alongside the rate or the extra frames simply
+arrive as more notifications.
+
 ### `0x0C0` — engine, 50 Hz
 
 | Bytes | Field | Range |

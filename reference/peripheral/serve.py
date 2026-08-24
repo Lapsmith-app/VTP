@@ -79,6 +79,11 @@ log = logging.getLogger("vtp.peripheral")
 # goes somewhere findable instead of nowhere.
 LOG_FILE = "/tmp/vtp-peripheral.log"
 
+# How often the pump polls the device for notifications that are due. It also
+# bounds every rate the device can be asked for: a stream produces at most one
+# notification per poll, so nothing configured above this can be met.
+POLL_HZ = 200
+
 
 def _in_app_bundle():
     return "/Contents/MacOS/" in sys.executable
@@ -955,7 +960,7 @@ class Peripheral:
         log.info("Service Data (SPEC.md 3.3) is not advertised: the host "
                  "peripheral API does not expose it on every platform")
 
-    async def run(self, poll_hz=200, screen_hz=10, max_ticks=None):
+    async def run(self, poll_hz=POLL_HZ, screen_hz=10, max_ticks=None):
         """The pump. `max_ticks` bounds it so the loop can be driven by a test.
 
         Nothing else about the loop changes under test: transport_selftest.py
@@ -1243,7 +1248,27 @@ async def main_async(args):
         return
 
     device = dev.VtpDevice(mtu=args.mtu, gps_hz=args.gps_hz,
-                           imu_hz=args.imu_hz)
+                           imu_hz=args.imu_hz, can_scale=args.can_scale,
+                           can_rates=dict(args.can_rate or ()))
+
+    bus = device.can_bus_rates(poll_hz=POLL_HZ)
+    unknown = sorted(set(device.can_rates) - {cid for cid, _n, _e in bus})
+    if unknown:
+        log.error("--can-rate names %s, which this bus does not carry; its "
+                  "ids are %s",
+                  ", ".join(f"0x{cid:03X}" for cid in unknown),
+                  ", ".join(f"0x{cid:03X}" for cid, _n, _e in bus))
+        return
+    if args.can_scale != 1.0 or device.can_rates:
+        log.info("CAN bus rates: %s", "   ".join(
+            f"0x{cid:03X} {eff:.4g} Hz (natural {nat:g})"
+            for cid, nat, eff in bus))
+        log.info("  %.4g frames/s across %d ids. These are what the pump can "
+                 "deliver, not what was asked for: it polls at %d Hz and a "
+                 "frame waits for the first poll at or after its interval, so "
+                 "a rate that is not a whole number of polls rounds down to "
+                 "one that is",
+                 sum(eff for _c, _n, eff in bus), len(bus), POLL_HZ)
 
     peripheral = Peripheral(device, name=args.name,
                             encrypt=args.encrypt)
@@ -1281,6 +1306,28 @@ async def main_async(args):
         log.info("stopped")
 
 
+def _positive_float(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be above 0")
+    return value
+
+
+def _can_rate(text):
+    """`ID=HZ`, the id in any base Python reads, so 0x0C0 and 192 both work."""
+    cid, sep, hz = text.partition("=")
+    if not sep:
+        raise argparse.ArgumentTypeError(f"expected ID=HZ, got {text!r}")
+    try:
+        cid = int(cid, 0)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a CAN id: {cid!r}") from None
+    return cid, _positive_float(hz)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--name", default="VTP",
@@ -1290,6 +1337,23 @@ def main():
                     help="assumed ATT MTU for batch sizing")
     ap.add_argument("--gps-hz", type=int, default=10)
     ap.add_argument("--imu-hz", type=int, default=100)
+    ap.add_argument("--can-scale", type=_positive_float, default=1.0,
+                    metavar="FACTOR",
+                    help="multiply every CAN channel's natural bus rate. The "
+                         "synthetic bus runs 0x0C0 at 50 Hz, 0x1A0 at 20 and "
+                         "0x2E0 at 10, so 80 frames/s in total, and "
+                         "--can-scale 4 asks for 320. What arrives is a little "
+                         f"less: the pump polls at {POLL_HZ} Hz and a frame "
+                         "waits for the first poll at or after its interval, "
+                         "so rates that are not a whole number of polls round "
+                         "down to ones that are, and none can exceed the poll "
+                         "rate itself. The startup log reports what the bus "
+                         "will actually carry")
+    ap.add_argument("--can-rate", type=_can_rate, action="append",
+                    metavar="ID=HZ",
+                    help="give one CAN id an explicit rate, overriding its "
+                         "natural rate and --can-scale both, e.g. "
+                         "--can-rate 0x0C0=200. Repeatable")
     ap.add_argument("--no-display", action="store_true",
                     help="run headless; do not open the device screen")
     ap.add_argument("--encrypt", choices=ENCRYPTION_POSTURES,
