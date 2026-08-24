@@ -213,6 +213,28 @@
       "no_roundtrip": true
     },
     {
+      "name": "obd-declared-with-zero-capacity",
+      "desc": "SPEC.md 15 -- bit 10 set with both OBD capacities zero: a poll set nothing fits in, and a floor of zero milliseconds, describe a role no conforming exchange can use. Decodes; a client MUST NOT use the role and SHOULD report the contradiction, and a conforming encoder refuses to produce it.",
+      "record": "info",
+      "hex": "0100130400000a000a002000d00700000000000000000000",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 1043,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_subscription_slots": 32,
+        "can_max_frames_per_s": 2000,
+        "imu_rate_hz": 0,
+        "imu_max_rate_hz": 0,
+        "obd_poll_slots": 0,
+        "clock_flags": 0,
+        "obd_min_interval_ms": 0
+      },
+      "note": "The non-zero-when-set column of the 4.1 table, generated from profile.capacity_required. gps_rate_hz zero with the gps bit set is a STOPPED stream and stays legal, which is why this is a second table rather than a general rule.",
+      "no_roundtrip": true
+    },
+    {
       "name": "obd-capacity-without-capability",
       "desc": "SPEC.md 4.1 -- both OBD capacities MUST be zero while bit 10 is clear. Sharper here than for any other role: a non-zero poll capacity behind a cleared bit is a device advertising that it transmits on a vehicle bus while declaring that it does not. Decodes; a client MUST NOT use either figure and SHOULD report the contradiction.",
       "record": "info",

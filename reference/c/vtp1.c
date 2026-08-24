@@ -258,6 +258,21 @@ int vtp_capabilities_coherent(uint32_t capabilities,
             return 0;
         }
     }
+    /* SPEC.md 15 -- and the OBD pair MUST be non-zero while its bit is SET:
+     * a declared role no conforming exchange can use, the same class of
+     * contradiction surfaced the same way. */
+    static const vtp_capacity_rule_t required[] = VTP_CAPACITY_REQUIRED_RULES;
+    for (size_t i = 0; i < VTP_CAPACITY_REQUIRED_RULE_COUNT; i++) {
+        if (!(capabilities & required[i].bit)) continue;
+        if (len < (size_t)required[i].offset + required[i].size) continue;
+        uint32_t v = 0;
+        for (uint8_t k = 0; k < required[i].size; k++)
+            v |= (uint32_t)info[required[i].offset + k] << (8 * k);
+        if (!v) {
+            if (why) *why = required[i].field;
+            return 0;
+        }
+    }
     return 1;
 }
 

@@ -740,6 +740,22 @@
       }
     },
     {
+      "name": "info-obd-declared-with-zero-capacity",
+      "record": "info",
+      "must_refuse": true,
+      "vector": "obd-declared-with-zero-capacity",
+      "desc": "SPEC.md 15 -- the `obd` bit set with obd_poll_slots and obd_min_interval_ms zero. The declared role admits no conforming exchange, so the device-side half refuses.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 1043,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "can_subscription_slots": 32,
+        "can_max_frames_per_s": 2000
+      }
+    },
+    {
       "name": "info-obd-capacity-without-capability",
       "record": "info",
       "must_refuse": true,
@@ -932,6 +948,28 @@
       }
     },
     {
+      "name": "obd-request-id-outside-u32",
+      "record": "obd_info",
+      "must_refuse": true,
+      "structural": true,
+      "desc": "A request_id of 2^32 + 0x7DF. Refused before narrowing: an encoder that casts to u32 first wraps it into 0x7DF and emits a record for a different identifier -- and two implementations that narrow differently then disagree on one case.",
+      "input": {
+        "probe": {
+          "validity": 1,
+          "count": 1,
+          "request_id": 4294969311,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118
+        },
+        "ecus": [
+          {
+            "id": 2024
+          }
+        ]
+      }
+    },
+    {
       "name": "obd-ecu-id-flag-bits",
       "record": "obd_info",
       "must_refuse": true,
@@ -1002,9 +1040,11 @@
         "protocol_minor": 0,
         "capabilities": 2147485567,
         "gps_rate_hz": 10,
-        "gps_max_rate_hz": 10
+        "gps_max_rate_hz": 10,
+        "obd_poll_slots": 16,
+        "obd_min_interval_ms": 20
       },
-      "expect_hex": "01007f0700000a000a000000000000000000000000000000"
+      "expect_hex": "01007f0700000a000a000000000000000000000010001400"
     },
     {
       "name": "reserved-bits-info-clock-flags",

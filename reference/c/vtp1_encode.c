@@ -330,6 +330,21 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
             if (val) return -1;
         }
     }
+    /* SPEC.md 15 -- and the OBD pair MUST be non-zero while its bit is SET:
+     * the declared role admits no conforming exchange. Same generated-table
+     * shape as the rule above, so a role added in the schema is enforced
+     * here without an edit. */
+    {
+        static const vtp_capacity_rule_t required[] =
+            VTP_CAPACITY_REQUIRED_RULES;
+        for (size_t i = 0; i < VTP_CAPACITY_REQUIRED_RULE_COUNT; i++) {
+            if (!(caps & required[i].bit)) continue;
+            uint32_t val = 0;
+            for (uint8_t k = 0; k < required[i].size; k++)
+                val |= (uint32_t)tmp[required[i].offset + k] << (8 * k);
+            if (!val) return -1;
+        }
+    }
 
     memcpy(out, tmp, VTP_INFO_SIZE);
     return VTP_INFO_SIZE;

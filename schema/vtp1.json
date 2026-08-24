@@ -114,6 +114,12 @@
         "obd_poll_slots",
         "obd_min_interval_ms"
       ]
+    },
+    "capacity_required": {
+      "obd": [
+        "obd_poll_slots",
+        "obd_min_interval_ms"
+      ]
     }
   },
   "enums": {
@@ -1607,7 +1613,7 @@
         "capability": "obd",
         "params": "",
         "response": "obd_probe record",
-        "desc": "Probe the bus and report what answered; the device's first transmission (SPEC.md 15.2)"
+        "desc": "Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2)"
       },
       {
         "value": 97,

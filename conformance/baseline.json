@@ -101,6 +101,7 @@
  "info/long-payload": "6e5a2ba24892445fface5f213ac7ddeca6382225382e07d4d290b6e655934d7d",
  "info/monitor-without-control": "786d70726ed0c954eab3d73c4ae823ca606d7a1b0d6762e9cd9bebbc890668ce",
  "info/obd-capacity-without-capability": "529e420c69e8d3dad6a9d5e9aa91e6637fd42775e4ff849056e837920b5b9c30",
+ "info/obd-declared-with-zero-capacity": "0efd92ebee84d76d05e6cf1f87bc450d0e558d887bf7988ddf26160d4088af6d",
  "info/obd-dongle": "e2670bfed37c9b0a857cd2143fb03612371e18414a11528a7386d3ccf0ef3db9",
  "info/obd-without-can": "c737ba91bd1007796165b42b1f91e464ea163f85cbf9a1e76578b39733317346",
  "info/rate-below-maximum": "f62ccb34a81ba68095ebaf2a9801075a355519625f58e71440314790fc1e529b",

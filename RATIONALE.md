@@ -1218,7 +1218,8 @@ yet at the only moment anyone read it. It was redefined as a device ceiling —
 and then removed altogether (§8.2): a notification never exceeds the
 negotiated ATT payload, which the client's own stack already knows, so even
 the ceiling was a second statement of a bound the client has. Bytes 22–23 of
-Info are reserved.
+Info were reserved, and SPEC §15 has since assigned them to
+`obd_min_interval_ms`.
 
 **Monitor freshness had two rules and a third to reconcile them.** `max_age` of
 zero meant "no deadline of its own", and a derived device-wide "liveness bound"

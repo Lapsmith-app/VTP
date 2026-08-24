@@ -40,10 +40,44 @@ def _probe(s):
     return probe
 
 
+def _probe_timeout(s):
+    """SPEC.md §15.2 -- a probe is up to three requests, each spaced by at
+    least the greater of the 50 ms collection window and the declared
+    floor, which is a u16: a device with a 2000 ms floor legitimately takes
+    ~6 s. The fixed control timeout would report that conforming probe
+    unanswered."""
+    floor = s.info["obd_min_interval_ms"] if s.info else 0
+    return max(3.0, 3 * max(floor, 50) / 1000 + 2.0)
+
+
 def _union_bit(probe, pid):
     window, bit = divmod(pid - 0x01, 32)
     field = ("supported_01_20", "supported_21_40", "supported_41_60")[window]
     return bool(probe["probe"][field] & (1 << bit))
+
+
+@check(id="obd.poll_before_probe", section="15.4", phase="control",
+       severity="MUST", requires=("obd",), adversarial=True,
+       title="Nothing is pollable before a probe")
+async def obd_poll_before_probe(s):
+    c = _control(s)
+    if s.info is None:
+        raise Skip("Info did not decode")
+    # Registration order puts this first in the module, and nothing earlier
+    # in the control phase sends OBD_INFO, so no probe has answered on this
+    # connection yet. The request is well-formed in every other respect --
+    # legal interval, one PID inside 0x01-0x60, within the slot count -- so
+    # the only rule left to refuse it is §15.4's probe gate.
+    interval = max(s.info["obd_min_interval_ms"], 1)
+    r = await c.request(refdec.OPCODE["OBD_POLL_SET"],
+                        struct.pack("<HB", interval, 1) + bytes([0x0C]))
+    if r.status != refdec.STATUS_VALUE["bad_params"]:
+        raise Fail(
+            f"a well-formed non-empty poll set before any OBD_INFO was "
+            f"answered {r.status_name}; §15.4 -- with no probe result "
+            f"nothing is pollable, and a device that transmits for an "
+            f"unverified PID has skipped the verify step the role is built "
+            f"on")
 
 
 @check(id="obd.probe", section="15.2", phase="control", severity="MUST",
@@ -52,7 +86,8 @@ def _union_bit(probe, pid):
 async def obd_probe(s):
     c = _control(s)
     try:
-        response = await c.request(refdec.OPCODE["OBD_INFO"])
+        response = await c.request(refdec.OPCODE["OBD_INFO"],
+                                   timeout=_probe_timeout(s))
     except ControlTimeout:
         raise Fail("OBD_INFO went unanswered. §9 requires a device to respond "
                    "to every request it applies -- and this one is the probe "
@@ -224,6 +259,15 @@ async def obd_poll_refusals(s):
                 problems.append(
                     f"an interval of {floor - 1} ms, below the declared floor "
                     f"of {floor}, was answered {r.status_name}")
+    # interval_ms 0 with a non-empty set is its own MUST: zero is not "no
+    # limit" here (§15.4) -- the device would be GENERATING unbounded
+    # traffic -- and it is refused whatever PID rides beside it, so this
+    # cannot be excused by the pid checks that follow.
+    r = await poll_set(0, [0x0C])
+    if r.status != refdec.STATUS_VALUE["bad_params"]:
+        problems.append(
+            f"a non-empty set with interval_ms 0 was answered "
+            f"{r.status_name}; §15.4 refuses unbounded generation outright")
     if slots < 0xFF:
         r = await poll_set(interval, [0x01] * (slots + 1))
         if r.status != refdec.STATUS_VALUE["table_full"]:
@@ -299,14 +343,38 @@ async def obd_poll_and_flag(s):
         frames = [rec for _, b in running for rec in b["records"]]
         heard = [f for f in frames if _identity(f) in ecu_ids]
         if not heard:
+            # §15.4 -- an unanswered request is abandoned and the gap IS the
+            # truth, so silence alone must not fail a conforming device: the
+            # car may have gone quiet since the probe. A fresh probe tells
+            # the two apart -- §15.2 makes each one a fresh measurement (and
+            # clears the poll set, which the cleanup below covers anyway).
+            try:
+                again = await c.request(refdec.OPCODE["OBD_INFO"],
+                                        timeout=_probe_timeout(s))
+            except ControlTimeout:
+                raise Fail("OBD_INFO went unanswered while diagnosing a "
+                           "silent poll; §9 requires a response to every "
+                           "request") from None
+            silent_car = True
+            if again.ok:
+                try:
+                    fresh = refdec.decode("obd_info", again.detail)
+                except refdec.Reject as exc:
+                    raise Fail(f"the re-probe's detail did not decode: "
+                               f"{exc}", detail=again.detail.hex()) from None
+                silent_car = not fresh["probe"]["validity"] & RESPONDED
+            if silent_car:
+                raise Skip(
+                    "the car stopped answering between the probe and the "
+                    "poll -- nothing was delivered because nothing was on "
+                    "the bus, which §15.4 makes the honest outcome")
             raise Fail(
-                f"no response arrived on any reported ECU id within "
-                f"{settle:.2f} s of an accepted poll set (PID "
-                f"0x{supported:02X}, {interval} ms) with nothing subscribed; "
-                f"§15.5 -- the fallback delivers on the probe's reported "
-                f"identifiers, so a polling device that stays silent has "
-                f"either stopped transmitting or is discarding the answers "
-                f"it asked for")
+                f"the car still answers a probe, yet no poll response was "
+                f"delivered within {settle:.2f} s of an accepted poll set "
+                f"(PID 0x{supported:02X}, {interval} ms) with nothing "
+                f"subscribed; §15.5 -- the fallback delivers on the probe's "
+                f"reported identifiers, so this device is either not "
+                f"transmitting or discarding the answers it asked for")
         strays = [f for f in frames if _identity(f) not in ecu_ids]
         if strays:
             raise Fail(

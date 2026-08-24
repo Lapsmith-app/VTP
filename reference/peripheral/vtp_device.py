@@ -855,11 +855,18 @@ class VtpDevice:
         # it, and a device not polled for a while emits one request rather
         # than a backlog, because `_obd_last_tx_us` only moves when a frame
         # actually goes out.
-        if caps & CAP_OBD and self._obd_poll and (
+        # Snapshot, because control writes run outside this loop on a real
+        # transport: an empty OBD_POLL_SET landing between the truthiness
+        # check and the indexing rebinds `_obd_poll` to [], and len() of the
+        # NEW list divides by zero. Every mutation of the pair rebinds
+        # rather than mutating in place, so a local reference stays a
+        # consistent pre- or post-write view.
+        obd_poll = self._obd_poll
+        obd_interval_us = self._obd_interval_ms * 1000
+        if caps & CAP_OBD and obd_poll and (
                 self._obd_last_tx_us is None
-                or now - self._obd_last_tx_us
-                >= self._obd_interval_ms * 1000):
-            pid = self._obd_poll[self._obd_index % len(self._obd_poll)]
+                or now - self._obd_last_tx_us >= obd_interval_us):
+            pid = obd_poll[self._obd_index % len(obd_poll)]
             self._obd_index += 1
             self._obd_last_tx_us = now
             self._obd_transmit(pid, now)
@@ -876,22 +883,7 @@ class VtpDevice:
         for frame in itertools.chain(
                 obd_frames,
                 self._due_can_frames(now) if caps & CAP_CAN else ()):
-            if self._can_batch_t0 is None:
-                self._can_batch_t0 = frame["_t"]
-            # SPEC.md §6.1 — dt is 10 us ticks from t_base and spans 655.35 ms,
-            # so a batch MUST be flushed before it would overflow.
-            dt = (frame["_t"] - self._can_batch_t0) // 10
-            if dt > 0xFFFF or len(self._can_pending) >= self._can_capacity():
-                batch = self._flush_can(now)
-                if batch is not None:
-                    out.append(("can", batch))
-                self._can_batch_t0 = frame["_t"]
-                dt = 0
-            self._can_pending.append({
-                "dt": dt, "id": frame["id"], "extended": False,
-                "fd": False, "rtr": False,
-                "len": len(frame["payload"]), "payload": frame["payload"],
-            })
+            self._accept_frame(frame, now, out)
 
         # Flush partial batches on a timer so a quiet bus or a slow ODR still
         # delivers, rather than waiting for a batch that may never fill. The
@@ -925,6 +917,30 @@ class VtpDevice:
         if emit:
             st["emitted_at"] = now
         return emit
+
+    def _accept_frame(self, frame, now, out):
+        """One admitted frame into the pending batch, flushing when the dt
+        window or capacity forces it (SPEC.md §6.1). The identity carries
+        the format bit in bit 29 -- can_record's own layout -- so `extended`
+        is derived here rather than assumed: a 29-bit OBD response id copied
+        into `id` with extended forced false was an identifier the encoder
+        rightly refused, and poll() crashed on a conforming car."""
+        if self._can_batch_t0 is None:
+            self._can_batch_t0 = frame["_t"]
+        dt = (frame["_t"] - self._can_batch_t0) // 10
+        if dt > 0xFFFF or len(self._can_pending) >= self._can_capacity():
+            batch = self._flush_can(now)
+            if batch is not None:
+                out.append(("can", batch))
+            self._can_batch_t0 = frame["_t"]
+            dt = 0
+        raw = frame["id"]
+        self._can_pending.append({
+            "dt": dt, "id": raw & 0x1FFFFFFF,
+            "extended": bool(raw & (1 << 29)),
+            "fd": False, "rtr": False,
+            "len": len(frame["payload"]), "payload": frame["payload"],
+        })
 
     def _governing(self, cid):
         """SPEC.md §9.2 — of the subscriptions matching `cid`, the one that
@@ -960,14 +976,20 @@ class VtpDevice:
     def _obd_stop(self, *, flush):
         """SPEC.md 15.7 -- the transmitter off, and nothing stranded.
 
-        `flush` delivers the pending CAN batch before the poll set clears,
-        so frames already accepted while polling are not held to surface on
-        a later subscription with a stale t_base -- flushed BEFORE the set
-        clears, so the batch's polling flag is truthful. The connection
-        edges pass flush=False: the link those frames belonged to is gone.
+        `flush` runs everything already accepted out before the poll set
+        clears: bus arrivals still queued for admission go through it under
+        the pre-stop state (so the fallback they were accepted under still
+        delivers them), and the pending batch is flushed -- BEFORE the set
+        clears, so the batch's polling flag is truthful. Arrivals scheduled
+        beyond `now` have not happened yet and are dropped unheard. The
+        connection edges pass flush=False: the link those frames belonged
+        to is gone.
         """
         if flush:
-            batch = self._flush_can(self.now_us())
+            now = self.now_us()
+            for frame in self._due_obd_frames(now):
+                self._accept_frame(frame, now, self._deferred)
+            batch = self._flush_can(now)
             if batch is not None:
                 self._deferred.append(("can", batch))
         self._obd_poll, self._obd_interval_ms, self._obd_index = [], 0, 0
@@ -1061,7 +1083,15 @@ class VtpDevice:
         response identifier gets exactly what it asked for. Only a frame the
         table ignores falls through to SPEC.md 15.5's rule."""
         pending, self._obd_rx = self._obd_rx, []
+        hold = []
         for t, cid, payload in pending:
+            # A probe schedules its arrivals at the transmit instants
+            # SPEC.md 15.1 requires, which may still be ahead of the clock:
+            # a frame is not on the bus until its time comes, so it is held,
+            # not admitted early.
+            if t > now:
+                hold.append((t, cid, payload))
+                continue
             sub = self._governing(cid)
             if sub is None:
                 if self._obd_fallback_delivers(cid):
@@ -1069,17 +1099,42 @@ class VtpDevice:
                 continue
             if self._admit(sub, cid, now):
                 yield {"id": cid, "payload": payload, "_t": t}
+        self._obd_rx = hold + self._obd_rx
 
     def _obd_probe(self, now):
         """SPEC.md 15.2 -- transmit the mask requests, report what answered.
 
         Measured when asked, like GET_POWER: each OBD_INFO re-probes, so the
-        answer describes the car the device is plugged into now. The mask
-        RESPONSES are real bus frames and enter `_obd_rx` like any other
-        arrival -- a client subscribed to 0x7E8 sees `41 00 ...` go past,
-        carrying J1979's OWN bit order, while the detail below carries
-        SPEC.md 15.3's. The transcription between them is exactly what the
-        conformance vector pins."""
+        answer describes the car the device is plugged into now -- and every
+        completed probe replaces the probe result and clears the poll set
+        with it (§15.7): the set never outlives the result it was verified
+        against.
+
+        The probe runs on the SAME transmit schedule as the poll loop
+        (SPEC.md 15.1): each request is placed at the next legal instant --
+        after the last transmission by the greater of the 50 ms collection
+        window (§15.2) and the declared floor -- and the response frames it
+        causes carry those instants as bus-arrival times. _due_obd_frames
+        releases a frame only once the clock reaches it, so the stream
+        shows the spacing and the one-outstanding bound rather than a burst
+        at one instant. What stays compressed is the indication:
+        handle_control is synchronous, so the OBD_INFO response reports the
+        completed probe before its last scheduled frame has aged onto the
+        stream -- real firmware sends the indication after.
+
+        The mask RESPONSES are real bus frames and enter `_obd_rx` like any
+        other arrival -- a client subscribed to 0x7E8 sees `41 00 ...` go
+        past, carrying J1979's OWN bit order, while the detail below
+        carries SPEC.md 15.3's. The transcription between them is exactly
+        what the conformance vector pins."""
+        # SPEC.md 15.2 -- the probe replaces the result the poll set was
+        # verified against, so the set clears first, flushing what it had
+        # already accepted (§15.7).
+        self._obd_stop(flush=True)
+        step_us = max(50, OBD_MIN_INTERVAL_MS) * 1000
+        t = now
+        if self._obd_last_tx_us is not None:
+            t = max(t, self._obd_last_tx_us + step_us)
         answered = {}
         union = [0, 0, 0]
         # PID 0x00 first; 0x20 and 0x40 only if the union so far claims them
@@ -1095,25 +1150,14 @@ class VtpDevice:
                 answered[ecu_id] = True
                 union[window] |= masks[window]
                 self._obd_rx.append(
-                    (now, ecu_id,
+                    (t, ecu_id,
                      self._obd_response_frame(
                          mask_pid, _j1979_mask_bytes(masks[window]))))
-        # SPEC.md 15.1 -- a probe's requests take the place of poll requests
-        # in the same schedule rather than adding to them, so the probe
-        # advances the last-transmission mark exactly as the poll loop does.
-        # The probe's own internal spacing is time-compressed here, like
-        # every other duration in this synthetic device: handle_control is
-        # synchronous, so the mask requests land at one instant that real
-        # firmware would spread a spacing apart. What is modelled honestly
-        # is the boundary the schedule shares with the poll loop.
-        self._obd_last_tx_us = now
+            self._obd_last_tx_us = t
+            t += step_us
         if not answered:
-            # SPEC.md 15.2 -- a probe nothing answered clears the poll set
-            # with the probe result it replaces (§15.7's fifth stop): the
-            # PIDs an installed set names were verified against a car that
-            # has stopped answering, and a device that kept transmitting
-            # here would be doing so with the delivery path already dead.
-            self._obd_clear(flush=True)
+            self._obd_masks = None
+            self._obd_ecu_ids = frozenset()
             return enc.encode_obd_info(dict(validity=0, count=0), [])
         self._obd_masks = tuple(union)
         self._obd_ecu_ids = frozenset(answered)
@@ -1192,12 +1236,19 @@ class VtpDevice:
             if params:
                 return reply(ST_BAD_PARAMS)
             self._subscriptions.clear()
+            # SPEC.md 8.3 -- frames already accepted into the pending batch
+            # are being discarded by this reset, so they are COUNTED: if the
+            # client re-subscribes, the next batch reports the loss instead
+            # of the reset silently eating accepted frames.
+            self._dropped["can"] = min(
+                0xFFFF, self._dropped["can"] + len(self._can_pending))
             self._can_pending, self._can_batch_t0 = [], None
             # SPEC.md 15.7 -- the CAN role has one reset, and it resets
             # everything the role does: the opcode that clears the receiver
             # clears the transmitter with it. The probe result survives; it
-            # is a fact about the car, not about the poll set. flush=False
-            # because the pending batch was cleared with the receiver above.
+            # is a fact about the car, not about the poll set. flush=False:
+            # the pending batch was accounted for above, and arrivals not
+            # yet admitted matched a table this reset just cleared.
             self._obd_stop(flush=False)
             return reply(ST_OK)
 

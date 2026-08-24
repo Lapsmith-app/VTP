@@ -206,6 +206,7 @@ CAP_BIT = {b["name"]: b["bit"]
 CAP_IMPLIES = {b["name"]: b.get("implies") or []
                for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
 CAP_CAPACITY = SCHEMA["profile"]["capacity"]
+CAP_CAPACITY_REQUIRED = SCHEMA["profile"].get("capacity_required", {})
 
 
 def capability_problem(info):
@@ -240,6 +241,17 @@ def capability_problem(info):
             if info.get(field):
                 return (f"capabilities: {field} is {info[field]} while `{cap}` "
                         f"is clear; SPEC.md §4.1")
+    # SPEC.md §15 -- the OBD capacities MUST be non-zero while the bit is
+    # set: a declared role no conforming exchange can use is the same class
+    # of contradiction as a capacity behind a cleared bit, surfaced the same
+    # way.
+    for cap, fields in CAP_CAPACITY_REQUIRED.items():
+        if not caps & (1 << CAP_BIT[cap]):
+            continue
+        for field in fields:
+            if not info.get(field):
+                return (f"capabilities: {field} is 0 while `{cap}` is set; "
+                        f"SPEC.md §15 requires it non-zero")
     return None
 
 

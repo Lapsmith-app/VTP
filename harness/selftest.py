@@ -109,6 +109,7 @@ CAUGHT_BY = {
     "obd_accepts_unsupported_pid": "obd.poll_refusals",
     "obd_ignores_stop": "obd.poll_and_flag",
     "obd_reset_keeps_polling": "obd.reset_stops",
+    "obd_polls_before_probe": "obd.poll_before_probe",
     "obd_delivery_needs_subscription": "obd.poll_and_flag",
     "obd_flag_never_set": "obd.poll_and_flag",
 }

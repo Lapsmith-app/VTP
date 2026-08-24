@@ -119,6 +119,16 @@ profile:
     imu: [imu_rate_hz, imu_max_rate_hz]
     obd: [obd_poll_slots, obd_min_interval_ms]
 
+  # Capacities that MUST also be NON-ZERO while their bit is SET (SPEC.md
+  # 15): a poll set nothing fits in, or a floor of zero milliseconds,
+  # describes a role no conforming exchange can use. A separate table from
+  # `capacity` because the zero-when-clear rule is universal while this one
+  # is not -- gps_rate_hz is legitimately zero with the bit set (a stopped
+  # stream), so requiring non-zero everywhere would outlaw a state SPEC.md
+  # 9.6 defines.
+  capacity_required:
+    obd: [obd_poll_slots, obd_min_interval_ms]
+
 enums:
   fix_type:
     width: 1
@@ -776,5 +786,5 @@ control:
     # u8 values follow, one per list entry. The poll set is ORDERED and MAY
     # repeat a PID -- [0C, 0D, 0C, 05] samples 0x0C twice per cycle -- which
     # is how relative rates exist without per-PID rate fields (SPEC.md 15.4).
-    - {value: 0x60, name: OBD_INFO,     capability: obd, params: "",                              response: "obd_probe record", desc: "Probe the bus and report what answered; the device's first transmission (SPEC.md 15.2)"}
+    - {value: 0x60, name: OBD_INFO,     capability: obd, params: "",                              response: "obd_probe record", desc: "Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2)"}
     - {value: 0x61, name: OBD_POLL_SET, capability: obd, params: "interval_ms:u16, count:u8, pids:u8*", response: "",                 desc: "Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4)"}

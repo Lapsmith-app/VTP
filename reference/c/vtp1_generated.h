@@ -327,4 +327,12 @@ typedef struct { uint32_t bit; uint8_t offset, size; const char *field; } vtp_ca
 }
 #define VTP_CAPACITY_RULE_COUNT 8
 
+/* SPEC.md 15 -- capacities that MUST be NON-zero while their
+ * bit is SET. Same row type as VTP_CAPACITY_RULES. */
+#define VTP_CAPACITY_REQUIRED_RULES { \
+    { (1u << 10), 20, 1, "obd_poll_slots" }, \
+    { (1u << 10), 22, 2, "obd_min_interval_ms" }, \
+}
+#define VTP_CAPACITY_REQUIRED_RULE_COUNT 2
+
 #endif /* VTP1_GENERATED_H */

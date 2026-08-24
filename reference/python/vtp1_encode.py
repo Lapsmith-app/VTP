@@ -330,6 +330,7 @@ CAP_BIT = {b["name"]: b["bit"]
 CAP_IMPLIES = {b["name"]: b.get("implies") or []
                for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
 CAP_CAPACITY = SCHEMA["profile"]["capacity"]
+CAP_CAPACITY_REQUIRED = SCHEMA["profile"].get("capacity_required", {})
 
 
 def encode_info(info):
@@ -359,6 +360,18 @@ def encode_info(info):
                     f"info.{field} is {info[field]} while capability `{cap}` "
                     f"is clear; SPEC.md §4.1 requires a capacity behind a "
                     f"cleared bit to be zero")
+    # SPEC.md §15 -- and the OBD pair MUST be non-zero while the bit is SET:
+    # a declared role no conforming exchange can use. Driven by the schema's
+    # capacity_required table, exactly as the rule above is by capacity.
+    for cap, fields in CAP_CAPACITY_REQUIRED.items():
+        if not caps & (1 << CAP_BIT[cap]):
+            continue
+        for field in fields:
+            if not info.get(field):
+                raise EncodeError(
+                    f"info.{field} is 0 while capability `{cap}` is set; "
+                    f"SPEC.md §15 requires it non-zero -- the declared role "
+                    f"admits no conforming exchange")
     return _pack("info", info)
 
 

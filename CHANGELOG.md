@@ -64,9 +64,13 @@ deliberately not a minor version, which v0.x exists to permit.
   a client does to receive the answers; supported-PID masks make the role
   declare-verify-use like everything else. Identifier validity on the
   probe is scoped to a probe that answered — a gated request_id is absent
-  and cannot reject the response it rides in — and a probe nothing
-  answered clears the poll set, so a transmitter never outlives the car
-  that verified it. Info's two freed
+  and cannot reject the response it rides in — and every completed probe
+  replaces the probe result and clears the poll set, so a transmitter
+  never outlives the result it was verified against. The two OBD
+  capacities MUST be non-zero while bit 10 is set (`capacity_required` in
+  the schema, a generated rules table beside the zero-when-clear one),
+  with the decode-and-flag / encoder-refusal halves paired in the corpus
+  like every content rule. Info's two freed
   reserved fields become the role's capacities (`obd_poll_slots` at offset
   20, `obd_min_interval_ms` at 22) per §11.2 — the wire bytes of every
   existing vector are unchanged, but the decode keys renamed, so the
@@ -87,7 +91,7 @@ deliberately not a minor version, which v0.x exists to permit.
   the answers with nothing subscribed and on no identifier the probe did
   not report, the polling flag rides every batch and falls on the stop,
   and the empty poll set actually silences the transmitter. Every
-  MUST/SHOULD is held by a seeded fault or an explicit excuse; 72 faults,
+  MUST/SHOULD is held by a seeded fault or an explicit excuse; 73 faults,
   each caught by the check that claims it. (`info.reserved_fields`
   retired with Info's last reserved bytes, which §15 assigned.)
 

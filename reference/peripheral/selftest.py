@@ -1325,6 +1325,21 @@ def main():
           "two requests closer than interval_ms apart: a replacement MUST "
           "NOT reset the spacing clock (SPEC.md 15.1)")
 
+    # SPEC.md 15.2 -- EVERY completed probe clears the poll set, answered or
+    # not: the set never outlives the probe result it was verified against.
+    re = obd_ctl(dev.OBD_INFO, 0x79)
+    check(re[2] == dev.ST_OK
+          and vtp1.decode_obd_info(re[3:])["probe"]["count"] == 2,
+          "a mid-session re-probe answers ok with both ECUs")
+    idle = obd_run(0.6)
+    check(not [r for b in idle[1:] for r in b["records"]],
+          "an ANSWERED re-probe MUST clear the poll set too: after its own "
+          "flush, nothing may be transmitted until a new OBD_POLL_SET "
+          "(SPEC.md 15.2)")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x7A,
+                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+          "re-arming against the fresh probe result must succeed")
+
     # SPEC.md 15.5 -- the fallback is not an entry in the table: it holds no
     # slot and CAN_UNSUBSCRIBE cannot name it.
     check(obd_ctl(dev.CAN_UNSUBSCRIBE, 0x80,
@@ -1440,6 +1455,40 @@ def main():
           "the silent probe replaced the probe result too, so nothing is "
           "pollable until a probe answers again (SPEC.md 15.4)")
     del car.OBD_ECUS           # back to the class's car
+
+    # SPEC.md 15.2/15.5 -- a car that answers 29-bit functional addressing,
+    # end to end: the probe reports raw ids with bit 29 set, and delivered
+    # frames carry extended=True with the masked arbitration id. The record
+    # builder used to force extended=False and hand the raw value to the
+    # encoder, which rightly refused it -- poll() then crashed on a
+    # conforming car, invisibly, because the default car is 11-bit.
+    car29 = dev.VtpDevice(now_us=lambda: obd_clock[0], gps_hz=0, imu_hz=0)
+    car29.OBD_REQUEST_ID = 0x18DB33F1 | (1 << 29)
+    car29.OBD_ECUS = {0x18DAF110 | (1 << 29): dev.VtpDevice.OBD_ECUS[0x7E8],
+                      0x18DAF118 | (1 << 29): dev.VtpDevice.OBD_ECUS[0x7E9]}
+    car29.on_connect()
+    r29 = car29.handle_control(bytes([dev.OBD_INFO, 0x7B]))
+    p29 = vtp1.decode_obd_info(r29[3:])
+    check([e["id"] for e in p29["ecus"]] == sorted(car29.OBD_ECUS),
+          "a 29-bit probe reports raw entry ids, bit 29 included")
+    obd_clock[0] += 200_000
+    check(car29.handle_control(
+              bytes([dev.OBD_POLL_SET, 0x7C])
+              + struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+          "polling a 29-bit car must be accepted")
+    frames29 = []
+    for _ in range(100):
+        obd_clock[0] += 5_000
+        for ch, payload in car29.poll():
+            if ch == "can":
+                b = decode("can", car29.stamp_seq(ch, payload))
+                car29.commit_seq(ch)
+                if b is not None:
+                    frames29 += b["records"]
+    check(frames29 and all(f["extended"] for f in frames29),
+          "29-bit responses are delivered with extended=True")
+    check({f["id"] for f in frames29} <= {0x18DAF110, 0x18DAF118},
+          "29-bit responses carry the masked arbitration id")
 
     # SPEC.md 15.7 -- transmit never survives the link.
     car.on_disconnect()

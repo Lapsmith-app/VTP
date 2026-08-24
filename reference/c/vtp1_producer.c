@@ -530,7 +530,16 @@ static void do_obd_info(const jctx *c, const jv *in) {
     memset(&probe, 0, sizeof probe);
     probe.validity        = (uint8_t) jint(c, pr, "validity");
     probe.count           = (uint8_t) jint(c, pr, "count");
-    probe.request_id      = (uint32_t)jint(c, pr, "request_id");
+    /* Validated BEFORE narrowing: a cast-first reading of 2^32 + 0x7DF
+     * wraps into a valid identifier for a different frame, and an encoder
+     * that narrows differently from its sibling reference then disagrees
+     * with it on the same case. The identifier fields are the ones where a
+     * wrapped value survives every later check. */
+    long long rid = jint(c, pr, "request_id");
+    if (rid < 0 || rid > 0xFFFFFFFFLL) {
+        refuse("obd_probe.request_id does not fit u32"); return;
+    }
+    probe.request_id      = (uint32_t)rid;
     probe.supported_01_20 = (uint32_t)jint(c, pr, "supported_01_20");
     probe.supported_21_40 = (uint32_t)jint(c, pr, "supported_21_40");
     probe.supported_41_60 = (uint32_t)jint(c, pr, "supported_41_60");
@@ -540,7 +549,11 @@ static void do_obd_info(const jctx *c, const jv *in) {
     memset(ecus, 0, sizeof ecus);
     for (int i = 0; i < n; i++) {
         const jv *e = jat(c, es, i);
-        ecus[i].id = (uint32_t)jint(c, e, "id");
+        long long eid = jint(c, e, "id");
+        if (eid < 0 || eid > 0xFFFFFFFFLL) {
+            refuse("obd_ecu.id does not fit u32"); return;
+        }
+        ecus[i].id = (uint32_t)eid;
     }
     encoded(vtp_encode_obd_info(&probe, n ? ecus : NULL, out, sizeof out), out);
 }

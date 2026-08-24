@@ -140,13 +140,22 @@ def _validate_profile(schema, bitmasks):
             elif implied == b["name"]:
                 problems.append(f"capabilities bit {b['name']!r}: implies itself")
 
-    for cap, fields in profile["capacity"].items():
-        if cap not in cap_names:
-            problems.append(f"profile: capacity names unknown capability {cap!r}")
+    for block in ("capacity", "capacity_required"):
+        for cap, fields in profile.get(block, {}).items():
+            if cap not in cap_names:
+                problems.append(f"profile: {block} names unknown capability "
+                                f"{cap!r}")
+            for f in fields:
+                if f not in info_fields:
+                    problems.append(f"profile: {block} {cap!r} names {f!r}, "
+                                    f"which is not a field of `info`")
+    # A required capacity must also be a declared capacity: non-zero-when-set
+    # only makes sense on a field that is zero-when-clear.
+    for cap, fields in profile.get("capacity_required", {}).items():
         for f in fields:
-            if f not in info_fields:
-                problems.append(f"profile: capacity {cap!r} names {f!r}, which "
-                                f"is not a field of `info`")
+            if f not in profile.get("capacity", {}).get(cap, []):
+                problems.append(f"profile: capacity_required {cap!r} names "
+                                f"{f!r}, which `capacity` does not")
     return problems
 
 
@@ -524,13 +533,18 @@ def spec_tables(schema):
                      f"{ch['written_by']} | {ch['read_by']} | {ch['inert']} |")
     out["profile:attributes"] = "\n".join(lines)
 
+    required = profile.get("capacity_required", {})
     lines = ["| Bit | Capability | Requires | Capacity fields that MUST be zero "
-             "when clear |", "| --- | --- | --- | --- |"]
+             "when clear | ...and non-zero when set |",
+             "| --- | --- | --- | --- | --- |"]
     for b in schema["bitmasks"]["capabilities"]["bits"]:
         implies = b.get("implies") or []
         req = ", ".join(f"bit {caps[i]['bit']} (`{i}`)" for i in implies) or "—"
         zeroed = ", ".join(f"`{f}`" for f in capacity.get(b["name"], [])) or "—"
-        lines.append(f"| {b['bit']} | `{b['name']}` | {req} | {zeroed} |")
+        nonzero = ", ".join(f"`{f}`"
+                            for f in required.get(b["name"], [])) or "—"
+        lines.append(f"| {b['bit']} | `{b['name']}` | {req} | {zeroed} | "
+                     f"{nonzero} |")
     out["profile:capabilities"] = "\n".join(lines)
 
     # Appendix A. Hand-written until now, and wrong: it listed fix_flags bits
@@ -694,6 +708,19 @@ def c_header(schema):
     L += rules
     L.append("}")
     L.append(f"#define VTP_CAPACITY_RULE_COUNT {len(rules)}")
+    L.append("")
+    L.append("/* SPEC.md 15 -- capacities that MUST be NON-zero while their")
+    L.append(" * bit is SET. Same row type as VTP_CAPACITY_RULES. */")
+    required = []
+    for cap, fields in schema["profile"].get("capacity_required", {}).items():
+        for fname in fields:
+            f = info_fields[fname]
+            required.append(f'    {{ (1u << {caps[cap]["bit"]}), {f["offset"]}, '
+                            f'{f["size"]}, "{fname}" }}, \\')
+    L.append("#define VTP_CAPACITY_REQUIRED_RULES { \\")
+    L += required
+    L.append("}")
+    L.append(f"#define VTP_CAPACITY_REQUIRED_RULE_COUNT {len(required)}")
     L.append("")
     L += ["#endif /* VTP1_GENERATED_H */", ""]
     return "\n".join(L)
@@ -943,6 +970,12 @@ def _reserved_case(schema, record, field, value):
     if record == "info":
         clean = dict(protocol_major=1, protocol_minor=0, capabilities=1,
                      gps_rate_hz=10, gps_max_rate_hz=10)
+        if field == "capabilities":
+            # The dirty value sets every assigned bit, `obd` included, and
+            # SPEC.md 15 requires both OBD capacities non-zero beside it --
+            # a baseline the encoder must refuse for another reason tests
+            # nothing about the reserved bits.
+            clean.update(obd_poll_slots=16, obd_min_interval_ms=20)
         return (dict(clean, **{field: value}),
                 encode(schema, "info", dict(clean, **{field: value})))
     if record == "monitor_value":
@@ -1782,6 +1815,24 @@ def vectors(schema):
              "receive. Decodes; the OBD role MUST NOT be used.",
              refused_by="info-obd-without-can",
              no_roundtrip=True),
+        case(schema, "info", "obd-declared-with-zero-capacity",
+             dict(protocol_major=1, protocol_minor=0,
+                  capabilities=(C["gps"] | C["can"] | C["control"]
+                                | C["obd"]),
+                  gps_rate_hz=10, gps_max_rate_hz=10,
+                  can_subscription_slots=32, can_max_frames_per_s=2000),
+             "SPEC.md 15 -- bit 10 set with both OBD capacities zero: a poll "
+             "set nothing fits in, and a floor of zero milliseconds, "
+             "describe a role no conforming exchange can use. Decodes; a "
+             "client MUST NOT use the role and SHOULD report the "
+             "contradiction, and a conforming encoder refuses to produce "
+             "it.",
+             refused_by="info-obd-declared-with-zero-capacity",
+             no_roundtrip=True,
+             note="The non-zero-when-set column of the 4.1 table, generated "
+                  "from profile.capacity_required. gps_rate_hz zero with the "
+                  "gps bit set is a STOPPED stream and stays legal, which is "
+                  "why this is a second table rather than a general rule."),
         case(schema, "info", "obd-capacity-without-capability",
              dict(protocol_major=1, protocol_minor=0, capabilities=C["gps"],
                   gps_rate_hz=10, gps_max_rate_hz=10,
@@ -2909,6 +2960,18 @@ def vectors(schema):
          "input": dict(protocol_major=1, protocol_minor=0,
                        capabilities=C["control"] | C["obd"],
                        obd_poll_slots=16, obd_min_interval_ms=20)},
+        {"name": "info-obd-declared-with-zero-capacity",
+         "record": "info", "must_refuse": True,
+         "vector": "obd-declared-with-zero-capacity",
+         "desc": "SPEC.md 15 -- the `obd` bit set with obd_poll_slots and "
+                 "obd_min_interval_ms zero. The declared role admits no "
+                 "conforming exchange, so the device-side half refuses.",
+         "input": dict(protocol_major=1, protocol_minor=0,
+                       capabilities=(C["gps"] | C["can"] | C["control"]
+                                     | C["obd"]),
+                       gps_rate_hz=10, gps_max_rate_hz=10,
+                       can_subscription_slots=32,
+                       can_max_frames_per_s=2000)},
         {"name": "info-obd-capacity-without-capability",
          "record": "info", "must_refuse": True,
          "vector": "obd-capacity-without-capability",
@@ -2983,6 +3046,18 @@ def vectors(schema):
                  "bits 11-28 set. Refused, not masked: masking produces a "
                  "different identifier that looks entirely valid.",
          "input": {"probe": dict(validity=1, count=1, request_id=0x87DF,
+                                 supported_01_20=U1, supported_21_40=U2,
+                                 supported_41_60=U3),
+                   "ecus": [dict(id=0x7E8)]}},
+        {"name": "obd-request-id-outside-u32",
+         "record": "obd_info", "must_refuse": True, "structural": True,
+         "desc": "A request_id of 2^32 + 0x7DF. Refused before narrowing: an "
+                 "encoder that casts to u32 first wraps it into 0x7DF and "
+                 "emits a record for a different identifier -- and two "
+                 "implementations that narrow differently then disagree on "
+                 "one case.",
+         "input": {"probe": dict(validity=1, count=1,
+                                 request_id=(1 << 32) + 0x7DF,
                                  supported_01_20=U1, supported_21_40=U2,
                                  supported_41_60=U3),
                    "ecus": [dict(id=0x7E8)]}},

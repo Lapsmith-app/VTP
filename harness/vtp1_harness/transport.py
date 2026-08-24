@@ -350,6 +350,7 @@ FAULTS = {
     "obd_accepts_unsupported_pid": "SPEC.md §15.4 — a PID the probe's union does not claim is polled anyway",
     "obd_ignores_stop": "SPEC.md §15.7 — the empty poll set is answered ok and the transmitter keeps going",
     "obd_reset_keeps_polling": "SPEC.md §15.7 — CAN_RESET clears the subscriptions and leaves the poll set transmitting",
+    "obd_polls_before_probe": "SPEC.md §15.4 — a poll set is accepted before any probe has answered, transmitting for PIDs nothing verified",
     "obd_delivery_needs_subscription": "SPEC.md §15.5 — poll responses are delivered only through the table, so an unsubscribed polling client transmits on the car and receives nothing",
     "obd_flag_never_set": "SPEC.md §15.6 — the poll set is non-empty and no batch carries the polling flag",
 }
@@ -702,6 +703,16 @@ class LoopbackTransport(Transport):
         request = self._indulge_aiding(request)
         if "obd_accepts_unsupported_pid" in self.faults:
             request = self._indulge_obd(request)
+        if "obd_polls_before_probe" in self.faults and \
+                len(request) >= _OBD_POLL_FIXED and \
+                request[0] == refdec.OPCODE["OBD_POLL_SET"] and \
+                getattr(self.device, "_obd_masks", 0) is None:
+            # SPEC.md §15.4 -- a device that skips the verify step: the probe
+            # gate is satisfied from thin air, so the first OBD_POLL_SET of
+            # the connection is accepted and the device transmits for PIDs
+            # no probe ever declared.
+            self.device._obd_masks = (0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)
+            self.device._obd_ecu_ids = frozenset(self.device.OBD_ECUS)
         # SPEC.md §15.7 -- a device that answers ok to a stop (the empty
         # poll set, or CAN_RESET) and keeps transmitting. The poll set is
         # captured before dispatch and put back after it, so the defect is
