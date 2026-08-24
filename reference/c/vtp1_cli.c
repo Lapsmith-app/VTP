@@ -229,12 +229,12 @@ int main(void) {
             printf("{\"ok\":true,\"protocol_major\":%u,\"protocol_minor\":%u,"
                    "\"capabilities\":%u,\"gps_rate_hz\":%u,\"gps_max_rate_hz\":%u,"
                    "\"can_subscription_slots\":%u,\"can_max_frames_per_s\":%u,"
-                   "\"imu_rate_hz\":%u,\"imu_max_rate_hz\":%u,\"reserved_20\":%u,"
-                   "\"clock_flags\":%u,\"reserved_22\":%u",
+                   "\"imu_rate_hz\":%u,\"imu_max_rate_hz\":%u,\"obd_poll_slots\":%u,"
+                   "\"clock_flags\":%u,\"obd_min_interval_ms\":%u",
                    v.protocol_major, v.protocol_minor, v.capabilities,
                    v.gps_rate_hz, v.gps_max_rate_hz, v.can_subscription_slots,
                    v.can_max_frames_per_s, v.imu_rate_hz, v.imu_max_rate_hz,
-                   v.reserved_20, v.clock_flags, v.reserved_22);
+                   v.obd_poll_slots, v.clock_flags, v.obd_min_interval_ms);
             finish(enc, vtp_encode_info(&v, enc, sizeof enc));
 
         } else if (!strcmp(record, "monitor_list")) {
@@ -329,6 +329,31 @@ int main(void) {
             put_hex(r.detail, r.detail_len);
             printf("\"");
             finish(enc, vtp_encode_control_response(&r, enc, sizeof enc));
+
+        } else if (!strcmp(record, "obd_info")) {
+            vtp_obd_probe_t pr;
+            if (vtp_decode_obd_info(buf, len, &pr, &err)) { reject(err); continue; }
+            vtp_obd_ecu_t ecus[256];
+            for (uint8_t i = 0; i < pr.count; i++)
+                vtp_obd_ecu_at(buf, i, &ecus[i]);
+            printf("{\"ok\":true,\"probe\":{\"validity\":%u,\"count\":%u,"
+                   "\"request_id\":%u,\"supported_01_20\":%u,"
+                   "\"supported_21_40\":%u,\"supported_41_60\":%u,"
+                   "\"reserved_18\":%u},\"ecus\":[",
+                   pr.validity, pr.count, pr.request_id, pr.supported_01_20,
+                   pr.supported_21_40, pr.supported_41_60, pr.reserved_18);
+            for (uint8_t i = 0; i < pr.count; i++)
+                printf("%s{\"id\":%u}", i ? "," : "", ecus[i].id);
+            printf("]");
+            /* Every gated field hangs off the one `responded` bit, printed in
+             * sorted order so the list compares equal to the vector's. */
+            printf(",\"absent\":[%s]",
+                   vtp_obd_valid(&pr, VTP_OBD_VALIDITY_RESPONDED)
+                       ? ""
+                       : "\"request_id\",\"supported_01_20\","
+                         "\"supported_21_40\",\"supported_41_60\"");
+            finish(enc, vtp_encode_obd_info(&pr, pr.count ? ecus : NULL,
+                                            enc, sizeof enc));
 
         } else if (!strcmp(record, "time_sync")) {
             vtp_time_sync_t t;

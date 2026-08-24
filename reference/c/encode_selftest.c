@@ -123,6 +123,17 @@ static void missing_arrays(void) {
            "control_response(detail_len=2, detail=NULL) refuses");
         ok(untouched(out, sizeof out), "control_response(detail=NULL) wrote nothing");
     }
+    {
+        SETUP;
+        vtp_obd_probe_t pr;
+        memset(&pr, 0, sizeof pr);
+        pr.validity = VTP_OBD_VALIDITY_RESPONDED;
+        pr.request_id = 0x7DF;
+        pr.count = 2;
+        ok(vtp_encode_obd_info(&pr, NULL, out, sizeof out) == -1,
+           "obd_info(count=2, ecus=NULL) refuses");
+        ok(untouched(out, sizeof out), "obd_info(ecus=NULL) wrote nothing");
+    }
     /* A count of zero has nothing to read, so a null array is not malformed
      * there: SPEC.md 13.5 lets a device ask for no channels at all, and that
      * declaration is exactly a header with no entries behind it. */
@@ -133,6 +144,16 @@ static void missing_arrays(void) {
         ok(vtp_encode_monitor_list(&p, NULL, out, sizeof out)
                == VTP_MONITOR_DECLARATION_SIZE,
            "monitor_list(count=0, entries=NULL) is a legal empty declaration");
+    }
+    /* Same rule for the silent-car probe (SPEC.md 15.2): `responded` clear,
+     * count 0, no array -- a record a device must be able to produce. */
+    {
+        SETUP;
+        vtp_obd_probe_t pr;
+        memset(&pr, 0, sizeof pr);
+        ok(vtp_encode_obd_info(&pr, NULL, out, sizeof out)
+               == VTP_OBD_PROBE_SIZE,
+           "obd_info(count=0, ecus=NULL) is a legal silent-car probe");
     }
 }
 
@@ -207,6 +228,25 @@ static void atomicity(void) {
         ok(untouched(out, sizeof out),
            "power_state wrote nothing when it refused");
     }
+    {
+        /* The refusal is found at entry 1, after entry 0 already validated:
+         * exactly the shape that leaks a half-written record if the checks
+         * live in the write loop. SPEC.md 15.2. */
+        SETUP;
+        vtp_obd_probe_t pr;
+        vtp_obd_ecu_t e[2];
+        memset(&pr, 0, sizeof pr);
+        memset(e, 0, sizeof e);
+        pr.validity = VTP_OBD_VALIDITY_RESPONDED;
+        pr.request_id = 0x7DF;
+        pr.count = 2;
+        e[0].id = 0x7E9;
+        e[1].id = 0x7E8;            /* not strictly ascending */
+        ok(vtp_encode_obd_info(&pr, e, out, sizeof out) == -1,
+           "obd_info refuses entries out of order");
+        ok(untouched(out, sizeof out),
+           "obd_info wrote nothing when it refused");
+    }
 }
 
 /* ---- a buffer too small to hold the answer ----------------------------- */
@@ -260,6 +300,22 @@ static void short_buffers(void) {
            "imu_batch refuses a buffer one byte short");
         ok(untouched(out, sizeof out),
            "imu_batch wrote nothing into a short buffer");
+    }
+    {
+        SETUP;
+        vtp_obd_probe_t pr;
+        vtp_obd_ecu_t e;
+        memset(&pr, 0, sizeof pr);
+        memset(&e, 0, sizeof e);
+        pr.validity = VTP_OBD_VALIDITY_RESPONDED;
+        pr.request_id = 0x7DF;
+        pr.count = 1;
+        e.id = 0x7E8;
+        ok(vtp_encode_obd_info(&pr, &e, out,
+                               VTP_OBD_PROBE_SIZE + VTP_OBD_ECU_SIZE - 1) == -1,
+           "obd_info refuses a buffer one byte short");
+        ok(untouched(out, sizeof out),
+           "obd_info wrote nothing into a short buffer");
     }
 }
 

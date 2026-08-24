@@ -38,6 +38,7 @@ python3 conformance/run.py --impl "./my-decoder" --roles gps
 | `monitor` | `monitor_list`, `monitor_update` — implies `control` |
 | `power` | `power_state` — implies `control` |
 | `gnss_aiding` | `gnss_aid_caps`, `aid_begin_result`, `aid_commit_result` — implies `gps`, `control` |
+| `obd` | `obd_info` — implies `can`, `control` |
 
 Only Info is unconditional. The Control characteristic is a capability
 (`capabilities` bit 4 — §4.1 has the matrix), not a requirement, so a GPS-only

@@ -116,13 +116,18 @@ async def info_rate_ceiling(s):
 async def info_reserved_fields(s):
     if s.info is None:
         raise Skip("Info did not decode")
-    # Derived from the schema, so a byte that gains a meaning in a later minor
-    # stops being checked here the moment the schema says it has one. Byte 20
-    # held can_max_payload until §4.1 made the largest payload follow from the
-    # capability bits, and bytes 22-23 held max_notify_bytes until it was
-    # removed as a restatement of the negotiated ATT payload.
+    # Driven by the schema's own `reserved` flag, so a byte that gains a
+    # meaning stops being checked the moment the schema says so -- and a
+    # byte a later minor re-reserves is checked again without an edit here.
+    # SPEC.md §15 assigned Info's last reserved bytes (20 and 22-23) to the
+    # OBD capacities, so today this skips; the Skip, its EXPECTED_SKIPS
+    # entry and its NOT_SEEDED excuse all fall out the day the schema
+    # reserves an Info byte again, and the coverage gate then demands the
+    # seeded fault back.
     reserved = [f["name"] for f in refdec.SCHEMA["records"]["info"]["fields"]
-                if f["name"].startswith("reserved")]
+                if f.get("reserved")]
+    if not reserved:
+        raise Skip("Info has no reserved fields in this version")
     nonzero = [(name, s.info[name]) for name in reserved if s.info[name]]
     if nonzero:
         raise Fail(

@@ -55,7 +55,6 @@ CAUGHT_BY = {
     "aid_token_reused": "aiding.begin_supersedes",
     "aid_token_ignored": "aiding.begin_supersedes",
     "rate_not_applied": "control.rate_readback",
-    "info_reserved_nonzero": "info.reserved_fields",
     "seq_starts_at_one": "seq.first_is_zero",
     "seq_repeats": "seq.advances",
     "detail_on_error": "control.detail_only_on_ok",
@@ -101,6 +100,19 @@ CAUGHT_BY = {
     "power_stale_behind_bit": "power.absent_fields_zero",
     "power_declared_but_empty": "power.something_valid",
     "power_reserved_nonzero": "power.reserved",
+    "obd_probe_unsupported": "obd.probe",
+    "obd_responded_without_ecus": "obd.count_agrees",
+    "obd_entries_descending": "obd.entries_ascending",
+    "obd_stale_behind_bit": "obd.absent_fields_zero",
+    "obd_reserved_nonzero": "obd.reserved",
+    "obd_capacity_zero": "obd.capacities",
+    "obd_accepts_unsupported_pid": "obd.poll_refusals",
+    "obd_accepts_zero_interval": "obd.poll_refusals",
+    "obd_ignores_stop": "obd.poll_and_flag",
+    "obd_reset_keeps_polling": "obd.reset_stops",
+    "obd_polls_before_probe": "obd.poll_before_probe",
+    "obd_delivery_needs_subscription": "obd.poll_and_flag",
+    "obd_flag_never_set": "obd.poll_and_flag",
 }
 
 #: A MUST or SHOULD check with no seeded fault against it, and why there is
@@ -113,6 +125,11 @@ CAUGHT_BY = {
 #: silently forever. Every entry is a debt with a reason attached, not a
 #: dispensation: shortening this list is how this harness gets better.
 NOT_SEEDED = {
+    "info.reserved_fields":
+        "Info has no reserved fields in this version (SPEC.md 15 assigned "
+        "bytes 20 and 22-23), so no byte exists to seed a fault against; "
+        "when a later minor reserves one, the check revives itself and this "
+        "excuse must be deleted with a fault added",
     "gatt.service":
         "the loopback transport IS the service; a run against a device without "
         "one cannot reach the checks that follow it",
@@ -172,6 +189,18 @@ CASCADING = {
         "no response can be correlated, so every check awaiting one fails "
         "whatever its own rule says",
 }
+
+#: Faults that are SCENARIO seeds rather than matrix entries: neither breaks
+#: a rule one check can catch on its own, so neither belongs in CAUGHT_BY.
+#: `obd_pid_never_answers` is a CONFORMING car whose polled PID nothing
+#: answers -- SPEC.md §15.4 makes that gap legal, and the claim under test is
+#: that obd.poll_and_flag does NOT fail it (a Skip is the required verdict:
+#: nothing observable separates a quiet PID from a discarded answer).
+#: `obd_reprobe_refused` only means anything stacked on it: the diagnostic
+#: re-probe a silent poll is entitled to is refused, which §15.2 makes a
+#: failure. The targeted-scenario section of main() asserts both, so these
+#: are held to account there rather than by the one-fault-one-check matrix.
+SCENARIO_FAULTS = {"obd_pid_never_answers", "obd_reprobe_refused"}
 
 #: Only these faults are about state surviving a link drop, and only their runs
 #: need to pay for the reconnection.
@@ -255,12 +284,22 @@ def _coverage_problems():
     problems = []
     checks = {c.id: c for c in load_all()}
 
-    missing = sorted(set(FAULTS) - set(CAUGHT_BY))
+    missing = sorted(set(FAULTS) - set(CAUGHT_BY) - SCENARIO_FAULTS)
     if missing:
         problems.append(
             f"fault(s) {missing} are defined but no check is named as catching "
             f"them. Either add the check or remove the fault -- an untested "
             f"fault is a claim nobody is holding to account")
+    misfiled = sorted(SCENARIO_FAULTS - set(FAULTS))
+    if misfiled:
+        problems.append(f"SCENARIO_FAULTS names fault(s) that do not exist: "
+                        f"{misfiled}")
+    doubly = sorted(SCENARIO_FAULTS & set(CAUGHT_BY))
+    if doubly:
+        problems.append(
+            f"fault(s) {doubly} are both scenario seeds and matrix entries; "
+            f"a fault the matrix already holds to account does not need the "
+            f"scenario exemption, so delete one classification")
     unknown = sorted(set(CAUGHT_BY) - set(FAULTS))
     if unknown:
         problems.append(f"unknown fault(s) named here: {unknown}")
@@ -307,6 +346,9 @@ def _coverage_problems():
 #: matching, a refusal newly read as "not applicable" -- looks exactly like a
 #: passing run. This is the baseline that makes that visible.
 EXPECTED_SKIPS = {
+    "info.reserved_fields":
+        "Info has no reserved fields in this version; the check revives "
+        "when a later minor reserves a byte",
     "control.opcode_capability":
         "this profile owns every opcode in this version",
     "gatt.inert_cccd":
@@ -424,14 +466,59 @@ async def main():
                 f"the fault in CASCADING if it broke the conversation rather "
                 f"than that rule, or correct the reason")
 
+    # The verdict-shaped claims the one-fault matrix cannot express: a run
+    # that must SKIP (failing it would fail a conforming device -- the
+    # tool-worse-than-no-tool case in this file's header) and a stacked run
+    # that must FAIL for the right stated reason.
+    print("\nTargeted OBD scenarios")
+    quiet = await run(faults=["obd_pid_never_answers"])
+    result = result_for(quiet, "obd.poll_and_flag")
+    if result is None:
+        problems.append("obd_pid_never_answers: obd.poll_and_flag did not run")
+    elif result.status is not Status.SKIP:
+        problems.append(
+            f"a conforming car whose polled PID nothing answers was reported "
+            f"{result.status.value} by obd.poll_and_flag: {result.message}. "
+            f"SPEC.md §15.4 makes that silence legal, so the only honest "
+            f"verdict is a skip")
+    else:
+        print("  ok   a legally-unanswered poll is reported indeterminate, "
+              "not failed")
+    for check_id in ("obd.probe", "obd.poll_refusals", "obd.reset_stops"):
+        result = result_for(quiet, check_id)
+        if result is None or result.status not in (
+                Status.PASS, Status.SKIP, Status.OBSERVE):
+            problems.append(
+                f"obd_pid_never_answers: {check_id} reported "
+                f"{'nothing' if result is None else result.status.value} on "
+                f"a conforming car that is merely quiet")
+
+    stacked = await run(faults=["obd_pid_never_answers",
+                                "obd_reprobe_refused"])
+    result = result_for(stacked, "obd.poll_and_flag")
+    if result is None:
+        problems.append("obd_reprobe_refused: obd.poll_and_flag did not run")
+    elif result.status is not Status.FAIL:
+        problems.append(
+            f"a device that refuses the diagnostic re-probe was reported "
+            f"{result.status.value} by obd.poll_and_flag; §15.2 makes the "
+            f"refusal a failure in its own right")
+    elif "bad_params" not in (result.message or ""):
+        problems.append(
+            f"the re-probe failure must report the refusing status; the "
+            f"message was: {result.message}")
+    else:
+        print("  ok   a refused diagnostic re-probe fails, naming the status")
+
     print()
     if problems:
         print("FAILED")
         for problem in problems:
             print(f"  - {problem}")
         return 1
-    print(f"ok: the reference peripheral passes, and all {len(CAUGHT_BY)} "
-          f"seeded defects were caught")
+    print(f"ok: the reference peripheral passes, all {len(CAUGHT_BY)} seeded "
+          f"defects were caught, and both OBD scenario seeds verdict as "
+          f"required")
     return 0
 
 

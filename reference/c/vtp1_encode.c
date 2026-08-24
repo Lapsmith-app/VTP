@@ -292,27 +292,61 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
      * generated from schema/vtp1.yaml, so both copies read the same table and
      * neither can drift from the specification. */
     if (!capabilities_coherent(caps)) return -1;
-    if (!(caps & VTP_CAPABILITIES_GPS)
-        && (v->gps_rate_hz || v->gps_max_rate_hz)) return -1;
-    if (!(caps & VTP_CAPABILITIES_CAN)
-        && (v->can_subscription_slots || v->can_max_frames_per_s)) return -1;
-    if (!(caps & VTP_CAPABILITIES_IMU)
-        && (v->imu_rate_hz || v->imu_max_rate_hz)) return -1;
 
-    memset(out, 0, VTP_INFO_SIZE);
-    out[VTP_INFO_OFF_PROTOCOL_MAJOR] = v->protocol_major;
-    out[VTP_INFO_OFF_PROTOCOL_MINOR] = v->protocol_minor;
-    wr32(out + VTP_INFO_OFF_CAPABILITIES, caps);
-    wr16(out + VTP_INFO_OFF_GPS_RATE_HZ, v->gps_rate_hz);
-    wr16(out + VTP_INFO_OFF_GPS_MAX_RATE_HZ, v->gps_max_rate_hz);
-    wr16(out + VTP_INFO_OFF_CAN_SUBSCRIPTION_SLOTS, v->can_subscription_slots);
-    wr32(out + VTP_INFO_OFF_CAN_MAX_FRAMES_PER_S, v->can_max_frames_per_s);
-    wr16(out + VTP_INFO_OFF_IMU_RATE_HZ, v->imu_rate_hz);
-    wr16(out + VTP_INFO_OFF_IMU_MAX_RATE_HZ, v->imu_max_rate_hz);
-    out[VTP_INFO_OFF_RESERVED_20] = 0;   /* SPEC.md 2 */
-    out[VTP_INFO_OFF_CLOCK_FLAGS] =
+    /* Built in a scratch record first, so the capacity sweep below can run
+     * over the same generated table the decoder's coherence check loops --
+     * per-field hand code here was the one implementation the schema could
+     * not update, so the next role added to profile.capacity would have
+     * split the C encoder from everything else. Nothing is written to `out`
+     * until every rule has passed, keeping the nothing-on-minus-one
+     * contract. */
+    uint8_t tmp[VTP_INFO_SIZE];
+    memset(tmp, 0, sizeof tmp);
+    tmp[VTP_INFO_OFF_PROTOCOL_MAJOR] = v->protocol_major;
+    tmp[VTP_INFO_OFF_PROTOCOL_MINOR] = v->protocol_minor;
+    wr32(tmp + VTP_INFO_OFF_CAPABILITIES, caps);
+    wr16(tmp + VTP_INFO_OFF_GPS_RATE_HZ, v->gps_rate_hz);
+    wr16(tmp + VTP_INFO_OFF_GPS_MAX_RATE_HZ, v->gps_max_rate_hz);
+    wr16(tmp + VTP_INFO_OFF_CAN_SUBSCRIPTION_SLOTS, v->can_subscription_slots);
+    wr32(tmp + VTP_INFO_OFF_CAN_MAX_FRAMES_PER_S, v->can_max_frames_per_s);
+    wr16(tmp + VTP_INFO_OFF_IMU_RATE_HZ, v->imu_rate_hz);
+    wr16(tmp + VTP_INFO_OFF_IMU_MAX_RATE_HZ, v->imu_max_rate_hz);
+    tmp[VTP_INFO_OFF_OBD_POLL_SLOTS] = v->obd_poll_slots;
+    tmp[VTP_INFO_OFF_CLOCK_FLAGS] =
         (uint8_t)KNOWN_BITS(v->clock_flags, VTP_CLOCK_FLAGS_KNOWN);
-    wr16(out + VTP_INFO_OFF_RESERVED_22, 0);   /* SPEC.md 2 */
+    wr16(tmp + VTP_INFO_OFF_OBD_MIN_INTERVAL_MS, v->obd_min_interval_ms);
+
+    /* SPEC.md 4.1 -- a capacity behind a cleared bit is a role the device
+     * does not have (sharpest for OBD, where it advertises transmitting on
+     * a vehicle bus while declaring not to). Driven by the generated table
+     * so a role added in the schema is enforced here without an edit. */
+    {
+        static const vtp_capacity_rule_t rules[] = VTP_CAPACITY_RULES;
+        for (size_t i = 0; i < VTP_CAPACITY_RULE_COUNT; i++) {
+            if (caps & rules[i].bit) continue;
+            uint32_t val = 0;
+            for (uint8_t k = 0; k < rules[i].size; k++)
+                val |= (uint32_t)tmp[rules[i].offset + k] << (8 * k);
+            if (val) return -1;
+        }
+    }
+    /* SPEC.md 15 -- and the OBD pair MUST be non-zero while its bit is SET:
+     * the declared role admits no conforming exchange. Same generated-table
+     * shape as the rule above, so a role added in the schema is enforced
+     * here without an edit. */
+    {
+        static const vtp_capacity_rule_t required[] =
+            VTP_CAPACITY_REQUIRED_RULES;
+        for (size_t i = 0; i < VTP_CAPACITY_REQUIRED_RULE_COUNT; i++) {
+            if (!(caps & required[i].bit)) continue;
+            uint32_t val = 0;
+            for (uint8_t k = 0; k < required[i].size; k++)
+                val |= (uint32_t)tmp[required[i].offset + k] << (8 * k);
+            if (!val) return -1;
+        }
+    }
+
+    memcpy(out, tmp, VTP_INFO_SIZE);
     return VTP_INFO_SIZE;
 }
 
@@ -483,4 +517,56 @@ int vtp_encode_time_sync(const vtp_time_sync_t *t, uint8_t *out, size_t cap) {
     wr64(out + VTP_TIME_SYNC_OFF_T_DEVICE_RX, t->t_device_rx);
     wr64(out + VTP_TIME_SYNC_OFF_T_DEVICE_TX, t->t_device_tx);
     return VTP_TIME_SYNC_SIZE;
+}
+
+int vtp_encode_obd_info(const vtp_obd_probe_t *p,
+                        const vtp_obd_ecu_t *ecus,
+                        uint8_t *out, size_t cap) {
+    const size_t needed = (size_t)VTP_OBD_PROBE_SIZE
+                        + (size_t)p->count * VTP_OBD_ECU_SIZE;
+    if (cap < needed) return -1;
+    /* The array first, before any sweep reads through it: a count with no
+     * array behind it is a refusal, never a dereference. */
+    if (p->count && !ecus) return -1;
+
+    const uint32_t v = KNOWN_BITS(p->validity, VTP_OBD_VALIDITY_KNOWN);
+    const int responded = (v & VTP_OBD_VALIDITY_RESPONDED) != 0;
+
+    /* SPEC.md 15.2's content rules, which the decoder deliberately accepts:
+     * the refusals are the device-side half of each. `responded` set with no
+     * entries says something answered and lists nothing that did; an entry
+     * behind a silent probe is the reverse; ISO 15765-4 caps the responders
+     * to a functional request at eight; and the entry list is strictly
+     * ascending over bits 0-29, so one ECU cannot appear to be two and two
+     * conforming devices probing one car produce identical bytes. */
+    if (responded && p->count == 0) return -1;
+    if (!responded && p->count != 0) return -1;
+    if (p->count > 8) return -1;
+    /* SPEC.md 15.2 -- refused, never masked, for 6.4's reason: masking
+     * produces a different identifier that looks entirely valid. Scoped to
+     * a probe that answered: with `responded` clear the field is gated to
+     * zero below, so a stale invalid value is normalised, not refused --
+     * matching the decoder, with which this shares the predicate (vtp1.h). */
+    if (responded && !vtp_obd_identifier_ok(p->request_id)) return -1;
+    for (uint8_t i = 0; i < p->count; i++) {
+        if (!vtp_obd_identifier_ok(ecus[i].id)) return -1;
+        if (i && ecus[i].id <= ecus[i - 1].id) return -1;
+    }
+
+    memset(out, 0, VTP_OBD_PROBE_SIZE);
+    out[VTP_OBD_PROBE_OFF_VALIDITY] = (uint8_t)v;
+    out[VTP_OBD_PROBE_OFF_COUNT]    = p->count;
+    wr32(out + VTP_OBD_PROBE_OFF_REQUEST_ID,
+         gate32(p->request_id, v, VTP_OBD_VALIDITY_RESPONDED));
+    wr32(out + VTP_OBD_PROBE_OFF_SUPPORTED_01_20,
+         gate32(p->supported_01_20, v, VTP_OBD_VALIDITY_RESPONDED));
+    wr32(out + VTP_OBD_PROBE_OFF_SUPPORTED_21_40,
+         gate32(p->supported_21_40, v, VTP_OBD_VALIDITY_RESPONDED));
+    wr32(out + VTP_OBD_PROBE_OFF_SUPPORTED_41_60,
+         gate32(p->supported_41_60, v, VTP_OBD_VALIDITY_RESPONDED));
+    for (uint8_t i = 0; i < p->count; i++) {
+        wr32(out + VTP_OBD_PROBE_SIZE + (size_t)i * VTP_OBD_ECU_SIZE
+             + VTP_OBD_ECU_OFF_ID, ecus[i].id);
+    }
+    return (int)needed;
 }

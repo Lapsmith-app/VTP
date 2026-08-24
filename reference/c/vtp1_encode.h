@@ -67,6 +67,15 @@ int vtp_encode_monitor_update(const vtp_monitor_header_t *hdr,
                               const vtp_monitor_value_t *values,
                               uint8_t *out, size_t cap);
 
+/* `probe->count` entries are read from `ecus`. Fields behind a cleared
+ * `responded` bit are written as zero, as everywhere else. The content rules
+ * of SPEC.md §15.2 -- count agreeing with `responded`, entries strictly
+ * ascending, at most eight, identifier validity on every id -- are refused
+ * here, because the decoder deliberately accepts most of them. */
+int vtp_encode_obd_info(const vtp_obd_probe_t *probe,
+                        const vtp_obd_ecu_t *ecus,
+                        uint8_t *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

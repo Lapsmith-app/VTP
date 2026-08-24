@@ -235,9 +235,9 @@ Total: **24 bytes**. All fields little-endian.
 | 12 | 4 | `u32` | `can_max_frames_per_s` | `frames/s` |
 | 16 | 2 | `u16` | `imu_rate_hz` | `Hz` |
 | 18 | 2 | `u16` | `imu_max_rate_hz` | `Hz` |
-| 20 | 1 | `u8` | `reserved_20` | Was can_max_payload; derived from the capability bits since (SPEC.md 4.1); **reserved — MUST be zero** |
+| 20 | 1 | `u8` | `obd_poll_slots` | Most PIDs one OBD_POLL_SET may name (SPEC.md 15.4); 0 if no OBD |
 | 21 | 1 | `u8` | `clock_flags` | bitmask `clock_flags` |
-| 22 | 2 | `u16` | `reserved_22` | Was max_notify_bytes; a notification is bounded by the negotiated ATT payload, which the client's stack already knows (SPEC.md 2); **reserved — MUST be zero** |
+| 22 | 2 | `u16` | `obd_min_interval_ms` | `ms`; Smallest OBD_POLL_SET interval_ms this device accepts (SPEC.md 15.4); 0 if no OBD |
 <!-- END GENERATED: info -->
 
 `clock_flags` bits:
@@ -265,7 +265,8 @@ Total: **24 bytes**. All fields little-endian.
 | 7 | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 | 8 | `power` | Device reports its own power state (SPEC.md 9.7) **Requires `control`.** |
 | 9 | `gnss_aiding` | Client supplies orbit data to the device's receiver (§14) **Requires `gps`, `control`.** |
-| 10+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+| 10 | `obd` | Device transmits OBD-II diagnostic requests on the bus (§15) **Requires `can`, `control`.** |
+| 11+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:capabilities -->
 
 A client MUST read this characteristic on every connection and MUST NOT cache
@@ -329,17 +330,18 @@ others alone.
 **Capability implications are normative.**
 
 <!-- BEGIN GENERATED: profile:capabilities -->
-| Bit | Capability | Requires | Capacity fields that MUST be zero when clear |
-| --- | --- | --- | --- |
-| 0 | `gps` | — | `gps_rate_hz`, `gps_max_rate_hz` |
-| 1 | `can` | bit 4 (`control`) | `can_subscription_slots`, `can_max_frames_per_s` |
-| 2 | `imu` | — | `imu_rate_hz`, `imu_max_rate_hz` |
-| 3 | `monitor` | bit 4 (`control`) | — |
-| 4 | `control` | — | — |
-| 5 | `can_fd` | bit 1 (`can`) | — |
-| 6 | `masked_subscriptions` | bit 1 (`can`) | — |
-| 8 | `power` | bit 4 (`control`) | — |
-| 9 | `gnss_aiding` | bit 0 (`gps`), bit 4 (`control`) | — |
+| Bit | Capability | Requires | Capacity fields that MUST be zero when clear | ...and non-zero when set |
+| --- | --- | --- | --- | --- |
+| 0 | `gps` | — | `gps_rate_hz`, `gps_max_rate_hz` | — |
+| 1 | `can` | bit 4 (`control`) | `can_subscription_slots`, `can_max_frames_per_s` | — |
+| 2 | `imu` | — | `imu_rate_hz`, `imu_max_rate_hz` | — |
+| 3 | `monitor` | bit 4 (`control`) | — | — |
+| 4 | `control` | — | — | — |
+| 5 | `can_fd` | bit 1 (`can`) | — | — |
+| 6 | `masked_subscriptions` | bit 1 (`can`) | — | — |
+| 8 | `power` | bit 4 (`control`) | — | — |
+| 9 | `gnss_aiding` | bit 0 (`gps`), bit 4 (`control`) | — | — |
+| 10 | `obd` | bit 1 (`can`), bit 4 (`control`) | `obd_poll_slots`, `obd_min_interval_ms` | `obd_poll_slots`, `obd_min_interval_ms` |
 <!-- END GENERATED: profile:capabilities -->
 
 **The largest CAN payload follows from the bits and is not a field.** A client
@@ -352,9 +354,10 @@ computes it:
 | set | set | 64 — CAN FD |
 
 `set`/`set` is the only combination `can_fd` permits, because `can_fd`
-requires `can`. Byte 20 of Info once carried this value and is now reserved:
-a field whose every value is derivable is a field two implementations can
-disagree about.
+requires `can`. Byte 20 of Info once carried this value, was reserved when
+this section began deriving it — a field whose every value is derivable is a
+field two implementations can disagree about — and §15 has since assigned it
+to `obd_poll_slots`.
 
 A device MUST NOT set a capability bit without also setting every bit the
 second column names, and MUST NOT publish a non-zero value in a capacity field
@@ -610,7 +613,8 @@ Total: **16 bytes**. All fields little-endian.
 | Bit | Name | Meaning |
 | --- | --- | --- |
 | 0 | `shedding` | Device is discarding accepted frames (SPEC.md 6.3) |
-| 1+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+| 1 | `polling` | The OBD poll set is non-empty: this device is transmitting diagnostic requests (SPEC.md 15.6) |
+| 2+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:can_flags -->
 
 <!-- BEGIN GENERATED: can_record -->
@@ -694,6 +698,10 @@ frames it accepted and cannot forward. The bit reports that the condition is
 current; `dropped` counts what it has cost since the previous notification. A
 device sheds rather than stalls because a bus does not wait; §9.3 is why the
 condition is reachable at all.
+
+`flags` bit 1 (`polling`) belongs to the OBD role and is specified in §15.6:
+it is set exactly while the device's OBD poll set is non-empty, so anyone
+reading the stream can tell a transmitting device from a listening one.
 
 ### 6.4 Identifier validity
 
@@ -1054,7 +1062,7 @@ device has, and reaching it at all means the Control characteristic is live.
 <!-- BEGIN GENERATED: control -->
 | Opcode | Command | Needs | Params | Response detail | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `0x01` | `CAN_RESET` | `can` | — | — | Clear all subscriptions and stop the CAN stream |
+| `0x01` | `CAN_RESET` | `can` | — | — | Clear all subscriptions, clear the OBD poll set (SPEC.md 15.7), and stop the CAN stream |
 | `0x02` | `CAN_SUBSCRIBE` | `can` | `id:u32, mode:u8, arg:u16` | — | Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF |
 | `0x03` | `CAN_SUBSCRIBE_MASK` | `masked_subscriptions` | `id:u32, mask:u32, mode:u8, arg:u16` | — | — |
 | `0x04` | `CAN_UNSUBSCRIBE` | `can` | `id:u32, mask:u32` | — | Removes the subscription whose id and mask these are (SPEC.md 9.1) |
@@ -1066,6 +1074,8 @@ device has, and reaching it at all means the Control characteristic is live.
 | `0x30` | `TIME_SYNC` | — | — | `time_sync record` | The device clock when the request arrived and when the answer was prepared (SPEC.md 9.5) |
 | `0x40` | `MONITOR_LIST` | `monitor` | — | `monitor_declaration record` | Every channel this device asks the client to supply, in one response (SPEC.md 13.3) |
 | `0x50` | `GET_POWER` | `power` | — | `power_state record` | What the device knows about its own supply, measured when asked (SPEC.md 9.7) |
+| `0x60` | `OBD_INFO` | `obd` | — | `obd_probe record` | Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2) |
+| `0x61` | `OBD_POLL_SET` | `obd` | `interval_ms:u16, count:u8, pids:u8*` | — | Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4) |
 <!-- END GENERATED: control -->
 
 Opcode values `0x05`, `0x14` and `0x31` were assigned by pre-1.0 drafts and
@@ -1183,6 +1193,8 @@ what happened.
 | `GPS_SET_RATE`, `IMU_SET_RATE` | Setting a rate to the value it already holds |
 | `MONITOR_LIST` | A read |
 | `TIME_SYNC` | Each attempt is answered with a fresh reading, never a stale one |
+| `OBD_INFO` | Each attempt probes afresh and answers with a fresh reading — at the cost §15.2 states: a probe transmits, and replaces the probe result and poll set the lost attempt had already replaced |
+| `OBD_POLL_SET` | §15.4 — the request replaces the whole set, so repeating it replaces the set with itself |
 
 A client MAY therefore retry any request whose response it did not receive. It
 MUST NOT assume the original did not take effect — only that repeating it is
@@ -1443,6 +1455,8 @@ introduced later: extensibility is decided before 1.0 or not at all
 | `aid_begin_result` | No — closed for major version 1 | — |
 | `aid_chunk` | No — closed for major version 1 | — |
 | `aid_commit_result` | No — closed for major version 1 | — |
+| `obd_probe` | No — closed for major version 1 | — |
+| `obd_ecu` | No — closed for major version 1 | — |
 <!-- END GENERATED: extensibility -->
 
 **Reserved space**, for flags and small values. Appendix A lists it.
@@ -1509,6 +1523,14 @@ in the corpus; whether the numbers are true is not, and cannot be — a device
 reporting a full pack that is flat produces bytes no vector can distinguish
 from a device that is right, and no protocol can verify a measurement about
 the thing doing the measuring.
+
+§15 splits the same way, more sharply than anything else here. The probe
+record, the polling flag and both capacities are bytes, and the corpus holds
+them. The transmit rules of §15.1 — what goes on the bus, how far apart,
+never retried — appear in no payload at all, and they are the rules the role
+exists for. They are tested where behaviour is tested: the harness drives
+the poll loop and watches the flag, and the bus itself is verified on a
+bench, §2's own division.
 
 ---
 
@@ -2000,6 +2022,478 @@ Encryption is not stated separately here. §10 governs this characteristic as it
 governs Control, and for the same reason: a write that changes what the device
 does is worth protecting whether it carries a subscription or an orbit.
 
+
+## 15. OBD-II polling — the `obd` role
+
+Every role before this one observes: GPS listens to satellites, CAN listens
+to the bus, IMU listens to the device itself. A device with capability bit 10
+(`obd`) **transmits on the vehicle's CAN bus** — it puts J1979 Mode 01
+requests on the bus and the ECUs' answers arrive as ordinary CAN frames. That
+is a different kind of claim from every other bit in Info, and the bit exists
+precisely so the claim is declared rather than inferred: a client, or a
+person reading a client's screen, can know whether the dongle in their OBD
+port talks to their car. RATIONALE §11 is the full argument.
+
+`obd` requires `can` and `control` (§4.1): responses are delivered on the CAN
+stream — through the subscription table and §15.5's fallback rule — and both
+opcodes live on Control. Bit 10 is past the eight bits the advertisement carries (§3.3), like
+`power` and `gnss_aiding`: polling is something a client does after it
+connects, not something it ranks devices by before it does.
+
+Two Info capacities describe the role, in the bytes freed at offsets 20 and
+22 (§11.2):
+
+- `obd_poll_slots` — the most PIDs one `OBD_POLL_SET` may name.
+- `obd_min_interval_ms` — the smallest `interval_ms` the device accepts, and
+  the floor under everything §15.1 lets it transmit.
+
+Both MUST be zero when bit 10 is clear, and both MUST be non-zero when it
+is set — §4.1's table carries both columns: a poll set nothing fits in, or a
+floor of zero milliseconds, each describes a role no conforming exchange can
+use. The rule splits as every content rule does: an Info that breaks it
+still decodes, a client MUST NOT use the role and SHOULD surface the
+contradiction as a device defect, and a conforming encoder refuses to
+produce it — unlike §9.7's power rule, whose violation spans two payloads
+and so has no single record an encoder could refuse.
+
+Because Info is read on every connection and never cached (§4), bit 10
+describes **this connection, not the model**. A device with a physical
+listen-only switch — a lifted TXD, a sniff-only jumper — MUST clear bit 10
+while the switch is set, and MUST answer `unsupported_opcode` to both opcodes
+exactly as if it had never implemented them.
+
+### 15.1 What a device may transmit
+
+This section is a complete enumeration. A device MUST NOT put a frame on the
+bus except as one of:
+
+1. A probe request (§15.2), in service of an `OBD_INFO` it is answering.
+2. A poll request (§15.4), while its poll set is non-empty.
+
+Both are client-initiated, so a conforming device transmits nothing until a
+client asks it to, and the first frame it ever transmits is one the client
+asked for. There is no keep-alive, no wake-up sequence, and no transmission
+the client did not cause.
+
+Every frame either rule permits is a **single frame**: a classic CAN data
+frame carrying one Mode 01 request for one PID — `[0x02, 0x01, pid]` and
+padding — on the request identifier of §15.2. A device MUST NOT transmit a
+flow-control frame, which is the ISO 15765-2 primitive that continues a
+multi-frame exchange: a device that cannot send one cannot be drawn into
+another tester's transfer, and cannot complete one of its own (§15.5).
+
+Three bounds hold across the probe and the poll loop together:
+
+- A device MUST NOT have more than one request outstanding on the bus.
+- A device MUST NOT transmit two requests less than `obd_min_interval_ms`
+  apart, and while a poll set is active MUST NOT transmit two less than its
+  `interval_ms` apart. A probe continues the same schedule from the same
+  last transmission — and since a probe clears the poll set (§15.2), its
+  requests and the poll loop's never contend.
+- A device MUST NOT retry an unanswered request. A request still unanswered
+  when the next transmission is due is abandoned; the poll loop simply comes
+  round again (§15.4), and a probe moves on, or falls back to the other
+  addressing — a different request, not the same one again (§15.2).
+
+These bounds are what make the role auditable: a device's worst case on the
+bus is one short frame per `obd_min_interval_ms`, stated in a field the
+client reads before anything is transmitted.
+
+### 15.2 OBD_INFO — the probe
+
+`OBD_INFO` (`0x60`) takes no parameters. It probes the bus and reports what
+answered, **measured when the request arrives**: each request probes afresh,
+exactly as `GET_POWER` measures afresh (§9.7), so the answer describes the
+car the device is plugged into now, not the one it met last week. The probe
+is a transmission — the first this specification permits — and a device MUST
+NOT begin it before a client asks.
+
+The probe transmits a Mode 01 request for PID `0x00` using **functional
+addressing** (ISO 15765-4): the device SHOULD request on 11-bit `0x7DF`
+first and, if nothing answers within its collection window, SHOULD repeat
+the request with 29-bit functional addressing (`18DB33F1`). It MUST wait at
+least 50 ms for responses to each probe request before concluding nothing
+answered, MUST NOT retry an unanswered probe request beyond the addressing
+fallback above, and MUST NOT continue past PID `0x00` if nothing answered
+it. If the union mask read so far claims PID `0x20`, it requests `0x20`; if
+that result claims `0x40`, it requests `0x40`; it MUST NOT request a mask
+PID the union does not claim. A whole probe is therefore at most a handful
+of single frames, and the response is sent only when the probe is complete
+— the round trip is slow because it is measuring, which is the §9.5 shape.
+
+The detail of a successful response is one `obd_probe` record followed by
+`count` `obd_ecu` entries:
+
+<!-- BEGIN GENERATED: obd_probe -->
+*The detail of an OBD_INFO response. What the car answered, measured when asked. Followed by `count` obd_ecu entries.*
+
+Total: **20 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `validity` | bitmask `obd_validity` |
+| 1 | 1 | `u8` | `count` | obd_ecu entries following; MUST be 0 exactly when `responded` is clear, and at most 8 (SPEC.md 15.2) |
+| 2 | 4 | `u32` | `request_id` | The identifier this device transmits requests on; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero (SPEC.md 15.2); valid when `validity` bit 0 (`responded`) is set |
+| 6 | 4 | `u32` | `supported_01_20` | Union over responding ECUs of Mode 01 PID support; bit n = PID 0x01+n, LSB first (SPEC.md 15.3); valid when `validity` bit 0 (`responded`) is set |
+| 10 | 4 | `u32` | `supported_21_40` | As supported_01_20 for PIDs 0x21-0x40; bit n = PID 0x21+n (SPEC.md 15.3); valid when `validity` bit 0 (`responded`) is set |
+| 14 | 4 | `u32` | `supported_41_60` | As supported_01_20 for PIDs 0x41-0x60; bit n = PID 0x41+n (SPEC.md 15.3); valid when `validity` bit 0 (`responded`) is set |
+| 18 | 2 | `u16` | `reserved_18` | Probe metadata; **reserved — MUST be zero** |
+<!-- END GENERATED: obd_probe -->
+
+`validity` bits:
+
+<!-- BEGIN GENERATED: bitmask:obd_validity -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `responded` | An OBD-II ECU answered the probe; request_id and the three supported masks are valid |
+| 1+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:obd_validity -->
+
+<!-- BEGIN GENERATED: obd_ecu -->
+*One ECU that answered the probe, named by the identifier it responds on.*
+
+Total: **4 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 4 | `u32` | `id` | Response identifier; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero. Entries strictly ascending over bits 0-29 (SPEC.md 15.2) |
+<!-- END GENERATED: obd_ecu -->
+
+**`responded` means an ECU gave a positive Mode 01 response** — `41 00` and
+a mask — to a probe request. Other traffic on the diagnostic identifiers,
+including negative responses, does not set it. When `responded` is clear the
+probe found no OBD-II ECU: a gatewayed port, an ignition-off bus, a race car
+with no J1979 stack. Every gated field is then absent under §1.1, and a
+receiver MUST NOT read an empty mask out of a silent car — "no PIDs
+supported" and "nothing answered" are different findings.
+
+Every completed probe — answered or not — also **clears the poll set**
+(§15.7): the poll set never outlives the probe result it was verified
+against, and a probe replaces that result. The uniform rule closes both
+failure shapes at once. A silent re-probe would otherwise leave a device
+transmitting requests whose answers nothing can deliver — §15.5's fallback
+follows the most recent probe, which now reports no identifiers. An
+*answered* re-probe would otherwise leave a set verified against the
+previous car still transmitting PIDs the new result may not claim — an
+unverified transmission wearing an old probe's consent. A client that
+re-probes mid-session re-arms with one `OBD_POLL_SET`, which is the
+declare-verify-use sequence doing its job.
+
+**`request_id` is the identifier the device's requests go out on** — the one
+that actually elicited the responses being reported, never one the device
+did not use. Its layout is `can_record`'s: bits 0–28 arbitration identifier,
+bit 29 the format bit, so 11- versus 29-bit addressing is derived from the
+value rather than stated beside it, and the value drops directly into a
+`CAN_SUBSCRIBE` `id`. Each `obd_ecu` entry carries the response identifier
+of one answering ECU in the same layout: these are the identifiers §15.5's
+fallback delivers on while a poll set is active, and the values a client
+uses directly if it chooses to govern that delivery with subscriptions of
+its own.
+
+Four rules bind the record's content, and they are content rules in §1.1's
+sense — the layout is sound, so a receiver MUST decode the response, MUST
+NOT repair it, and SHOULD surface a violation as a device defect:
+
+- `count` MUST be zero if and only if `responded` is clear. A probe that
+  says something answered and lists nothing that did — or the reverse — has
+  contradicted itself.
+- Entries MUST be **strictly ascending** by identifier, compared over bits
+  0–29. Ascending order makes the list canonical — two conforming devices
+  probing one car produce identical bytes — and strictly so means one ECU
+  cannot appear to be two. A duplicate here is decoded and flagged, where a
+  duplicate Monitor slot rejects (§13.3): a slot is an address whose
+  ambiguity poisons every later update, an entry here is a report.
+- `count` MUST NOT exceed 8: ISO 15765-4 caps the responders to a
+  functional request at eight.
+- A device MUST NOT report through this record any ECU that did not answer
+  this probe.
+
+Identifier validity is not a content rule, and it is scoped by the
+validity mask. Every entry `id` — and `request_id` when `responded` is set
+— MUST satisfy §6.4 with bits 30–31 zero: these fields name identifiers,
+not how a frame travelled, and a receiver MUST **reject the whole
+response** on a violation, for §6.4's reason exactly — a standard
+identifier that does not fit in eleven bits, or one carrying
+frame-transmission flags, can only be used by masking it into a different
+identifier that looks entirely valid. When `responded` is clear,
+`request_id` is absent (§1.1): a receiver MUST NOT read it, so it MUST NOT
+reject on it either. Stale bytes behind the cleared bit — whether or not
+they happen to form a valid identifier — decode and are surfaced exactly
+as the stale-value rule above requires, and a conforming encoder
+normalises them to zero. A field a receiver may not read cannot be the
+reason it discards the response it may.
+
+A payload whose length is not exactly the record plus `count` entries is
+malformed and MUST be rejected whole (§1.1).
+
+### 15.3 Supported PIDs
+
+J1979 makes PIDs `0x00`, `0x20` and `0x40` bitmasks of what an ECU actually
+implements, and the three `supported_*` fields carry what the probe read:
+one query at connect tells a client exactly which standard channels this
+specific car offers, before it polls any of them. That is the same
+capability negotiation the rest of this protocol runs on — declare, verify,
+use — and it is what makes the role a universal floor rather than
+poll-and-see.
+
+**Bit numbering is pinned, and it is not J1979's.** In each field, bit *n*
+(of the little-endian `u32`, LSB first) is PID `base + n`: bit 0 of
+`supported_01_20` is PID `0x01`, bit 31 is PID `0x20`; bit 0 of
+`supported_21_40` is PID `0x21`; bit 0 of `supported_41_60` is PID `0x41`.
+J1979's own encoding puts PID `0x01` in the **most** significant bit of the
+first data byte, so a device transcribing response bytes into this field
+unconverted produces a mask that is plausible, non-zero and wrong for
+nearly every car — which is why the order is stated here and pinned by a
+conformance vector rather than left to convention.
+
+The fields carry the **union over every ECU that answered**, not a mask per
+ECU. The union answers the question the poll set asks — may this PID be
+polled at all — and per-ECU attribution is already carried by the response
+identifier on every answering frame. What is genuinely not carried is the
+per-ECU supported *set*: a client cannot learn from this record which of
+two ECUs implements a PID without polling it and watching who answers.
+That cost is accepted, and stated here: eight ECUs of per-ECU masks do not
+fit a control response at the minimum ATT MTU (§2), and the union is the
+part a client acts on.
+
+PIDs above `0x60` are not represented and not pollable (§15.4). The window
+`0x01`–`0x60` is exactly the range in which every Mode 01 response fits a
+single frame, which is what §15.5's no-reassembly rule stands on; later
+windows (`0x60`'s mask names PIDs `0x61`–`0x80`) carry multi-byte responses
+that break it, and adding them is a later minor's opcode, not a silent
+widening of this one.
+
+### 15.4 OBD_POLL_SET — the poll set
+
+`OBD_POLL_SET` (`0x61`) takes `interval_ms:u16`, `count:u8`, and `count`
+PID bytes. It **replaces the whole poll set** — the request is a complete
+statement, like a Monitor update (§13.4), so there is no add, no remove and
+no read-back: a client knows the set because it installed it, which is the
+§9.1 argument that removed `CAN_LIST`. The response carries no detail.
+
+While the set is non-empty the device transmits one Mode 01 request per
+`interval_ms`, walking the list in order and wrapping — the list is a
+schedule, not a set. **Entries are ordered and MAY repeat**: a client that
+wants engine speed sampled twice as often as coolant temperature sends
+`[0x0C, 0x05, 0x0C, 0x0F]`, and relative rates exist without per-PID rate
+fields. `interval_ms` is the spacing between consecutive requests, so one
+PID in a list of *k* is sampled every *k* × `interval_ms`.
+
+A request the bus did not answer is abandoned when the next transmission is
+due (§15.1); the loop does not stall, retry, or reorder. The client sees the
+gap as the absence of a response frame, which is the truth.
+
+Refusals, checked in this order after the §9 capability gate:
+
+1. A payload that is not exactly 3 + `count` bytes is `bad_params`.
+2. `count` above `obd_poll_slots` is `table_full` — the capacity was in
+   Info, so the answer is a fact the client could have read, §9.6's
+   argument for `rate_exceeded`.
+3. With `count` 0, `interval_ms` MUST be 0, and the empty set **stops
+   polling**: it is how a client turns transmit off, it is accepted
+   whatever the probe state, and it is not an error.
+4. With `count` non-zero, an `interval_ms` of 0 or below
+   `obd_min_interval_ms` is `bad_params`. Zero does not mean "no limit" as
+   it does for a `periodic` subscription (§6.8): there the device filters
+   traffic that exists anyway, here it would be generating unbounded
+   traffic, which is the one thing this role must never do.
+5. A PID outside `0x01`–`0x60`, or one whose bit in the most recent probe's
+   union is clear, is `bad_params`. With no probe completed this
+   connection, nothing is pollable — so a device MUST answer `bad_params`
+   to any non-empty poll set before `OBD_INFO` has been answered, and the
+   sequence declare (bit 10), verify (`OBD_INFO`), use (`OBD_POLL_SET`) is
+   structural rather than convention.
+
+A refused request MUST leave the installed poll set unchanged. The opcode
+is idempotent — replacing a set with itself is the same set — which is its
+§9.4 retry-safety. The change takes effect within one interval: after an
+`ok`, at most one further request MAY go out under the old set.
+
+An accepted, non-empty poll set is the whole of what a client must do to
+receive the answers: §15.5 delivers them on the probe's reported response
+identifiers with no subscription required. Subscriptions remain what they
+are everywhere — the client's choice of broadcast traffic, and its means
+of governing the diagnostic identifiers more tightly than `every_frame`.
+
+### 15.5 Delivery — responses are ordinary frames
+
+There is no OBD record type and no OBD stream. An ECU's answer is a CAN
+frame on its response identifier, and it reaches the client exactly as any
+other frame does: through the CAN characteristic, inside batches, with
+bus-arrival timestamps, subject to `seq`, `dropped` and shedding (§6).
+Which frames reach it is decided by the subscription table plus exactly one
+rule:
+
+> **While the poll set is non-empty, a frame whose identifier (over bits
+> 0–29) equals an entry id reported by the most recent probe, and which
+> matches no installed subscription, MUST be forwarded, as if by an
+> `every_frame` subscription.**
+
+A client that sets a poll therefore receives the answers, with no further
+ceremony: `OBD_POLL_SET` is the one instruction, and a protocol that let a
+device transmit on a car while discarding the replies as unsubscribed would
+have made its worst state the price of forgetting a call. The rule is a
+**fallback, not an entry in the table**, and each half of that is load-
+bearing:
+
+- **Frames the table matches are governed by the table**, exactly as if the
+  OBD role did not exist: §9.1 and §9.2 apply unchanged, and this rule
+  never sees those frames. A client that wants the responses rate-limited
+  installs an ordinary `periodic` subscription on the response identifiers,
+  and it governs. The fallback yields to anything the client says.
+- **It is not subscription state.** It consumes no slot against
+  `can_subscription_slots`, `CAN_UNSUBSCRIBE` cannot name it — an attempt
+  is `unknown_subscription`, as for anything the client never installed —
+  and it needs no per-identifier mode state, because `every_frame` has
+  none. It exists exactly while the poll set is non-empty and the probe
+  result stands, and dies with them (§15.7).
+
+Frames the fallback forwards are accepted frames like any other: they are
+batched, timestamped, counted by `seq`, and shed under load with the loss
+reported in `dropped` (§6.3, §8.3).
+
+The identifiers are the probe's, so the fallback delivers **what the bus
+says on the diagnostic response identifiers**, not only what this device
+asked for: another tester's answers on `0x7E8` arrive too, exactly as they
+would through an explicit subscription. That is deliberate — the frames are
+self-describing, as the next paragraph makes them, and a logger that
+suppressed them would be hiding real traffic — and it is the stated cost: a
+client is delivered
+frames on identifiers it never named. A probe's own mask responses ride the
+same rule: delivered through a matching subscription, or through the
+fallback when a poll set is already active, and otherwise not at all — the
+client gets their content in the `OBD_INFO` detail either way.
+
+**The CAN stream carries what the device hears, never what it says.** A
+device MUST NOT emit a `can_record` for a frame it transmitted itself,
+whatever the subscriptions match: a `can_record`'s timestamp is a
+bus-arrival measurement of a received frame (§6.1), and a stream in which
+the device's own `0x7DF` requests appear is indistinguishable from a bus
+carrying a second diagnostic tool. The device's transmissions are disclosed
+by bit 10 and observed through the polling flag (§15.6), not reconstructed
+from the stream.
+
+Mode 01 responses are self-describing — `41`, the PID, then the data — so a
+client needs no request/response correlation state: the frame says which
+PID it answers, whichever device asked and however long ago. The decode —
+`41 0C 1A F8` into 1726 rpm — belongs in the client, which is where the
+formula tables live and are updated; this device's job is the transaction,
+not the arithmetic.
+
+The device performs **no ISO-TP reassembly** and, per §15.1, transmits no
+flow control. Within `0x01`–`0x60` every response to a one-PID request is a
+single frame by J1979's own sizes (§15.3), so there is nothing to
+reassemble; a first frame arriving anyway — another tester's transfer, an
+out-of-spec ECU — is an ordinary frame, forwarded if subscribed and
+otherwise dropped, and the exchange it opens dies for want of a flow
+control this device will not send.
+
+### 15.6 The polling flag
+
+`can_header.flags` bit 1 (`polling`) MUST be set on every CAN batch flushed
+while the device's poll set is non-empty, and MUST be clear on every batch
+flushed while it is empty. Bit 10 in Info says this device *can* transmit;
+this bit says it currently *is* — continuously, on the stream any client of
+the CAN role is already reading, at the cost of one reserved bit. It is
+what makes §15.7 observable: after a stop, the next batch says whether the
+transmitter actually stopped, and whoever is watching the stream — not
+necessarily whoever sent `OBD_POLL_SET` — can tell a transmitting dongle
+from a pure sniffer.
+
+The probe does not set the flag: it is a bounded handful of frames inside
+one control round trip, disclosed by the `OBD_INFO` exchange itself, and a
+flag that flickered for it would blink faster than a batch flush can
+report.
+
+### 15.7 What stops the transmitter
+
+Transmit MUST NOT outlive the client that asked for it. The poll set is
+cleared, and polling therefore stops, on every one of:
+
+- **The empty poll set** — `OBD_POLL_SET` with `count` 0, the explicit
+  stop, always accepted (§15.4).
+- **`CAN_RESET`** — which clears the poll set along with the subscription
+  table (§9). The CAN role has one reset, and it resets everything the
+  role does: after it, the device neither transmits nor forwards, and a
+  client rebuilds both halves the way §9.1 already makes the strategy.
+- **Link loss** — exactly as the subscription table is cleared (§9.1). A
+  reconnecting client finds a known, silent state and reprograms
+  everything, which §9.1 already makes the strategy.
+- **A completed probe** — every `OBD_INFO` clears the poll set along with
+  the probe result it replaces (§15.2), answered or not: the set never
+  outlives the result it was verified against, so a re-probe that finds a
+  different car — or none — cannot leave yesterday's PIDs transmitting.
+- **Bus-off** — a device whose controller reaches bus-off MUST clear the
+  poll set and MUST NOT resume transmitting on its own; recovery is a new
+  `OBD_POLL_SET` from the client. `responded` reporting and the polling
+  flag then tell the truth about a bus the device can no longer speak on.
+
+A device MUST NOT re-arm polling itself in any of these cases, and MUST
+NOT persist a poll set across connections. There is no state in which a
+VTP/1 device transmits and no connected client asked it to.
+
+§15.5's fallback delivery ends with the poll set, in every one of these
+cases: it exists so a polling client receives the answers, and once nothing
+is being asked, nothing is delivered that the subscription table does not
+name. Stopping the transmitter MUST NOT strand what it already accepted:
+frames batched for delivery when the poll set clears are flushed, or
+discarded and counted in `dropped` (§8.3) — never held to surface on a
+later subscription carrying a `t_base` from a period the device had
+declared itself silent. What survives which edge follows what each thing is — the probe
+result is a fact about the car, so `CAN_RESET` leaves it standing and a new
+poll set re-arms without a second probe; the link's death clears
+everything, and the next connection starts at declare, verify, use.
+
+### 15.8 Sharing the bus
+
+An OBD port is one bus, and this device may not be the only tester on it. A
+scan tool, a dealer gateway, an insurance dongle — any of them may be
+polling while this device is. The rules are fixed, not adaptive:
+
+- A device MUST NOT attempt to detect other diagnostic testers, and MUST
+  NOT suspend, delay or resume polling on any inference about one. Every
+  heuristic that stops polling on a suspicion stops it on a coincidence,
+  and a device whose transmit behaviour varies with unmodelled traffic is
+  a device whose behaviour cannot be stated. What it does is what §15.1
+  says, always.
+- A device MUST NOT shorten its spacing, reorder its schedule, or add
+  requests in response to anything it hears. Bus contention costs it
+  answers, never restraint.
+- A response the device did not solicit — another tester's answer arriving
+  on `0x7E8` — is an ordinary frame, delivered exactly as §15.5 delivers
+  any frame on those identifiers: through a matching subscription, through
+  the fallback while a poll set is active, and otherwise not at all. The
+  device MUST NOT suppress, deduplicate or re-attribute it. Mode 01 responses are self-describing (§15.5), so a
+  client sees a true record of what the bus carried; that record showing
+  more answers than this device's questions is the truth about a shared
+  bus, not a defect.
+
+### 15.9 What the OBD role is not
+
+The role is deliberately the floor, not the ceiling. Out of scope, each a
+candidate for a later minor's opcodes (§11.3) rather than a silent widening
+of these two:
+
+- **Mode 22 manufacturer DIDs** — where brake pressure and steering angle
+  live on gatewayed cars. It needs ISO-TP reassembly and flow control,
+  which §15.1 forbids; its DID space is manufacturer-private, so there is
+  no supported-DID mask to verify against and the declare-verify-use shape
+  collapses; and it points requests at ECU behaviour nobody has published.
+- **Diagnostic trouble codes** (Modes 03, 04, 07) — reading DTCs is
+  multi-frame, and *clearing* them (Mode 04) writes to the vehicle, a
+  categorically different act from asking a mandated question.
+- **Modes 02, 06, 08, 09, 0A** — freeze frames, test results, actuator
+  control, vehicle information. Actuator control in particular is exactly
+  what this role's bounds exist to make unexpressible.
+- **PIDs above `0x60`** — §15.3 states the single-frame boundary they
+  break.
+- **Decoding** — no formula tables in firmware, no scaled values on the
+  wire. The client owns the arithmetic (§15.5).
+
+A device wanting any of these is a device wanting a new capability bit,
+whose declaration a client can refuse to use — which is this role's own
+shape, applied to whatever comes next.
+
 ---
 
 ## Appendix A — Reserved space
@@ -2012,16 +2506,15 @@ record tables above.
 | --- | --- | --- |
 | `gps_fix.validity` | bits 12–31 | Validity for fields added in a later minor |
 | `gps_fix.fix_flags` | bits 5–7 | Additional solution-quality flags |
-| `info.capabilities` | bit 7, bits 10–31 | Roles and features added in a later minor |
-| `can_header.flags` | bits 1–7 | Additional batch-level CAN status |
+| `info.capabilities` | bit 7, bits 11–31 | Roles and features added in a later minor |
+| `can_header.flags` | bits 2–7 | Additional batch-level CAN status |
 | `imu_header.flags` | bits 3–7 | Additional sensor groups |
 | `info.clock_flags` | bits 2–7 | Additional clock properties |
 | `monitor_value.validity` | bits 1–7 | Validity for values added in a later minor |
 | `power_state.validity` | bits 2–7 | Validity for power fields added in a later minor |
 | `gnss_aid_caps.validity` | bits 1–7 | Validity for aiding capabilities added in a later minor |
 | `aid_commit_result.validity` | bits 1–7 | Validity for commit results added in a later minor |
-| `info.reserved_20` | 1 byte | Was can_max_payload; derived from the capability bits since (SPEC.md 4.1) |
-| `info.reserved_22` | 2 bytes | Was max_notify_bytes; a notification is bounded by the negotiated ATT payload, which the client's stack already knows (SPEC.md 2) |
+| `obd_probe.validity` | bits 1–7 | Validity for probe results added in a later minor |
 | `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
 | `monitor_declaration.reserved` | 1 byte | Declaration metadata |
@@ -2029,6 +2522,7 @@ record tables above.
 | `power_state.reserved` | 1 byte | Power metadata |
 | `gnss_aid_caps.reserved_2` | 2 bytes | Was aid_flags; aiding metadata |
 | `aid_begin_result.reserved_3` | 1 byte | Transfer metadata |
+| `obd_probe.reserved_18` | 2 bytes | Probe metadata |
 | Extension types | `0x80`–`0xFF` | Vendor-private; this specification MUST NOT assign them (§5.5) |
 <!-- END GENERATED: reserved_space -->
 

@@ -50,6 +50,36 @@ deliberately not a minor version, which v0.x exists to permit.
 
 ### Added
 
+- **OBD-II polling** — capability bit 10 (`obd`, requires `can` and
+  `control`), opcodes `0x60` `OBD_INFO` and `0x61` `OBD_POLL_SET`, records
+  `obd_probe` + `obd_ecu`, `can_flags` bit 1 (`polling`). The first role
+  whose device TRANSMITS on the vehicle bus, which is the reason it is a
+  declared capability at all: without the bit, the protocol loses the
+  ability to say whether a given device transmits. What may be transmitted
+  is a closed enumeration (single-frame Mode 01 requests, one PID each,
+  spaced, never retried, no flow control); responses arrive as ordinary
+  `can_record`s — delivered on the probe's reported response identifiers
+  while the poll set is non-empty, with the subscription table governing
+  anything it matches first, so an accepted poll set is the whole of what
+  a client does to receive the answers; supported-PID masks make the role
+  declare-verify-use like everything else. Identifier validity on the
+  probe is scoped to a probe that answered — a gated request_id is absent
+  and cannot reject the response it rides in — and every completed probe
+  replaces the probe result and clears the poll set, so a transmitter
+  never outlives the result it was verified against. The `OBD_INFO`
+  response reports a COMPLETED probe: the reference peripheral applies
+  the request at once (9.6's order) and holds the indication until the
+  last request's collection window has passed, the request staying the
+  one outstanding (busy to anything written meanwhile). The two OBD
+  capacities MUST be non-zero while bit 10 is set (`capacity_required` in
+  the schema, a generated rules table beside the zero-when-clear one),
+  with the decode-and-flag / encoder-refusal halves paired in the corpus
+  like every content rule. Info's two freed
+  reserved fields become the role's capacities (`obd_poll_slots` at offset
+  20, `obd_min_interval_ms` at 22) per §11.2 — the wire bytes of every
+  existing vector are unchanged, but the decode keys renamed, so the
+  corpus baseline was re-accepted; the `reserved-bytes-nonzero` Info
+  vector retired with the bytes it tested. SPEC.md §15; RATIONALE §11.
 - **Power** — capability bit 8, `GET_POWER` (`0x50`), a four-byte
   `power_state`: `source` and `percent`, independently valid. Polled, not
   pushed. SPEC.md §9.7; RATIONALE §9.
@@ -57,12 +87,23 @@ deliberately not a minor version, which v0.x exists to permit.
   without response, opcodes `0x11`–`0x13`. One transfer open at a time,
   named by a token; fixed `chunk_bytes`; `first_missing` so loss is a
   number; CRC-32 stated exactly. SPEC.md §14; RATIONALE §10.
-- **Harness** — `power` and `aiding` phases; subscription checks hold exact
-  slot accounting against Info, an observable governor choice between
-  overlapping subscriptions, the equal-specificity tie-break in both
-  install orders, and duplicate forwarding across batch boundaries. Every
-  MUST/SHOULD is held by a seeded fault or an explicit excuse; 62 faults,
-  each caught by the check that claims it.
+- **Harness** — `power`, `aiding` and `obd` checks; subscription checks
+  hold exact slot accounting against Info, an observable governor choice
+  between overlapping subscriptions, the equal-specificity tie-break in
+  both install orders, and duplicate forwarding across batch boundaries.
+  The OBD checks drive the poll loop live: an accepted poll set delivers
+  the answers with nothing subscribed and on no identifier the probe did
+  not report, the polling flag rides every batch and falls on the stop,
+  and the empty poll set actually silences the transmitter. A poll the
+  bus legally never answers is reported indeterminate, not failed — §15.4
+  makes the gap the truth — and only independent evidence (a refused
+  diagnostic re-probe, or answers that appear once the reported
+  identifiers are subscribed) turns it into a failure. Every MUST/SHOULD
+  is held by a seeded fault or an explicit excuse; 74 matrix faults, each
+  caught by the check that claims it, plus two scenario seeds asserting
+  the required verdicts on that legally-silent car.
+  (`info.reserved_fields` retired with Info's last reserved bytes, which
+  §15 assigned.)
 
 ### Fixed, in aggregate
 

@@ -947,6 +947,243 @@ named by a token, a fixed `chunk_bytes` so index-to-offset is arithmetic,
 transfer protocol is the minimum that makes write-without-response
 recoverable on the transport Bluetooth actually provides, and nothing else.
 
+
+## 11. Why OBD polling is a role, and why the safety bit is the point
+
+VTP/1 grew up as a listening protocol. Every role before SPEC §15 shares one
+property so completely that nothing ever needed to state it: the device
+observes. GPS listens to satellites, CAN listens to the bus, the IMU listens
+to the device itself. The CAN role's opcode set — subscribe, unsubscribe,
+reset — configures a receiver, and nothing in the protocol could cause the
+device to put a frame on the vehicle's bus. Devices of this class are sold on
+exactly that property: listen-only controller mode, TXD physically lifted, a
+dongle that cannot disturb a moving car however wrong its firmware is.
+
+OBD-II breaks the property, necessarily. J1979 is request/response — nothing
+appears on `0x7E8` until somebody puts `02 01 0C` on `0x7DF` — so a device
+that can read the legally mandated PIDs is a device that transmits. The
+question was never whether polling is useful (it is, §11.1); it was whether a
+listening protocol should carry a transmitting role at all, and the answer
+turned on an argument about honesty rather than about features.
+
+### 11.1 What it buys: a universal floor
+
+Raw CAN sniffing yields usable channels only on a car whose OBD port is not
+gatewayed **and** whose broadcast frames somebody has reverse-engineered.
+Both conditions fail often: gateways that isolate the diagnostic port from
+the body buses have shipped in volume since the late 2010s, and the
+reverse-engineering exists for popular track cars and almost nothing else. A
+pure sniffer on an unknown car reports nothing, and a product built on one
+either finds a car it knows or fails.
+
+The J1979 Mode 01 PIDs are the opposite case. They are legally mandated on
+essentially every petrol car since 2001 and diesel since 2004, they need no
+per-car knowledge, and — the part that earns the role its place in this
+protocol — the standard itself carries capability negotiation: PIDs `0x00`,
+`0x20` and `0x40` are bitmasks of what each ECU actually implements. One
+probe at connect tells a client exactly which channels this specific car
+offers before anything is polled. Declare, verify, use: the same shape as
+every other role here, running on a negotiation mechanism a 25-year-old
+standard already provides. Without the role, a VTP device has no floor;
+with it, engine speed, coolant temperature, throttle and a dozen others
+work on nearly every car made this century.
+
+### 11.2 The bit is the load-bearing part
+
+Suppose the role had been added the obvious way instead: no capability bit,
+a vendor opcode or an out-of-band convention, responses simply appearing on
+`0x7E8` for clients that know to subscribe. Everything would work — and the
+protocol would have silently lost the ability to express whether a given
+device transmits. "VTP devices do not transmit" would have quietly become
+false as a category statement, with nothing at any layer able to say which
+devices it is false of. A user plugging a dongle into their own car could
+not find out. A review of a device's safety claims could not cite anything.
+
+That is the failure SPEC §1.1 exists to prevent, at the scale of a device rather
+than a field. A protocol whose devices may transmit without declaring it
+gives every client a plausible wrong value for the one question — "does
+this thing talk to my car?" — whose wrong answer is a trust failure rather
+than a display bug. So bit 10 is not a feature flag that happens to gate two
+opcodes; it is the declaration that keeps the category statement meaningful.
+After SPEC §15, "this device does not transmit" is still expressible, still
+checkable, and now per-device: bit clear means the old property holds, bit
+set means it does not and says so.
+
+Three consequences follow, and each is in the specification because the
+declaration would otherwise be weaker than it looks:
+
+- **The bit describes the connection, not the model** (SPEC §15). Info is
+  re-read every connection precisely because a DIY device is reflashed by
+  its owner (§8.2); a device with a physical listen-only switch clears the
+  bit while the switch is set, so the declaration tracks the hardware state
+  it claims to describe.
+- **The flag makes it observable** (SPEC §15.6). A capability bit is a
+  statement of what a device may do; `can_flags` bit 1 states what it is
+  doing, on every batch, to anyone reading the stream — including a client
+  that never sent `OBD_POLL_SET` and a tool inspecting a log after the
+  fact. The stop rules of SPEC §15.7 are auditable because the flag's
+  falling edge is on the wire.
+- **What may be transmitted is enumerable** (SPEC §15.1). A declaration
+  that a device transmits is only as strong as the bound on what. SPEC §15.1 is
+  a complete enumeration — single-frame Mode 01 requests, one PID each,
+  spaced, never retried, no flow control — so the worst case on the bus is
+  one short frame per `obd_min_interval_ms`, computable from Info before
+  anything is sent. The alternative, an opcode that transmits a
+  client-supplied frame, would have made bit 10 mean "this device transmits
+  whatever an app tells it to", which bounds nothing and declares nothing.
+
+### 11.3 The device transacts; the client computes
+
+The poll loop lives on the device and the arithmetic lives in the client,
+and both placements were forced rather than chosen.
+
+The loop cannot live in the client. SPEC §9 allows one outstanding control
+request, so client-driven polling would be a write-and-indication round
+trip per sample — 30 to 60 ms on realistic connection intervals — occupying
+the control plane completely at any useful rate: no `TIME_SYNC`, no rate
+change, no subscription change while logging. That is the same arithmetic
+that kept aiding transfers off Control (§10.1). It would also make sample
+spacing a function of radio conditions, on a protocol whose central design
+investment is one shared device clock (§2.5): device-side, the interval is
+the device's own microsecond clock and every response carries a true
+bus-arrival time.
+
+The decode cannot live on the device. A PID formula table is large, grows
+with every SAE revision, and is exactly the kind of thing that is trivial
+to update in an app and painful to update in fielded firmware — the client
+this role was designed against already carries an 1,100-line PID engine.
+Mode 01 responses echo their service and PID, so frames are
+self-describing and the client needs no per-request state; the device's
+contribution is the part only it can do — request framing, spacing, and
+honest timestamps. A device that shipped scaled engineering values instead
+would duplicate the formula table on the end that is hardest to fix, and
+disagreements between the two copies would be plausible wrong values by
+construction.
+
+Delivering responses as ordinary `can_record`s follows from the same
+split, and it kept the wire format untouched: no new record type, no new
+characteristic, no new stream — and a VTP/1.0 client that has never heard
+of bit 10 is unaffected, because nothing below is reachable without an
+`OBD_POLL_SET` it cannot send.
+
+How the responses reach the client was the last question settled, and it
+was settled by reversing a draft. The draft required an explicit
+subscription: poll responses would arrive only through the table, like
+every other frame, on the argument that one delivery path is cleaner than
+two. What that design actually permitted was a device **transmitting
+requests on a moving car and discarding the answers as unsubscribed** —
+every cost of the role and none of its benefit, reachable as the default
+consequence of forgetting one call. A protocol whose worst state is its
+most likely mistake fails this repository's own standard, and the
+double-instruction bought nothing the safety story needed: the
+safety-relevant act is transmitting, and `OBD_POLL_SET` is already its
+explicit consent. Requiring a second instruction before the device may
+*hand over* answers it already extracted was ceremony wearing safety's
+clothes.
+
+SPEC §15.5's rule is the repair, shaped so the draft's one real virtue —
+a stream fully determined by declared state, with SPEC §9.2 total over
+it —
+survives: while the poll set is non-empty, frames on the probe's reported
+response identifiers that match **no installed subscription** are forwarded
+`every_frame`. The table still governs everything it matches, so SPEC §9.1
+and SPEC §9.2 are untouched and a client that wants tighter control installs
+ordinary `periodic` subscription, which wins; the fallback exists only
+underneath, is not table state, and dies with the poll set. The cost is
+recorded where it is paid (SPEC §15.5): the device cannot tell its own
+answers from another tester's on the same identifiers, so a polling client
+is delivered what the bus says there, including frames it never asked
+after — which for a logger is closer to a duty than a defect.
+
+### 11.4 Why the probe is an opcode, and Info stays about the device
+
+The supported-PID masks could have gone in Info — it is where capability
+lives, after all. They do not belong there, because Info describes the
+device and the masks describe the car, and the two have different
+lifetimes: Info is constant for a connection (§4 reads it once), while the
+car changes every time the dongle moves. A probe result cached in a record
+that is explicitly never re-read mid-connection would be a stale answer
+with a normative excuse. `OBD_INFO` is therefore `GET_POWER`'s shape —
+measured when asked, no timestamp, ask again for fresher — and Info carries
+only the two numbers that really are the device's: how many PIDs fit a poll
+set, and how fast it will transmit. Those live in the two bytes the
+withdrawn `can_max_payload` and `max_notify_bytes` fields freed, which is
+what reserved space is for (SPEC §11.2).
+
+The probe also resolves the addressing question without an enum. Whether
+the car answered 11-bit or 29-bit addressing is carried by bit 29 of
+`request_id` — the same identifier layout as `can_record` and
+`CAN_SUBSCRIBE` — so the format is derived from a value the client was
+going to use anyway, rather than stated in a second field that could
+disagree with it.
+
+### 11.5 One PID per request, and the ISO-TP question that dissolves
+
+Multi-PID Mode 01 requests exist — up to six PIDs in one frame — and were
+rejected, because their responses routinely exceed seven bytes and arrive
+as ISO-TP multi-frame transfers, which need the device to send flow
+control frames and reassemble. One PID per request makes every response a
+single frame *by arithmetic*: within `0x01`–`0x60` no Mode 01 response
+exceeds four data bytes (J1979's own sizes), so `41 pid data` fits seven
+bytes always. The device then needs no reassembly and — the half that
+matters for §11.2 — **no flow control transmission**, so SPEC §15.1 can
+forbid the primitive outright, and a conforming device is structurally
+incapable of being drawn into a multi-frame exchange, its own or another
+tester's. The window and the mask PIDs are the same boundary: `0x60` is
+exactly where the three supported-PID masks stop, so "what can be
+negotiated" and "what stays single-frame" are one line, not two.
+
+The cost is request count: a client polling six PIDs sends six frames
+where multi-PID packing would send one. At the floors involved — one short
+frame per few tens of milliseconds, on a bus whose ECUs answer this
+traffic for a living — the bus cost is negligible, and the complexity it
+buys off the firmware (ISO-TP state, flow-control timing, per-ECU
+reassembly buffers) was the single largest item in the role's original
+scope estimate.
+
+### 11.6 Why the rate is aggregate
+
+Per-PID rates were considered for consistency with `periodic`
+subscriptions and rejected on a difference that matters more than the
+symmetry: a subscription's interval *filters traffic that exists anyway*,
+so N of them cannot add a frame to the bus, while a poll interval
+*generates traffic*, so N independent rates would make the device's bus
+load the sum of a list only the client knows, with collisions the device
+would have to arbitrate. One interval keeps the load-bearing sentence
+speakable — at most one request per `interval_ms`, ever — and relative
+rates survive as list composition: entries are ordered and may repeat, so
+`[0C, 0D, 0C, 05]` samples engine speed twice per cycle. A schedule
+expressed as data, not as a scheduler expressed as parameters.
+
+`interval_ms` zero meaning "no limit", as `periodic`'s `arg` has it, is
+refused for the same reason: unbounded generation is the one thing this
+role must never do, so the floor is a fact in Info and zero is
+`bad_params`.
+
+### 11.7 What it costs, and what was declined
+
+The costs are real and stated. The role reports the *union* of the ECUs'
+supported sets, not per-ECU masks — eight ECUs of per-ECU masks do not fit
+a control response at the minimum MTU, so which ECU implements a PID is
+learned by polling and watching response identifiers (SPEC §15.3). Mode 22
+manufacturer DIDs — where the interesting signals live on gatewayed cars —
+are out, with the reasoning in SPEC §15.9: they need the ISO-TP machinery
+SPEC §15.1 forbids, and their DID space has no supported-mask to negotiate
+against, so the declare-verify-use shape that justifies this role cannot
+cover them. DTC reading and clearing are out; Mode 04 *writes to the
+vehicle*, a categorically different act. Every one of these is a later
+minor's opcode behind its own declaration if it ever comes, which is
+SPEC §11.3 doing its job.
+
+Declined outright: transmit-arbitrary-frame opcodes (§11.2 above),
+device-side decoding (§11.3), a probe cached in Info (§11.4), automatic
+tester-detection heuristics (SPEC §15.8 — a device whose transmit
+behaviour varies with unmodelled traffic is a device whose behaviour
+cannot be stated), and polling that survives disconnection (SPEC §15.7 —
+transmit must not outlive the client that asked for it; the CAN role's
+subscriptions already die with the link, and the transmitter holds to the
+stricter version of the same rule).
+
 ---
 
 ## Contradictions found by review, and how each was closed
@@ -981,7 +1218,8 @@ yet at the only moment anyone read it. It was redefined as a device ceiling —
 and then removed altogether (§8.2): a notification never exceeds the
 negotiated ATT payload, which the client's own stack already knows, so even
 the ceiling was a second statement of a bound the client has. Bytes 22–23 of
-Info are reserved.
+Info were reserved, and SPEC §15 has since assigned them to
+`obd_min_interval_ms`.
 
 **Monitor freshness had two rules and a third to reconcile them.** `max_age` of
 zero meant "no deadline of its own", and a derived device-wide "liveness bound"

@@ -130,8 +130,14 @@ async def control_malformed_params(s):
             continue
         wanted = refdec.OPCODE_PARAM_SIZE[name]
         params = b"\x00" * (wanted + 1)
-        label = (f"{name} with {wanted + 1} parameter byte(s) where {wanted} "
-                 f"{'is' if wanted == 1 else 'are'} defined")
+        # For a variadic opcode the fixed part is a minimum, not the whole
+        # request: the surplus byte here is a pid the count byte (zero, in
+        # this all-zero block) does not declare, which is §15.4's own
+        # length-mismatch refusal.
+        label = (f"{name} with {wanted + 1} parameter byte(s) where "
+                 + (f"the fixed part is {wanted}"
+                    if name in refdec.OPCODE_VARIADIC
+                    else f"{wanted} {'is' if wanted == 1 else 'are'} defined"))
         try:
             response = await c.request(refdec.OPCODE[name], params)
         except ControlTimeout:

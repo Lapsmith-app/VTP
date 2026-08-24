@@ -121,5 +121,5 @@ def check(*, id, section, title, severity="MUST", requires=(), phase="streams",
 def load_all():
     """Import every check module, populating the registry."""
     from . import (discovery, info, control, monitor, power,  # noqa: F401
-                   aiding, streams, transport, reconnect)
+                   aiding, obd, streams, transport, reconnect)
     return REGISTRY

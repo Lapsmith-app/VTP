@@ -206,6 +206,7 @@ CAP_BIT = {b["name"]: b["bit"]
 CAP_IMPLIES = {b["name"]: b.get("implies") or []
                for b in SCHEMA["bitmasks"]["capabilities"]["bits"]}
 CAP_CAPACITY = SCHEMA["profile"]["capacity"]
+CAP_CAPACITY_REQUIRED = SCHEMA["profile"].get("capacity_required", {})
 
 
 def capability_problem(info):
@@ -240,6 +241,17 @@ def capability_problem(info):
             if info.get(field):
                 return (f"capabilities: {field} is {info[field]} while `{cap}` "
                         f"is clear; SPEC.md §4.1")
+    # SPEC.md §15 -- the OBD capacities MUST be non-zero while the bit is
+    # set: a declared role no conforming exchange can use is the same class
+    # of contradiction as a capacity behind a cleared bit, surfaced the same
+    # way.
+    for cap, fields in CAP_CAPACITY_REQUIRED.items():
+        if not caps & (1 << CAP_BIT[cap]):
+            continue
+        for field in fields:
+            if not info.get(field):
+                return (f"capabilities: {field} is 0 while `{cap}` is set; "
+                        f"SPEC.md §15 requires it non-zero")
     return None
 
 
@@ -426,6 +438,69 @@ decode_gnss_aid_caps = _decode_fixed("gnss_aid_caps")
 decode_aid_begin_result = _decode_fixed("aid_begin_result")
 decode_aid_commit_result = _decode_fixed("aid_commit_result")
 
+
+def _obd_identifier_valid(raw):
+    """SPEC.md §15.2 — identifier validity for request_id and obd_ecu.id.
+
+    §6.4's rule with bits 30–31 required zero: these fields name identifiers,
+    not how a frame travelled. Violations reject the whole response, for
+    §6.4's reason exactly — an identifier that can only be used by masking it
+    becomes a different identifier that looks entirely valid.
+    """
+    if raw & (0b11 << 30):
+        return False
+    if not raw & (1 << 29) and (raw & 0x1FFFFFFF) > 0x7FF:
+        return False
+    return True
+
+
+def decode_obd_info(buf):
+    """SPEC.md §15.2 — an obd_probe record and its obd_ecu entries.
+
+    The four content rules — count agreeing with `responded`, entries
+    strictly ascending, no duplicates, at most eight — are deliberately NOT
+    rejected here: the layout is sound, so a receiver decodes the response
+    and the client flags the contradiction (§1.1's malformed/content split).
+    Identifier validity IS rejected, per §6.4.
+    """
+    hsz, esz = _size("obd_probe"), _size("obd_ecu")
+    if len(buf) < hsz:
+        raise Reject("length")
+    probe = _unpack("obd_probe", buf)
+    if len(buf) < hsz + probe["count"] * esz:
+        raise Reject("truncated-record")
+    if len(buf) != hsz + probe["count"] * esz:
+        raise Reject("length")
+
+    bit_of = {b["name"]: b["bit"]
+              for b in SCHEMA["bitmasks"]["obd_validity"]["bits"]}
+    # §15.2 scopes the identifier reject to a probe that answered: with
+    # `responded` clear, request_id is absent (§1.1) and a receiver MUST NOT
+    # read it -- so it cannot be the reason the response is discarded. Stale
+    # bytes behind the cleared bit, valid identifier or not, decode and are
+    # surfaced by the absent list below.
+    if (probe["validity"] & (1 << bit_of["responded"])
+            and not _obd_identifier_valid(probe["request_id"])):
+        raise Reject("identifier")
+    probe["absent"] = sorted(
+        f["name"] for f in SCHEMA["records"]["obd_probe"]["fields"]
+        if f.get("valid_bit") is not None
+        and not (probe["validity"] & (1 << bit_of[f["valid_bit"]])))
+
+    ecus = []
+    for i in range(probe["count"]):
+        e = _unpack("obd_ecu", buf, hsz + i * esz)
+        if not _obd_identifier_valid(e["id"]):
+            raise Reject("identifier")
+        ecus.append(e)
+    # The id is reported raw, bit 29 included: identity is bits 0-29, these
+    # are the identifiers §15.5's fallback delivers on, and the value drops
+    # straight into a CAN_SUBSCRIBE id, which takes the same layout.
+    #
+    # `absent` rides at the top level, where the runner checks it, and inside
+    # the probe for callers holding only that record.
+    return {"probe": probe, "ecus": ecus, "absent": probe["absent"]}
+
 DECODERS = {
     "gps_fix": decode_gps_fix,
     "can_batch": decode_can_batch,
@@ -439,6 +514,7 @@ DECODERS = {
     "gnss_aid_caps": decode_gnss_aid_caps,
     "aid_begin_result": decode_aid_begin_result,
     "aid_commit_result": decode_aid_commit_result,
+    "obd_info": decode_obd_info,
 }
 
 

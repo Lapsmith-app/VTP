@@ -48,6 +48,10 @@ ROLES = {
     # works and IMPLIES picks up its `gps` and `control` requirement from the
     # schema without another hard-coded table.
     "gnss_aiding": {"gnss_aid_caps", "aid_begin_result", "aid_commit_result"},
+    # §15 — the OBD role's probe record (an obd_probe header and its obd_ecu
+    # entries travel as one detail, so they are one runner record). IMPLIES
+    # picks up `can` and `control` from the schema.
+    "obd": {"obd_info"},
 }
 
 # A role whose records only exist if another one does. This is not the runner's

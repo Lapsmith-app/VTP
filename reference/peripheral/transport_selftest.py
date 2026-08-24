@@ -283,6 +283,48 @@ def main():
           f"a refused control response MUST be retried until it lands, not "
           f"dropped; wire holds {got}")
 
+    # ---- OBD_INFO is answered only when the probe completes -------------
+    # SPEC.md 15.2 -- the response reports a COMPLETED probe. The device
+    # answers RESPONSE_PENDING and the pump collects the reply from
+    # due_control_response(); this drives the REAL pump over the fake link
+    # and pins that no indication reaches the wire while the probe's
+    # request windows are still running, that the reply lands once they
+    # have, and that nothing is still scheduled ahead of the clock then.
+    peripheral, server, clock = build(gps_hz=0)
+    server.connect(subscribe=("control", "can"))
+    run(peripheral, 5)
+    peripheral.write_request(
+        gattsim.FakeCharacteristic(serve.CHAR["control"]),
+        bytes([dev.OBD_INFO, 0x21]))
+    run(peripheral, 2)                     # 10 ms: the probe has just begun
+    check(not server.sent("control"),
+          "the OBD_INFO indication reached the wire before the probe could "
+          "have completed (SPEC.md 15.2)")
+    delivered_at = None
+    for _ in range(200):
+        run(peripheral, 1)
+        if server.sent("control"):
+            delivered_at = clock[0]
+            break
+    check(delivered_at is not None, "the OBD_INFO indication never arrived")
+    if delivered_at is not None:
+        answered = server.sent("control")
+        check(len(answered) == 1 and answered[0][:3] ==
+              bytes([dev.OBD_INFO, 0x21, dev.ST_OK]),
+              f"the probe's indication must answer ok under its own tag; "
+              f"the wire holds {[a.hex() for a in answered]}")
+        check(vtp1.decode_obd_info(answered[0][3:])["probe"]["count"] == 2,
+              "the delivered detail must report the completed probe: both "
+              "synthetic ECUs")
+        check(delivered_at >=
+              peripheral.device._obd_last_tx_us + 50_000,
+              "the indication was delivered before the 50 ms collection "
+              "window after the probe's final request (SPEC.md 15.2)")
+        check(all(t <= delivered_at
+                  for t, _, _ in peripheral.device._obd_rx),
+              "a probe event was still scheduled ahead of the clock when "
+              "the indication was delivered (SPEC.md 15.2)")
+
     # ---- What bless 0.3.0 actually reports ------------------------------
     # `is_connected()` on that backend is `len(_central_subscriptions) > 0`,
     # not a link flag: a CoreBluetooth peripheral is never told about a connect

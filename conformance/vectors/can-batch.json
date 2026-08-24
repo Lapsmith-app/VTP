@@ -432,6 +432,35 @@
       },
       "canonical": false,
       "expect_roundtrip_hex": "080000000100000000000000010000000000a00100000100"
+    },
+    {
+      "name": "polling-flag-set",
+      "desc": "flags bit 1 (`polling`): this device's OBD poll set is non-empty, so it is transmitting diagnostic requests on the bus (SPEC.md 15.6). The frame is the kind of thing the flag travels beside: a Mode 01 response on 0x7E8, DLC 8 with ISO 15765-4 padding. A decoder MUST surface the flag -- it is how anyone watching the stream can tell a transmitting dongle from a pure sniffer.",
+      "record": "can_batch",
+      "hex": "0c000000406f400100000000010200000000e80700000804410c1af8000000",
+      "expect": {
+        "header": {
+          "seq": 12,
+          "dropped": 0,
+          "t_base": 21000000,
+          "count": 1,
+          "flags": 2,
+          "reserved": 0
+        },
+        "records": [
+          {
+            "dt": 0,
+            "id": 2024,
+            "extended": false,
+            "fd": false,
+            "rtr": false,
+            "len": 8,
+            "payload": "04410c1af8000000",
+            "t_device_us": 21000000
+          }
+        ]
+      },
+      "note": "The payload decodes as 1726 rpm, and nothing in this protocol knows that: the device carries the transaction and the arithmetic stays in the client (SPEC.md 15.5)."
     }
   ]
 }
