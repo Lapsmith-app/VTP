@@ -55,7 +55,6 @@ CAUGHT_BY = {
     "aid_token_reused": "aiding.begin_supersedes",
     "aid_token_ignored": "aiding.begin_supersedes",
     "rate_not_applied": "control.rate_readback",
-    "info_reserved_nonzero": "info.reserved_fields",
     "seq_starts_at_one": "seq.first_is_zero",
     "seq_repeats": "seq.advances",
     "detail_on_error": "control.detail_only_on_ok",
@@ -101,6 +100,15 @@ CAUGHT_BY = {
     "power_stale_behind_bit": "power.absent_fields_zero",
     "power_declared_but_empty": "power.something_valid",
     "power_reserved_nonzero": "power.reserved",
+    "obd_probe_unsupported": "obd.probe",
+    "obd_responded_without_ecus": "obd.count_agrees",
+    "obd_entries_descending": "obd.entries_ascending",
+    "obd_stale_behind_bit": "obd.absent_fields_zero",
+    "obd_reserved_nonzero": "obd.reserved",
+    "obd_capacity_zero": "obd.capacities",
+    "obd_accepts_unsupported_pid": "obd.poll_refusals",
+    "obd_ignores_stop": "obd.poll_and_flag",
+    "obd_flag_never_set": "obd.poll_and_flag",
 }
 
 #: A MUST or SHOULD check with no seeded fault against it, and why there is

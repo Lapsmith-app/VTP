@@ -85,8 +85,15 @@ def main():
     # ---- Info -----------------------------------------------------------
     info = vtp1.decode_info(device.info())
     check(info["protocol_major"] == 1, "info: protocol_major must be 1")
-    check(info["reserved_22"] == 0,
-          "info: bytes 22-23 are reserved and MUST be zero on transmit")
+    # Bytes 20 and 22-23 stopped being reserved when SPEC.md 15 assigned
+    # them; a device declaring bit 10 MUST NOT declare either capacity zero.
+    check(info["obd_poll_slots"] == dev.OBD_POLL_SLOTS,
+          "info: obd_poll_slots must carry the declared capacity")
+    check(info["obd_min_interval_ms"] == dev.OBD_MIN_INTERVAL_MS,
+          "info: obd_min_interval_ms must carry the declared floor")
+    check(info["obd_poll_slots"] and info["obd_min_interval_ms"],
+          "info: a device declaring `obd` MUST NOT declare either capacity "
+          "zero (SPEC.md 15)")
     check(info["gps_rate_hz"] <= info["gps_max_rate_hz"],
           "info: current GPS rate exceeds the declared ceiling")
     check(info["imu_rate_hz"] <= info["imu_max_rate_hz"],
@@ -1100,8 +1107,10 @@ def main():
     nocan = dev.VtpDevice(now_us=lambda: 0, capabilities=dev.CAP_GPS)
     check(payload_ceiling(vtp1.decode_info(nocan.info())) == 0,
           "a device with no CAN carries none")
-    check(vtp1.decode_info(nocan.info())["reserved_20"] == 0,
-          "byte 20 is reserved now and MUST be zero on transmit (SPEC.md 2)")
+    check(vtp1.decode_info(nocan.info())["obd_poll_slots"] == 0
+          and vtp1.decode_info(nocan.info())["obd_min_interval_ms"] == 0,
+          "both OBD capacities MUST be zero while bit 10 is clear "
+          "(SPEC.md 4.1)")
 
     # SPEC.md 13.4 -- a device asking for more channels than fit in one
     # complete write is refused where the mistake is, not at the first
@@ -1150,6 +1159,9 @@ def main():
         "IMU_SET_RATE": bytes([dev.IMU_SET_RATE, 7]) + struct.pack("<H", 50),
         "MONITOR_LIST": bytes([dev.MONITOR_LIST, 8]),
         "GET_POWER": bytes([dev.GET_POWER, 12]),
+        "OBD_INFO": bytes([dev.OBD_INFO, 13]),
+        "OBD_POLL_SET": bytes([dev.OBD_POLL_SET, 14])
+                        + struct.pack("<HB", 0, 0),
     }
     for name, request in owned.items():
         got = bare.handle_control(request)
@@ -1189,6 +1201,201 @@ def main():
           "a device without the monitor bit MUST reject a value write; "
           "accepting it would put values on a display for a role it does not "
           "have")
+
+    # ---- OBD polling: declare, verify, use (SPEC.md §15) ----------------
+    # The first role whose device TRANSMITS. Everything asserted here is
+    # about the boundary between the transmitter (the poll set) and the
+    # receiver (subscriptions): the two are controlled separately, and no
+    # response reaches the client except through an ordinary subscription.
+    obd_clock = [0]
+    car = dev.VtpDevice(now_us=lambda: obd_clock[0], mtu=247,
+                        gps_hz=0, imu_hz=0)
+    car.on_connect()
+
+    def obd_ctl(op, tag, params=b""):
+        return car.handle_control(bytes([op, tag]) + params)
+
+    def obd_run(seconds):
+        """Advance the clock and return every decoded CAN batch."""
+        batches = []
+        for _ in range(int(seconds * 1_000_000) // 5_000):
+            obd_clock[0] += 5_000
+            for ch, payload in car.poll():
+                if ch == "can":
+                    b = decode("can", car.stamp_seq(ch, payload))
+                    car.commit_seq(ch)
+                    if b is not None:
+                        batches.append(b)
+        return batches
+
+    # SPEC.md 15.4 -- nothing is pollable before a probe: declare-verify-use
+    # is structural, not convention.
+    early = obd_ctl(dev.OBD_POLL_SET, 0x60,
+                    struct.pack("<HB", 25, 1) + bytes([0x0C]))
+    check(early[2] == dev.ST_BAD_PARAMS,
+          "OBD_POLL_SET before OBD_INFO MUST answer bad_params (SPEC.md 15.4)")
+    # ...but the stop is always available, whatever the probe state.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x61, struct.pack("<HB", 0, 0))[2]
+          == dev.ST_OK, "the empty poll set MUST be accepted before a probe")
+
+    # SPEC.md 15.2 -- the probe reports the synthetic car: 11-bit functional
+    # addressing, both ECUs ascending, and the union of their masks.
+    resp = obd_ctl(dev.OBD_INFO, 0x62)
+    check(resp[:3] == bytes([dev.OBD_INFO, 0x62, dev.ST_OK]),
+          "OBD_INFO MUST answer ok")
+    probe = vtp1.decode_obd_info(resp[3:])
+    check(probe["probe"]["request_id"] == car.OBD_REQUEST_ID,
+          "the probe MUST report the identifier its requests went out on")
+    check([e["id"] for e in probe["ecus"]] == sorted(car.OBD_ECUS),
+          "the probe MUST list every answering ECU, strictly ascending")
+    want_union = [0, 0, 0]
+    for masks in car.OBD_ECUS.values():
+        for i in range(3):
+            want_union[i] |= masks[i]
+    check((probe["probe"]["supported_01_20"],
+           probe["probe"]["supported_21_40"],
+           probe["probe"]["supported_41_60"]) == tuple(want_union),
+          "the probe masks MUST be the union over answering ECUs "
+          "(SPEC.md 15.3)")
+    check(probe["absent"] == [],
+          "a probe something answered has every gated field valid")
+
+    # SPEC.md 15.5 -- the probe's mask responses were real bus frames, and
+    # the poll loop's responses will be too; with NOTHING subscribed, none of
+    # them may reach the client.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x63,
+                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+          "a probed, supported PID at a legal interval MUST be accepted")
+    check(not obd_run(0.5),
+          "no subscription matched, so no OBD response may be delivered: the "
+          "poll set controls the transmitter, never the receiver "
+          "(SPEC.md 15.5)")
+
+    # Subscribe to the diagnostic response block and the answers arrive as
+    # ordinary frames, on the ids OBD_INFO reported, polling flag set.
+    check(obd_ctl(dev.CAN_SUBSCRIBE_MASK, 0x64,
+                  struct.pack("<IIBH", 0x7E8, 0x3FFFFFF8, 0, 0))[2]
+          == dev.ST_OK, "subscribing 0x7E8-0x7EF must succeed")
+    batches = obd_run(1.0)
+    frames = [r for b in batches for r in b["records"]]
+    check(frames, "a subscribed client MUST receive the poll responses")
+    check({r["id"] for r in frames} <= set(car.OBD_ECUS),
+          "every delivered frame is on an ECU response id OBD_INFO reported")
+    check(all(b["header"]["flags"] & 0x02 for b in batches),
+          "every batch flushed while the poll set is non-empty MUST carry "
+          "the polling flag (SPEC.md 15.6)")
+    # At 25 ms per request over 1 s, 40 requests; 0x0C is answered by both
+    # ECUs, so about 80 frames. Bounded loosely: the property is the rate
+    # cap, not the exact count.
+    check(30 <= len(frames) <= 90,
+          f"one request per 25 ms for 1 s should yield 40 requests' worth "
+          f"of answers; {len(frames)} frames arrived")
+    # SPEC.md 15.5 -- the request identifier never appears: the stream
+    # carries what the device hears, not what it says.
+    check(car.OBD_REQUEST_ID not in {r["id"] for r in frames},
+          "the device MUST NOT emit a can_record for its own request frames "
+          "(SPEC.md 15.5)")
+    # The responses are self-describing Mode 01 answers, and the engine
+    # speed in them is the same motion state the GPS fix derives from.
+    rpm_frames = [r for r in frames
+                  if bytes.fromhex(r["payload"])[1:3] == b"\x41\x0c"
+                  and r["id"] == 0x7E8]
+    check(rpm_frames, "0x7E8 answered PID 0x0C with a 41 0C response")
+    for r in rpm_frames[:5]:
+        data = bytes.fromhex(r["payload"])
+        got_rpm = ((data[3] << 8) | data[4]) / 4
+        want_rpm = car.circuit.at(r["t_device_us"] / 1e6)["rpm"]
+        check(abs(got_rpm - want_rpm) < 2,
+              f"PID 0x0C decodes to {got_rpm} rpm; the circuit says "
+              f"{want_rpm:.0f} at that instant")
+
+    # SPEC.md 15.4 -- a refused request leaves the installed set unchanged.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x65,
+                  struct.pack("<HB", dev.OBD_MIN_INTERVAL_MS - 1, 1)
+                  + bytes([0x0C]))[2] == dev.ST_BAD_PARAMS,
+          "an interval below obd_min_interval_ms MUST answer bad_params")
+    check(obd_run(0.2),
+          "a refused OBD_POLL_SET MUST leave the previous set polling")
+
+    # SPEC.md 15.4 -- the rest of the refusal table.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x66,
+                  struct.pack("<HB", 25, dev.OBD_POLL_SLOTS + 1)
+                  + bytes([0x0C]) * (dev.OBD_POLL_SLOTS + 1))[2]
+          == dev.ST_TABLE_FULL,
+          "more PIDs than obd_poll_slots MUST answer table_full")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x67,
+                  struct.pack("<HB", 25, 1) + bytes([0x02]))[2]
+          == dev.ST_BAD_PARAMS,
+          "a PID the probe's union does not claim MUST answer bad_params")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x68,
+                  struct.pack("<HB", 25, 1) + bytes([0x7F]))[2]
+          == dev.ST_BAD_PARAMS,
+          "a PID above 0x60 MUST answer bad_params (SPEC.md 15.4)")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x69,
+                  struct.pack("<HB", 25, 2) + bytes([0x0C]))[2]
+          == dev.ST_BAD_PARAMS,
+          "a count disagreeing with the PID bytes present MUST answer "
+          "bad_params")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x6A, struct.pack("<HB", 25, 0))[2]
+          == dev.ST_BAD_PARAMS,
+          "the empty set MUST carry interval_ms 0 (SPEC.md 15.4)")
+
+    # SPEC.md 15.7 -- the empty set stops the transmitter, and the polling
+    # flag's falling edge is on the wire: a batch flushed after the stop
+    # carries it clear.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x6B, struct.pack("<HB", 0, 0))[2]
+          == dev.ST_OK, "the empty poll set is the stop and MUST answer ok")
+    drained = obd_run(0.5)
+    check(all(not b["header"]["flags"] & 0x02 for b in drained),
+          "a batch flushed after the stop MUST carry the polling flag clear")
+    check(not [r for b in drained[1:] for r in b["records"]],
+          "no new response may arrive after the stop; the transmitter is off")
+
+    # SPEC.md 15.7 -- CAN_RESET clears the poll set along with the table:
+    # the one opcode that clears the receiver clears the transmitter too.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x6C,
+                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+          "re-arming the poll set after a stop must succeed")
+    check(obd_ctl(dev.CAN_RESET, 0x6D)[2] == dev.ST_OK, "CAN_RESET answers ok")
+    check(obd_ctl(dev.CAN_SUBSCRIBE_MASK, 0x6E,
+                  struct.pack("<IIBH", 0x7E8, 0x3FFFFFF8, 0, 0))[2]
+          == dev.ST_OK, "resubscribing after CAN_RESET must succeed")
+    check(not obd_run(0.5),
+          "CAN_RESET MUST clear the poll set: with a fresh subscription and "
+          "no new OBD_POLL_SET, nothing may arrive (SPEC.md 15.7)")
+    # ...but the probe result is a fact about the car, not the poll set, so
+    # a re-arm without a second probe still works on this connection.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x6F,
+                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+          "the probe result survives CAN_RESET; only the poll set clears")
+
+    # SPEC.md 15.7 -- transmit never survives the link.
+    car.on_disconnect()
+    car.on_connect()
+    check(obd_ctl(dev.OBD_POLL_SET, 0x70,
+                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2]
+          == dev.ST_BAD_PARAMS,
+          "a reconnect clears the probe result with the poll set, so the "
+          "next connection starts at declare-verify-use again")
+
+    # A gatewayed car: the probe transmits, nothing answers, and `responded`
+    # clear with every gated field absent is the honest report -- not an
+    # empty mask, which would claim a car that supports no PIDs.
+    gated = dev.VtpDevice(now_us=lambda: obd_clock[0], gps_hz=0, imu_hz=0)
+    gated.OBD_ECUS = {}
+    gated.on_connect()
+    resp = gated.handle_control(bytes([dev.OBD_INFO, 0x71]))
+    silent = vtp1.decode_obd_info(resp[3:])
+    check(silent["probe"]["count"] == 0 and silent["ecus"] == [],
+          "a silent probe lists no ECUs")
+    check(set(silent["absent"]) == {"request_id", "supported_01_20",
+                                    "supported_21_40", "supported_41_60"},
+          "a silent probe reports every gated field absent (SPEC.md 15.2)")
+    check(gated.handle_control(
+              bytes([dev.OBD_POLL_SET, 0x72],)
+              + struct.pack("<HB", 25, 1) + bytes([0x0C]))[2]
+          == dev.ST_BAD_PARAMS,
+          "nothing is pollable on a car that answered nothing")
 
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)

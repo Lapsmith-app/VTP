@@ -117,6 +117,7 @@ profile:
     gps: [gps_rate_hz, gps_max_rate_hz]
     can: [can_subscription_slots, can_max_frames_per_s]
     imu: [imu_rate_hz, imu_max_rate_hz]
+    obd: [obd_poll_slots, obd_min_interval_ms]
 
 enums:
   fix_type:
@@ -293,7 +294,22 @@ bitmasks:
       # a client does after it connects.
       - {bit: 9, name: gnss_aiding, implies: [gps, control],
          desc: "Client supplies orbit data to the device's receiver (§14)"}
-    reserved_from: 10
+      # Bit 10 is the first capability that is a claim about the BUS rather
+      # than about this device's own sensing: a device that sets it TRANSMITS
+      # on the vehicle's CAN bus. Every earlier role observes -- GPS listens
+      # to satellites, CAN listens to the bus, IMU listens to itself -- and
+      # this device class is sold on being unable to disturb a moving car.
+      # The bit exists so that claim stays expressible once polling exists at
+      # all: without it, responses simply appearing on 0x7E8 would be an
+      # undeclared convention, and a user plugging a dongle into their car
+      # could not find out whether it transmits. RATIONALE 11.
+      #
+      # Info is read every connection and never cached (SPEC.md 4), so the
+      # bit describes THIS connection, not the model: a device with a
+      # physical listen-only switch clears it while the switch is set.
+      - {bit: 10, name: obd, implies: [can, control],
+         desc: "Device transmits OBD-II diagnostic requests on the bus (§15)"}
+    reserved_from: 11
     reserved_purpose: "Roles and features added in a later minor"
   # These three were plain u8 fields with a prose description, so nothing
   # derived their reserved ranges: Appendix A listed them by hand and went
@@ -303,7 +319,15 @@ bitmasks:
     width: 1
     bits:
       - {bit: 0, name: shedding, desc: "Device is discarding accepted frames (SPEC.md 6.3)"}
-    reserved_from: 1
+      # Capability bit 10 says a device CAN transmit; this says it currently
+      # IS. On every batch rather than only in a control response, because
+      # the person who most needs the answer -- whoever plugged the dongle
+      # into a car -- is not necessarily the one who sent OBD_POLL_SET, and
+      # because it is what makes SPEC.md 15.7's stop rules observable: after
+      # CAN_RESET or an empty poll set, the next batch says whether the
+      # transmitter actually stopped.
+      - {bit: 1, name: polling, desc: "The OBD poll set is non-empty: this device is transmitting diagnostic requests (SPEC.md 15.6)"}
+    reserved_from: 2
     reserved_purpose: "Additional batch-level CAN status"
   imu_flags:
     width: 1
@@ -349,6 +373,16 @@ bitmasks:
       - {bit: 0, name: first_missing, desc: "first_missing names a chunk the device did not receive"}
     reserved_from: 1
     reserved_purpose: "Validity for commit results added in a later minor"
+  obd_validity:
+    width: 1
+    # One bit gating four fields, because they are one measurement: a probe
+    # that nothing answered has no request identifier that worked and no
+    # masks that were read. Splitting them would let a device report masks
+    # from a car that never replied.
+    bits:
+      - {bit: 0, name: responded, desc: "An OBD-II ECU answered the probe; request_id and the three supported masks are valid"}
+    reserved_from: 1
+    reserved_purpose: "Validity for probe results added in a later minor"
 
 records:
 
@@ -367,22 +401,22 @@ records:
       - {name: can_max_frames_per_s,   offset: 12, size: 4, type: u32, units: "frames/s"}
       - {name: imu_rate_hz,     offset: 16, size: 2, type: u16, units: Hz}
       - {name: imu_max_rate_hz, offset: 18, size: 2, type: u16, units: Hz}
-      # Was `can_max_payload`, and it could only ever hold a value the
-      # capability bits already fixed: 0 with no CAN, 64 with can_fd, 8
-      # otherwise. Two rules in SPEC.md 4.1 therefore both applied to a
-      # device with no CAN and disagreed (0 and 8), neither codec enforced
-      # any of it, and a generated case cheerfully expected an FD device
-      # reporting 0. A field whose every value is derivable is a field two
-      # implementations can disagree about for no gain. SPEC.md 4.1 derives
-      # it now, and this byte is free for a later minor.
-      - {name: reserved_20, offset: 20, size: 1, type: u8, reserved: true, desc: "Was can_max_payload; derived from the capability bits since (SPEC.md 4.1)"}
+      # Byte 20 was `can_max_payload` -- removed because every value it could
+      # hold was derivable from the capability bits (SPEC.md 4.1 derives it
+      # now) -- then a reserved byte. Assigned to the OBD role's slot count
+      # per SPEC.md 11.2: older firmware writes it as zero, which is exactly
+      # what "no OBD" means, so the assignment costs nothing that was not
+      # already true.
+      - {name: obd_poll_slots, offset: 20, size: 1, type: u8, desc: "Most PIDs one OBD_POLL_SET may name (SPEC.md 15.4); 0 if no OBD"}
       - {name: clock_flags,     offset: 21, size: 1, type: u8, bitmask: clock_flags}
-      # Was `max_notify_bytes`, a device-wide notification ceiling. Removed:
-      # a notification never exceeds the negotiated ATT payload, which the
-      # client's own stack already knows, so the field only restated a bound
-      # the client has -- and a second statement of one bound is a field two
-      # implementations can disagree about for no gain.
-      - {name: reserved_22, offset: 22, size: 2, type: u16, reserved: true, desc: "Was max_notify_bytes; a notification is bounded by the negotiated ATT payload, which the client's stack already knows (SPEC.md 2)"}
+      # Bytes 22-23 were `max_notify_bytes` -- removed as a restatement of
+      # the negotiated ATT payload -- then reserved. Assigned to the OBD
+      # role's transmit floor per SPEC.md 11.2, on the same zero-reads-right
+      # argument as byte 20. A capacity rather than a response detail because
+      # a client must read it BEFORE choosing an interval: SPEC.md 9.6's
+      # rate_exceeded precedent -- the ceiling is a fact the client could
+      # have read in advance -- applies to a floor identically.
+      - {name: obd_min_interval_ms, offset: 22, size: 2, type: u16, units: ms, desc: "Smallest OBD_POLL_SET interval_ms this device accepts (SPEC.md 15.4); 0 if no OBD"}
 
   gps_fix:
     characteristic: gps
@@ -619,6 +653,55 @@ records:
       - {name: first_missing, offset: 2, size: 2, type: u16, valid_bit: first_missing,
          desc: "Lowest chunk index the device did not receive; the client resends from here (SPEC.md 14.4)"}
 
+  # SPEC.md 15.2. The detail of an OBD_INFO response: what the car in front
+  # of the device answered, measured when asked -- GET_POWER's shape, not a
+  # cached datasheet. Deliberately about the CAR where Info's two OBD fields
+  # are about the DEVICE; conflating them was considered and rejected because
+  # Info is constant per connection and the car is not (RATIONALE 11.4).
+  #
+  # The three masks carry the UNION over responding ECUs, not a mask per ECU.
+  # Per-ECU masks are 12 bytes an entry, and eight ECUs of them do not fit a
+  # control response at the minimum ATT MTU; the union answers the question
+  # the client actually asks -- "may this PID go in the poll set" -- and
+  # per-ECU attribution is already carried by the response identifier on
+  # every answering frame. The cost is stated in SPEC.md 15.3 rather than
+  # discovered.
+  obd_probe:
+    access: control
+    size: 20
+    validity: obd_validity
+    desc: "The detail of an OBD_INFO response. What the car answered, measured when asked. Followed by `count` obd_ecu entries."
+    fields:
+      - {name: validity, offset: 0, size: 1, type: u8, bitmask: obd_validity}
+      # Not gated: count is what the receiver walks the payload by, so it is
+      # layout, not content. Its agreement with `responded` -- zero if and
+      # only if the bit is clear -- is a content rule (SPEC.md 15.2), decoded
+      # and flagged rather than rejected.
+      - {name: count, offset: 1, size: 1, type: u8, desc: "obd_ecu entries following; MUST be 0 exactly when `responded` is clear, and at most 8 (SPEC.md 15.2)"}
+      # Identifier layout shared with can_record.id and CAN_SUBSCRIBE: bits
+      # 0-28 arbitration, bit 29 the format bit. So 11-versus-29-bit
+      # addressing is DERIVED from the identifier rather than stated beside
+      # it, and the value drops straight into a subscription's `id`.
+      - {name: request_id, offset: 2, size: 4, type: u32, valid_bit: responded,
+         desc: "The identifier this device transmits requests on; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero (SPEC.md 15.2)"}
+      - {name: supported_01_20, offset: 6, size: 4, type: u32, valid_bit: responded,
+         desc: "Union over responding ECUs of Mode 01 PID support; bit n = PID 0x01+n, LSB first (SPEC.md 15.3)"}
+      - {name: supported_21_40, offset: 10, size: 4, type: u32, valid_bit: responded,
+         desc: "As supported_01_20 for PIDs 0x21-0x40; bit n = PID 0x21+n (SPEC.md 15.3)"}
+      - {name: supported_41_60, offset: 14, size: 4, type: u32, valid_bit: responded,
+         desc: "As supported_01_20 for PIDs 0x41-0x60; bit n = PID 0x41+n (SPEC.md 15.3)"}
+      - {name: reserved_18, offset: 18, size: 2, type: u16, reserved: true, desc: "Probe metadata"}
+
+  obd_ecu:
+    access: control
+    size: 4
+    desc: "One ECU that answered the probe, named by the identifier it responds on."
+    fields:
+      # Same identifier layout as request_id, for the same reason: the whole
+      # use of this value is to become the `id` of a CAN_SUBSCRIBE.
+      - {name: id, offset: 0, size: 4, type: u32,
+         desc: "Response identifier; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero. Entries strictly ascending over bits 0-29 (SPEC.md 15.2)"}
+
 control:
   request:  "[opcode:u8][tag:u8][params...]"
   response: "[opcode:u8][tag:u8][status:u8][detail...]"
@@ -642,7 +725,7 @@ control:
   # and link diagnostics are bench tooling rather than telemetry. Both values
   # stay unassigned in 1.0 so a later minor can revive either unchanged.
   opcodes:
-    - {value: 0x01, name: CAN_RESET,          capability: can,     params: "",                            response: "",                      desc: "Clear all subscriptions and stop the CAN stream"}
+    - {value: 0x01, name: CAN_RESET,          capability: can,     params: "",                            response: "",                      desc: "Clear all subscriptions, clear the OBD poll set (SPEC.md 15.7), and stop the CAN stream"}
     - {value: 0x02, name: CAN_SUBSCRIBE,      capability: can,     params: "id:u32, mode:u8, arg:u16",     response: "",                      desc: "Equivalent to CAN_SUBSCRIBE_MASK with mask 0x3FFFFFFF"}
     - {value: 0x03, name: CAN_SUBSCRIBE_MASK, capability: masked_subscriptions, params: "id:u32, mask:u32, mode:u8, arg:u16", response: ""}
     - {value: 0x04, name: CAN_UNSUBSCRIBE,    capability: can,     params: "id:u32, mask:u32",             response: "",                      desc: "Removes the subscription whose id and mask these are (SPEC.md 9.1)"}
@@ -675,3 +758,21 @@ control:
     # beside TIME_SYNC would file an opcode a device may refuse next to the
     # one it never may.
     - {value: 0x50, name: GET_POWER,          capability: power,   params: "",                             response: "power_state record",    desc: "What the device knows about its own supply, measured when asked (SPEC.md 9.7)"}
+    # SPEC.md 15. The OBD role: the first opcodes whose effect is on the
+    # VEHICLE rather than on the device, which is why both belong to a
+    # capability bit of their own rather than riding on `can`. Two opcodes
+    # and not three: there is no OBD_POLL_STOP, because a poll set is a
+    # complete statement (SPEC.md 15.4) and the empty one already says stop
+    # -- the GNSS_AID_ABORT argument, one section over.
+    #
+    # OBD_INFO transmits. It is the probe, and SPEC.md 15.2 makes it the
+    # first frame a device may ever put on the bus -- so the sequence a
+    # client follows is declare (Info bit 10), verify (OBD_INFO), use
+    # (OBD_POLL_SET), and the first transmission is one the client asked for.
+    #
+    # `pids:u8*` is the one variadic parameter list in this table: `count`
+    # u8 values follow, one per list entry. The poll set is ORDERED and MAY
+    # repeat a PID -- [0C, 0D, 0C, 05] samples 0x0C twice per cycle -- which
+    # is how relative rates exist without per-PID rate fields (SPEC.md 15.4).
+    - {value: 0x60, name: OBD_INFO,     capability: obd, params: "",                              response: "obd_probe record", desc: "Probe the bus and report what answered; the device's first transmission (SPEC.md 15.2)"}
+    - {value: 0x61, name: OBD_POLL_SET, capability: obd, params: "interval_ms:u16, count:u8, pids:u8*", response: "",                 desc: "Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4)"}

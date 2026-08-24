@@ -109,6 +109,10 @@
       "imu": [
         "imu_rate_hz",
         "imu_max_rate_hz"
+      ],
+      "obd": [
+        "obd_poll_slots",
+        "obd_min_interval_ms"
       ]
     }
   },
@@ -469,9 +473,18 @@
             "control"
           ],
           "desc": "Client supplies orbit data to the device's receiver (\u00a714)"
+        },
+        {
+          "bit": 10,
+          "name": "obd",
+          "implies": [
+            "can",
+            "control"
+          ],
+          "desc": "Device transmits OBD-II diagnostic requests on the bus (\u00a715)"
         }
       ],
-      "reserved_from": 10,
+      "reserved_from": 11,
       "reserved_purpose": "Roles and features added in a later minor"
     },
     "can_flags": {
@@ -481,9 +494,14 @@
           "bit": 0,
           "name": "shedding",
           "desc": "Device is discarding accepted frames (SPEC.md 6.3)"
+        },
+        {
+          "bit": 1,
+          "name": "polling",
+          "desc": "The OBD poll set is non-empty: this device is transmitting diagnostic requests (SPEC.md 15.6)"
         }
       ],
-      "reserved_from": 1,
+      "reserved_from": 2,
       "reserved_purpose": "Additional batch-level CAN status"
     },
     "imu_flags": {
@@ -577,6 +595,18 @@
       ],
       "reserved_from": 1,
       "reserved_purpose": "Validity for commit results added in a later minor"
+    },
+    "obd_validity": {
+      "width": 1,
+      "bits": [
+        {
+          "bit": 0,
+          "name": "responded",
+          "desc": "An OBD-II ECU answered the probe; request_id and the three supported masks are valid"
+        }
+      ],
+      "reserved_from": 1,
+      "reserved_purpose": "Validity for probe results added in a later minor"
     }
   },
   "records": {
@@ -649,12 +679,11 @@
           "units": "Hz"
         },
         {
-          "name": "reserved_20",
+          "name": "obd_poll_slots",
           "offset": 20,
           "size": 1,
           "type": "u8",
-          "reserved": true,
-          "desc": "Was can_max_payload; derived from the capability bits since (SPEC.md 4.1)"
+          "desc": "Most PIDs one OBD_POLL_SET may name (SPEC.md 15.4); 0 if no OBD"
         },
         {
           "name": "clock_flags",
@@ -664,12 +693,12 @@
           "bitmask": "clock_flags"
         },
         {
-          "name": "reserved_22",
+          "name": "obd_min_interval_ms",
           "offset": 22,
           "size": 2,
           "type": "u16",
-          "reserved": true,
-          "desc": "Was max_notify_bytes; a notification is bounded by the negotiated ATT payload, which the client's stack already knows (SPEC.md 2)"
+          "units": "ms",
+          "desc": "Smallest OBD_POLL_SET interval_ms this device accepts (SPEC.md 15.4); 0 if no OBD"
         }
       ]
     },
@@ -1395,6 +1424,82 @@
           "desc": "Lowest chunk index the device did not receive; the client resends from here (SPEC.md 14.4)"
         }
       ]
+    },
+    "obd_probe": {
+      "access": "control",
+      "size": 20,
+      "validity": "obd_validity",
+      "desc": "The detail of an OBD_INFO response. What the car answered, measured when asked. Followed by `count` obd_ecu entries.",
+      "fields": [
+        {
+          "name": "validity",
+          "offset": 0,
+          "size": 1,
+          "type": "u8",
+          "bitmask": "obd_validity"
+        },
+        {
+          "name": "count",
+          "offset": 1,
+          "size": 1,
+          "type": "u8",
+          "desc": "obd_ecu entries following; MUST be 0 exactly when `responded` is clear, and at most 8 (SPEC.md 15.2)"
+        },
+        {
+          "name": "request_id",
+          "offset": 2,
+          "size": 4,
+          "type": "u32",
+          "valid_bit": "responded",
+          "desc": "The identifier this device transmits requests on; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero (SPEC.md 15.2)"
+        },
+        {
+          "name": "supported_01_20",
+          "offset": 6,
+          "size": 4,
+          "type": "u32",
+          "valid_bit": "responded",
+          "desc": "Union over responding ECUs of Mode 01 PID support; bit n = PID 0x01+n, LSB first (SPEC.md 15.3)"
+        },
+        {
+          "name": "supported_21_40",
+          "offset": 10,
+          "size": 4,
+          "type": "u32",
+          "valid_bit": "responded",
+          "desc": "As supported_01_20 for PIDs 0x21-0x40; bit n = PID 0x21+n (SPEC.md 15.3)"
+        },
+        {
+          "name": "supported_41_60",
+          "offset": 14,
+          "size": 4,
+          "type": "u32",
+          "valid_bit": "responded",
+          "desc": "As supported_01_20 for PIDs 0x41-0x60; bit n = PID 0x41+n (SPEC.md 15.3)"
+        },
+        {
+          "name": "reserved_18",
+          "offset": 18,
+          "size": 2,
+          "type": "u16",
+          "reserved": true,
+          "desc": "Probe metadata"
+        }
+      ]
+    },
+    "obd_ecu": {
+      "access": "control",
+      "size": 4,
+      "desc": "One ECU that answered the probe, named by the identifier it responds on.",
+      "fields": [
+        {
+          "name": "id",
+          "offset": 0,
+          "size": 4,
+          "type": "u32",
+          "desc": "Response identifier; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero. Entries strictly ascending over bits 0-29 (SPEC.md 15.2)"
+        }
+      ]
     }
   },
   "control": {
@@ -1407,7 +1512,7 @@
         "capability": "can",
         "params": "",
         "response": "",
-        "desc": "Clear all subscriptions and stop the CAN stream"
+        "desc": "Clear all subscriptions, clear the OBD poll set (SPEC.md 15.7), and stop the CAN stream"
       },
       {
         "value": 2,
@@ -1495,6 +1600,22 @@
         "params": "",
         "response": "power_state record",
         "desc": "What the device knows about its own supply, measured when asked (SPEC.md 9.7)"
+      },
+      {
+        "value": 96,
+        "name": "OBD_INFO",
+        "capability": "obd",
+        "params": "",
+        "response": "obd_probe record",
+        "desc": "Probe the bus and report what answered; the device's first transmission (SPEC.md 15.2)"
+      },
+      {
+        "value": 97,
+        "name": "OBD_POLL_SET",
+        "capability": "obd",
+        "params": "interval_ms:u16, count:u8, pids:u8*",
+        "response": "",
+        "desc": "Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4)"
       }
     ]
   }

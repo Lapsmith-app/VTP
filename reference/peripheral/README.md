@@ -479,9 +479,9 @@ the three here.
 
 ## The synthetic CAN bus
 
-Three identifiers, little-endian throughout, and **nothing else exists** — a
-subscription to any other id is accepted and yields no frames, because no such
-frame is on this bus.
+Three broadcast identifiers, little-endian throughout, plus the diagnostic
+side below — a subscription to any other id is accepted and yields no
+frames, because no such frame is on this bus.
 
 The device streams **no CAN at all until a client subscribes** (SPEC.md §9.1:
 the table is empty on every connection). Configuring a channel in a client
@@ -530,6 +530,26 @@ testing the wrong thing.
 The first version of this circuit ran at constant speed, which made every CAN
 value a constant — and a client decoding a channel correctly looked exactly
 like one reading a fixed byte offset wrongly. Nothing moving is nothing tested.
+
+### The diagnostic side (SPEC.md §15)
+
+The synthetic car also answers J1979 Mode 01, through two ECUs on 11-bit
+functional addressing:
+
+| ECU | Answers on | Supports |
+| --- | --- | --- |
+| Engine | `0x7E8` | most of Mode 01, including `0x0C` rpm, `0x0D` speed, `0x05` coolant, `0x11` throttle |
+| Transmission | `0x7E9` | a small subset: `0x01`, `0x0C`, `0x0D`, `0x11` and the mask PIDs |
+
+Nothing appears on these identifiers until a client drives the role:
+`OBD_INFO` probes (the mask responses `41 00 …` cross the bus, in J1979's own
+MSB-first bit order — the probe *detail* carries SPEC.md §15.3's LSB-first
+order, and the transcription between them is deliberate), and `OBD_POLL_SET`
+starts the loop. Responses are subject to subscriptions like every other
+frame, the request frames never appear (§15.5), and `can_header.flags` bit 1
+is set on every batch flushed while the poll set is non-empty. The values
+derive from the same motion state as everything else: PID `0x0C` decodes to
+the same rpm `0x0C0` carries.
 
 ## The screen
 

@@ -726,18 +726,285 @@
       }
     },
     {
-      "name": "reserved-bits-info-capabilities",
+      "name": "info-obd-without-can",
       "record": "info",
-      "must_refuse": false,
-      "desc": "SPEC.md 2 -- info.capabilities bits 10-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "must_refuse": true,
+      "vector": "obd-without-can",
+      "desc": "SPEC.md 4.1 -- `obd` requires `can`: poll responses are delivered as ordinary CAN frames (SPEC.md 15.5), so an OBD device without the CAN role transmits questions whose answers no client can receive.",
       "input": {
         "protocol_major": 1,
         "protocol_minor": 0,
-        "capabilities": 2147484543,
+        "capabilities": 1040,
+        "obd_poll_slots": 16,
+        "obd_min_interval_ms": 20
+      }
+    },
+    {
+      "name": "info-obd-capacity-without-capability",
+      "record": "info",
+      "must_refuse": true,
+      "vector": "obd-capacity-without-capability",
+      "desc": "SPEC.md 4.1 -- both OBD capacities are zero while bit 10 is clear. Sharper than any other capacity rule: a poll capacity behind a cleared bit advertises transmitting on a vehicle bus while declaring not to.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 1,
+        "gps_rate_hz": 10,
+        "gps_max_rate_hz": 10,
+        "obd_poll_slots": 16,
+        "obd_min_interval_ms": 20
+      }
+    },
+    {
+      "name": "obd-responded-with-no-ecus",
+      "record": "obd_info",
+      "must_refuse": true,
+      "vector": "responded-with-no-ecus",
+      "desc": "SPEC.md 15.2 -- `responded` set with count 0 says something answered and lists nothing that did.",
+      "input": {
+        "probe": {
+          "validity": 1,
+          "count": 0,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118
+        },
+        "ecus": []
+      }
+    },
+    {
+      "name": "obd-ecu-behind-a-silent-probe",
+      "record": "obd_info",
+      "must_refuse": true,
+      "vector": "ecu-behind-a-silent-probe",
+      "desc": "SPEC.md 15.2 -- an ECU listed on a probe that says nothing answered.",
+      "input": {
+        "probe": {
+          "validity": 0,
+          "count": 1
+        },
+        "ecus": [
+          {
+            "id": 2024
+          }
+        ]
+      }
+    },
+    {
+      "name": "obd-duplicate-ecu-id",
+      "record": "obd_info",
+      "must_refuse": true,
+      "vector": "duplicate-ecu-id",
+      "desc": "SPEC.md 15.2 -- the entry list is strictly ascending, so one ECU cannot appear to be two.",
+      "input": {
+        "probe": {
+          "validity": 1,
+          "count": 2,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118
+        },
+        "ecus": [
+          {
+            "id": 2024
+          },
+          {
+            "id": 2024
+          }
+        ]
+      }
+    },
+    {
+      "name": "obd-ecu-ids-not-ascending",
+      "record": "obd_info",
+      "must_refuse": true,
+      "vector": "ecu-ids-not-ascending",
+      "desc": "SPEC.md 15.2 -- ascending order is what makes the entry list canonical; an encoder reordering silently would emit bytes its caller did not describe, so it refuses instead.",
+      "input": {
+        "probe": {
+          "validity": 1,
+          "count": 2,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118
+        },
+        "ecus": [
+          {
+            "id": 2025
+          },
+          {
+            "id": 2024
+          }
+        ]
+      }
+    },
+    {
+      "name": "obd-nine-ecus",
+      "record": "obd_info",
+      "must_refuse": true,
+      "vector": "nine-ecus",
+      "desc": "SPEC.md 15.2 -- ISO 15765-4 caps the responders to a functional request at eight.",
+      "input": {
+        "probe": {
+          "validity": 1,
+          "count": 9,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118
+        },
+        "ecus": [
+          {
+            "id": 2024
+          },
+          {
+            "id": 2025
+          },
+          {
+            "id": 2026
+          },
+          {
+            "id": 2027
+          },
+          {
+            "id": 2028
+          },
+          {
+            "id": 2029
+          },
+          {
+            "id": 2030
+          },
+          {
+            "id": 2031
+          },
+          {
+            "id": 2032
+          }
+        ]
+      }
+    },
+    {
+      "name": "obd-request-id-flag-bits",
+      "record": "obd_info",
+      "must_refuse": true,
+      "structural": true,
+      "desc": "SPEC.md 15.2 -- request_id bits 30-31 MUST be zero; the field names an identifier, not how a frame travelled.",
+      "input": {
+        "probe": {
+          "validity": 1,
+          "count": 1,
+          "request_id": 2147485663,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118
+        },
+        "ecus": [
+          {
+            "id": 2024
+          }
+        ]
+      }
+    },
+    {
+      "name": "obd-request-id-above-arbitration",
+      "record": "obd_info",
+      "must_refuse": true,
+      "structural": true,
+      "desc": "SPEC.md 15.2 via 6.4 -- a standard-format request_id with bits 11-28 set. Refused, not masked: masking produces a different identifier that looks entirely valid.",
+      "input": {
+        "probe": {
+          "validity": 1,
+          "count": 1,
+          "request_id": 34783,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118
+        },
+        "ecus": [
+          {
+            "id": 2024
+          }
+        ]
+      }
+    },
+    {
+      "name": "obd-ecu-id-flag-bits",
+      "record": "obd_info",
+      "must_refuse": true,
+      "structural": true,
+      "desc": "SPEC.md 15.2 -- an entry id with bit 30 set, on the field whose whole use is to become a CAN_SUBSCRIBE id.",
+      "input": {
+        "probe": {
+          "validity": 1,
+          "count": 1,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118
+        },
+        "ecus": [
+          {
+            "id": 1073743848
+          }
+        ]
+      }
+    },
+    {
+      "name": "obd-well-formed-probe",
+      "record": "obd_info",
+      "must_refuse": false,
+      "desc": "The canonical two-ECU probe. An encoder refusing everything cannot pass.",
+      "input": {
+        "probe": {
+          "validity": 1,
+          "count": 2,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118
+        },
+        "ecus": [
+          {
+            "id": 2024
+          },
+          {
+            "id": 2025
+          }
+        ]
+      },
+      "expect_hex": "0102df0700007dfc15c801e005887e0921000000e8070000e9070000"
+    },
+    {
+      "name": "obd-nothing-responded",
+      "record": "obd_info",
+      "must_refuse": false,
+      "desc": "SPEC.md 15.2 -- the silent-car answer is a legal record: `responded` clear, count 0, every gated field zero. An encoder that refuses it leaves a device no way to report a gatewayed port.",
+      "input": {
+        "probe": {
+          "validity": 0,
+          "count": 0
+        },
+        "ecus": []
+      },
+      "expect_hex": "0000000000000000000000000000000000000000"
+    },
+    {
+      "name": "reserved-bits-info-capabilities",
+      "record": "info",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- info.capabilities bits 11-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 2147485567,
         "gps_rate_hz": 10,
         "gps_max_rate_hz": 10
       },
-      "expect_hex": "01007f0300000a000a000000000000000000000000000000"
+      "expect_hex": "01007f0700000a000a000000000000000000000000000000"
     },
     {
       "name": "reserved-bits-info-clock-flags",
@@ -787,7 +1054,7 @@
       "name": "reserved-bits-can-header-flags",
       "record": "can_batch",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- can_header.flags bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "desc": "SPEC.md 2 -- can_header.flags bits 2-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
         "header": {
           "seq": 1,
@@ -795,7 +1062,7 @@
           "t_base": 0,
           "count": 1,
           "reserved": 0,
-          "flags": 129
+          "flags": 131
         },
         "records": [
           {
@@ -809,7 +1076,7 @@
           }
         ]
       },
-      "expect_hex": "010000000000000000000000010100000000a00100000100"
+      "expect_hex": "010000000000000000000000010300000000a00100000100"
     },
     {
       "name": "reserved-bits-imu-header-flags",
@@ -894,6 +1161,28 @@
         "validity": 129
       },
       "expect_hex": "01020700"
+    },
+    {
+      "name": "reserved-bits-obd-probe-validity",
+      "record": "obd_info",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- obd_probe.validity bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "probe": {
+          "count": 1,
+          "request_id": 2015,
+          "supported_01_20": 2551975941,
+          "supported_21_40": 2281758721,
+          "supported_41_60": 8393598,
+          "validity": 129
+        },
+        "ecus": [
+          {
+            "id": 2024
+          }
+        ]
+      },
+      "expect_hex": "0101df07000005101c9801e000887e1380000000e8070000"
     },
     {
       "name": "control-detail-on-ok",

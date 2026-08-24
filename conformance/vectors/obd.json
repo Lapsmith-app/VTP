@@ -1,0 +1,384 @@
+{
+  "protocol": "VTP/1",
+  "generated_by": "tools/generate.py",
+  "cases": [
+    {
+      "name": "eleven-bit-two-ecus",
+      "desc": "The ordinary answer on a post-2008 petrol car: 11-bit functional addressing on 0x7DF, the engine and transmission ECUs answering on 0x7E8 and 0x7E9, and the union of their supported-PID masks. The masks are what a client checks a poll set against BEFORE asking (SPEC.md 15.3).",
+      "record": "obd_info",
+      "hex": "0102df0700007dfc15c801e005887e0921000000e8070000e9070000",
+      "expect": {
+        "probe": {
+          "validity": 1,
+          "count": 2,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 2024
+          },
+          {
+            "id": 2025
+          }
+        ]
+      },
+      "expect_absent": [],
+      "note": "request_id drops straight into CAN_SUBSCRIBE, and so does each entry id: the identifier layout is can_record's, so 11-versus-29-bit is derived from bit 29 rather than stated in a second field."
+    },
+    {
+      "name": "twenty-nine-bit-addressing",
+      "desc": "A car that only answers 29-bit functional addressing (SPEC.md 15.2): requests on 18DB33F1, three ECUs answering on ascending 18DAF1xx identifiers, every id with bit 29 set. A decoder reading these as 11-bit identifiers truncates them into different, valid-looking ones.",
+      "record": "obd_info",
+      "hex": "0103f133db38191801880040018020000100000010f1da3818f1da3828f1da38",
+      "expect": {
+        "probe": {
+          "validity": 1,
+          "count": 3,
+          "request_id": 953889777,
+          "supported_01_20": 2281773081,
+          "supported_21_40": 2147565568,
+          "supported_41_60": 65568,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 953872656
+          },
+          {
+            "id": 953872664
+          },
+          {
+            "id": 953872680
+          }
+        ]
+      },
+      "expect_absent": []
+    },
+    {
+      "name": "nothing-responded",
+      "desc": "The probe transmitted and no OBD-II ECU answered -- a gatewayed port, an ignition-off bus, a race car with no J1979 stack. `responded` is clear, count is 0, and a decoder MUST report every gated field absent rather than an empty mask on a silent car: 'no PIDs supported' and 'nothing answered' are different findings (SPEC.md 15.2).",
+      "record": "obd_info",
+      "hex": "0000000000000000000000000000000000000000",
+      "expect": {
+        "probe": {
+          "validity": 0,
+          "count": 0,
+          "request_id": 0,
+          "supported_01_20": 0,
+          "supported_21_40": 0,
+          "supported_41_60": 0,
+          "reserved_18": 0
+        },
+        "ecus": []
+      },
+      "expect_absent": [
+        "request_id",
+        "supported_01_20",
+        "supported_21_40",
+        "supported_41_60"
+      ]
+    },
+    {
+      "name": "stale-values-behind-cleared-bits",
+      "desc": "A non-conforming device that clears `responded` and leaves the previous car's probe in the bytes. A decoder MUST report all four gated fields absent on the strength of the bit alone, and MUST NOT read a request identifier out of them.",
+      "record": "obd_info",
+      "hex": "0000df0700007dfc15c801e005887e0921000000",
+      "expect": {
+        "probe": {
+          "validity": 0,
+          "count": 0,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 0
+        },
+        "ecus": []
+      },
+      "expect_absent": [
+        "request_id",
+        "supported_01_20",
+        "supported_21_40",
+        "supported_41_60"
+      ],
+      "canonical": false,
+      "expect_roundtrip_hex": "0000000000000000000000000000000000000000",
+      "note": "Not byte-canonical: the round-trip asserts a conforming encoder normalises these bytes to zero. This is the only coverage the four obd_probe encoder gates get, so one vector clears the bit behind all of them at once."
+    },
+    {
+      "name": "reserved-bits-and-bytes",
+      "desc": "obd_validity bit 7 and both bytes of reserved_18 carry values a future minor assigned. Both halves of SPEC.md 2: a decoder MUST ignore them and decode the known fields normally, and a VTP/1.0 encoder MUST normalise them away.",
+      "record": "obd_info",
+      "hex": "8101df0700007dfc15c801e005887e092100efbee8070000",
+      "expect": {
+        "probe": {
+          "validity": 129,
+          "count": 1,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 48879
+        },
+        "ecus": [
+          {
+            "id": 2024
+          }
+        ]
+      },
+      "expect_absent": [],
+      "canonical": false,
+      "expect_roundtrip_hex": "0101df0700007dfc15c801e005887e0921000000e8070000"
+    },
+    {
+      "name": "responded-with-no-ecus",
+      "desc": "`responded` set with count 0: the device says something answered and lists nothing that did. A device-side violation of SPEC.md 15.2; the layout is sound, so a receiver MUST decode it -- and SHOULD flag the contradiction rather than guess which half was meant.",
+      "record": "obd_info",
+      "hex": "0100df0700007dfc15c801e005887e0921000000",
+      "expect": {
+        "probe": {
+          "validity": 1,
+          "count": 0,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 0
+        },
+        "ecus": []
+      },
+      "expect_absent": [],
+      "no_roundtrip": true,
+      "note": "No round-trip: the decode is required and the re-encode is forbidden, the same split as every content rule."
+    },
+    {
+      "name": "ecu-behind-a-silent-probe",
+      "desc": "count 1 with `responded` clear: an ECU listed on a probe that says nothing answered. The other half of the count-agrees rule (SPEC.md 15.2); decodes, and the entry MUST NOT be treated as an ECU that answered.",
+      "record": "obd_info",
+      "hex": "0001000000000000000000000000000000000000e8070000",
+      "expect": {
+        "probe": {
+          "validity": 0,
+          "count": 1,
+          "request_id": 0,
+          "supported_01_20": 0,
+          "supported_21_40": 0,
+          "supported_41_60": 0,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 2024
+          }
+        ]
+      },
+      "expect_absent": [
+        "request_id",
+        "supported_01_20",
+        "supported_21_40",
+        "supported_41_60"
+      ],
+      "no_roundtrip": true
+    },
+    {
+      "name": "duplicate-ecu-id",
+      "desc": "0x7E8 listed twice. SPEC.md 15.2 makes the entry list strictly ascending, so one ECU cannot appear to be two; decodes, SHOULD be flagged as a device defect.",
+      "record": "obd_info",
+      "hex": "0102df0700007dfc15c801e005887e0921000000e8070000e8070000",
+      "expect": {
+        "probe": {
+          "validity": 1,
+          "count": 2,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 2024
+          },
+          {
+            "id": 2024
+          }
+        ]
+      },
+      "expect_absent": [],
+      "no_roundtrip": true,
+      "note": "Decoded rather than rejected, where a duplicate Monitor slot rejects (SPEC.md 13.3): a slot is an ADDRESS whose ambiguity breaks every later update, while an entry here is a report -- redundant, not ambiguous. The malformed/content split, drawn the same way it is everywhere."
+    },
+    {
+      "name": "ecu-ids-not-ascending",
+      "desc": "0x7E9 before 0x7E8. Strictly ascending is what makes the entry list canonical -- two conforming devices seeing one car produce identical bytes (SPEC.md 15.2). Decodes; SHOULD be flagged.",
+      "record": "obd_info",
+      "hex": "0102df0700007dfc15c801e005887e0921000000e9070000e8070000",
+      "expect": {
+        "probe": {
+          "validity": 1,
+          "count": 2,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 2025
+          },
+          {
+            "id": 2024
+          }
+        ]
+      },
+      "expect_absent": [],
+      "no_roundtrip": true
+    },
+    {
+      "name": "nine-ecus",
+      "desc": "Nine entries. ISO 15765-4 caps the responders to a functional request at eight, so a ninth is a claim about a bus that cannot happen (SPEC.md 15.2). The layout is sound -- the length arithmetic agrees with count -- so it decodes, and SHOULD be flagged.",
+      "record": "obd_info",
+      "hex": "0109df0700007dfc15c801e005887e0921000000e8070000e9070000ea070000eb070000ec070000ed070000ee070000ef070000f0070000",
+      "expect": {
+        "probe": {
+          "validity": 1,
+          "count": 9,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 2024
+          },
+          {
+            "id": 2025
+          },
+          {
+            "id": 2026
+          },
+          {
+            "id": 2027
+          },
+          {
+            "id": 2028
+          },
+          {
+            "id": 2029
+          },
+          {
+            "id": 2030
+          },
+          {
+            "id": 2031
+          },
+          {
+            "id": 2032
+          }
+        ]
+      },
+      "expect_absent": [],
+      "no_roundtrip": true
+    },
+    {
+      "name": "request-id-flag-bits",
+      "desc": "request_id with bit 31 set. Bits 30-31 say how a frame travelled, and this field names an identifier, not a frame: SPEC.md 15.2 holds it to \u00a76.4's identifier validity with bits 30-31 zero, and a violation MUST be rejected whole -- using the id means masking it into a different, valid-looking one.",
+      "record": "obd_info",
+      "hex": "0101df0700807dfc15c801e005887e0921000000e8070000",
+      "expect": {
+        "probe": {
+          "validity": 1,
+          "count": 1,
+          "request_id": 2147485663,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 2024
+          }
+        ]
+      },
+      "expect_absent": [],
+      "must_reject": "identifier"
+    },
+    {
+      "name": "request-id-above-eleven-bits",
+      "desc": "A standard-format request_id (bit 29 clear) with bit 15 set. An eleven-bit identifier that does not fit in eleven bits is malformed (\u00a76.4), and MUST be rejected for \u00a76.4's reason exactly: truncating it yields a different identifier that looks entirely valid.",
+      "record": "obd_info",
+      "hex": "0101df8700007dfc15c801e005887e0921000000e8070000",
+      "expect": {
+        "probe": {
+          "validity": 1,
+          "count": 1,
+          "request_id": 34783,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 2024
+          }
+        ]
+      },
+      "expect_absent": [],
+      "must_reject": "identifier"
+    },
+    {
+      "name": "ecu-id-flag-bits",
+      "desc": "An entry id with bit 30 set. The same identifier-validity rule as request_id, on the field whose whole use is to become a CAN_SUBSCRIBE id. MUST be rejected whole.",
+      "record": "obd_info",
+      "hex": "0101df0700007dfc15c801e005887e0921000000e8070040",
+      "expect": {
+        "probe": {
+          "validity": 1,
+          "count": 1,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 1073743848
+          }
+        ]
+      },
+      "expect_absent": [],
+      "must_reject": "identifier"
+    },
+    {
+      "name": "short-payload",
+      "desc": "19 bytes: shorter than the probe record. MUST be rejected.",
+      "record": "obd_info",
+      "hex": "00000000000000000000000000000000000000",
+      "must_reject": "length"
+    },
+    {
+      "name": "count-exceeds-payload",
+      "desc": "The probe claims two entries, one is present. MUST be rejected: a decoder that trusts count without checking the buffer reads an ECU identifier out of adjacent memory.",
+      "record": "obd_info",
+      "hex": "0102df0700007dfc15c801e005887e0921000000e8070000",
+      "must_reject": "truncated-record"
+    },
+    {
+      "name": "long-payload",
+      "desc": "One entry declared, one present, plus a trailing byte. MUST be rejected rather than ignored.",
+      "record": "obd_info",
+      "hex": "0101df0700007dfc15c801e005887e0921000000e807000000",
+      "must_reject": "length"
+    }
+  ]
+}

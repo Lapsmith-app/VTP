@@ -501,6 +501,75 @@ def encode_aid_commit_result(commit):
     return _pack("aid_commit_result", _gate("aid_commit_result", commit))
 
 
+OBD_RESPONDED = next(1 << b["bit"]
+                     for b in SCHEMA["bitmasks"]["obd_validity"]["bits"]
+                     if b["name"] == "responded")
+OBD_EXTENDED = 1 << 29
+OBD_MAX_ECUS = 8               # ISO 15765-4's cap on functional responders
+
+
+def _check_obd_identifier(field, raw):
+    """SPEC.md §15.2 — bits 0-28 arbitration, b29 format, b30-31 zero.
+
+    Refused, never masked, for §6.4's reason: masking produces a different
+    identifier that looks entirely valid, on the field whose whole use is to
+    become a CAN_SUBSCRIBE id."""
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise EncodeError(f"{field} must be an integer, got {raw!r}")
+    if not 0 <= raw < (1 << 30):
+        raise EncodeError(
+            f"{field} is {raw:#x}; bits 30-31 of an OBD identifier MUST be "
+            f"zero (SPEC.md 15.2)")
+    if not raw & OBD_EXTENDED and (raw & 0x1FFFFFFF) > 0x7FF:
+        raise EncodeError(
+            f"{field} is {raw:#x}, a standard-format identifier above eleven "
+            f"bits (SPEC.md 15.2 via 6.4)")
+
+
+def encode_obd_info(probe, ecus):
+    """SPEC.md §15.2 — the detail of an OBD_INFO response.
+
+    The decoder deliberately accepts what most of this refuses: count
+    disagreeing with `responded`, duplicate or unordered entries, more than
+    eight of them. Those are content rules — the device MUST NOT emit them,
+    a receiver decodes and flags them — so the refusals live here, on the
+    device side, and conformance/encoders.json holds each one."""
+    if len(ecus) != probe.get("count", 0):
+        raise EncodeError(
+            f"obd_probe.count is {probe.get('count', 0)} but {len(ecus)} "
+            f"entr(ies) were supplied")
+    responded = bool(_known_bits("obd_validity")
+                     & probe.get("validity", 0) & OBD_RESPONDED)
+    if responded and not ecus:
+        raise EncodeError(
+            "obd_probe: `responded` set with no entries says something "
+            "answered and lists nothing that did (SPEC.md 15.2)")
+    if ecus and not responded:
+        raise EncodeError(
+            "obd_probe: an ECU is listed on a probe that says nothing "
+            "answered (SPEC.md 15.2)")
+    if len(ecus) > OBD_MAX_ECUS:
+        raise EncodeError(
+            f"obd_probe.count is {len(ecus)}; ISO 15765-4 caps the "
+            f"responders to a functional request at {OBD_MAX_ECUS} "
+            f"(SPEC.md 15.2)")
+    _check_obd_identifier("obd_probe.request_id", probe.get("request_id", 0))
+    prev = None
+    for e in ecus:
+        _check_obd_identifier("obd_ecu.id", e.get("id", 0))
+        # Strictly ascending over bits 0-29; bits 30-31 are already zero, so
+        # the raw comparison is the identity comparison.
+        if prev is not None and e["id"] <= prev:
+            raise EncodeError(
+                f"obd_ecu entries are not strictly ascending: {e['id']:#x} "
+                f"follows {prev:#x} (SPEC.md 15.2)")
+        prev = e["id"]
+    out = bytearray(_pack("obd_probe", _gate("obd_probe", probe)))
+    for e in ecus:
+        out += _pack("obd_ecu", e)
+    return bytes(out)
+
+
 # Keyed by the runner-contract record name, so a harness can round-trip a
 # decode without knowing which record it holds.
 ENCODERS = {
@@ -516,4 +585,5 @@ ENCODERS = {
     "gnss_aid_caps": encode_gnss_aid_caps,
     "aid_begin_result": encode_aid_begin_result,
     "aid_commit_result": encode_aid_commit_result,
+    "obd_info": lambda d: encode_obd_info(d["probe"], d["ecus"]),
 }

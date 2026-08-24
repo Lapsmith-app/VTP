@@ -298,6 +298,11 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
         && (v->can_subscription_slots || v->can_max_frames_per_s)) return -1;
     if (!(caps & VTP_CAPABILITIES_IMU)
         && (v->imu_rate_hz || v->imu_max_rate_hz)) return -1;
+    /* SPEC.md 4.1, sharper here than anywhere: an OBD capacity behind a
+     * cleared bit 10 advertises transmitting on a vehicle bus while
+     * declaring not to. */
+    if (!(caps & VTP_CAPABILITIES_OBD)
+        && (v->obd_poll_slots || v->obd_min_interval_ms)) return -1;
 
     memset(out, 0, VTP_INFO_SIZE);
     out[VTP_INFO_OFF_PROTOCOL_MAJOR] = v->protocol_major;
@@ -309,10 +314,10 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     wr32(out + VTP_INFO_OFF_CAN_MAX_FRAMES_PER_S, v->can_max_frames_per_s);
     wr16(out + VTP_INFO_OFF_IMU_RATE_HZ, v->imu_rate_hz);
     wr16(out + VTP_INFO_OFF_IMU_MAX_RATE_HZ, v->imu_max_rate_hz);
-    out[VTP_INFO_OFF_RESERVED_20] = 0;   /* SPEC.md 2 */
+    out[VTP_INFO_OFF_OBD_POLL_SLOTS] = v->obd_poll_slots;
     out[VTP_INFO_OFF_CLOCK_FLAGS] =
         (uint8_t)KNOWN_BITS(v->clock_flags, VTP_CLOCK_FLAGS_KNOWN);
-    wr16(out + VTP_INFO_OFF_RESERVED_22, 0);   /* SPEC.md 2 */
+    wr16(out + VTP_INFO_OFF_OBD_MIN_INTERVAL_MS, v->obd_min_interval_ms);
     return VTP_INFO_SIZE;
 }
 
@@ -483,4 +488,61 @@ int vtp_encode_time_sync(const vtp_time_sync_t *t, uint8_t *out, size_t cap) {
     wr64(out + VTP_TIME_SYNC_OFF_T_DEVICE_RX, t->t_device_rx);
     wr64(out + VTP_TIME_SYNC_OFF_T_DEVICE_TX, t->t_device_tx);
     return VTP_TIME_SYNC_SIZE;
+}
+
+/* SPEC.md 15.2 -- refused, never masked, for 6.4's reason: masking produces
+ * a different identifier that looks entirely valid, on the field whose whole
+ * use is to become a CAN_SUBSCRIBE id. Checked on the raw value even behind
+ * a cleared `responded` bit, exactly as the Python reference does. */
+static int obd_identifier_ok(uint32_t raw) {
+    if (raw & 0xC0000000u) return 0;
+    if (!(raw & (1u << 29)) && (raw & 0x1FFFFFFFu) > 0x7FFu) return 0;
+    return 1;
+}
+
+int vtp_encode_obd_info(const vtp_obd_probe_t *p,
+                        const vtp_obd_ecu_t *ecus,
+                        uint8_t *out, size_t cap) {
+    const size_t needed = (size_t)VTP_OBD_PROBE_SIZE
+                        + (size_t)p->count * VTP_OBD_ECU_SIZE;
+    if (cap < needed) return -1;
+    /* The array first, before any sweep reads through it: a count with no
+     * array behind it is a refusal, never a dereference. */
+    if (p->count && !ecus) return -1;
+
+    const uint32_t v = KNOWN_BITS(p->validity, VTP_OBD_VALIDITY_KNOWN);
+    const int responded = (v & VTP_OBD_VALIDITY_RESPONDED) != 0;
+
+    /* SPEC.md 15.2's content rules, which the decoder deliberately accepts:
+     * the refusals are the device-side half of each. `responded` set with no
+     * entries says something answered and lists nothing that did; an entry
+     * behind a silent probe is the reverse; ISO 15765-4 caps the responders
+     * to a functional request at eight; and the entry list is strictly
+     * ascending over bits 0-29, so one ECU cannot appear to be two and two
+     * conforming devices probing one car produce identical bytes. */
+    if (responded && p->count == 0) return -1;
+    if (!responded && p->count != 0) return -1;
+    if (p->count > 8) return -1;
+    if (!obd_identifier_ok(p->request_id)) return -1;
+    for (uint8_t i = 0; i < p->count; i++) {
+        if (!obd_identifier_ok(ecus[i].id)) return -1;
+        if (i && ecus[i].id <= ecus[i - 1].id) return -1;
+    }
+
+    memset(out, 0, VTP_OBD_PROBE_SIZE);
+    out[VTP_OBD_PROBE_OFF_VALIDITY] = (uint8_t)v;
+    out[VTP_OBD_PROBE_OFF_COUNT]    = p->count;
+    wr32(out + VTP_OBD_PROBE_OFF_REQUEST_ID,
+         gate32(p->request_id, v, VTP_OBD_VALIDITY_RESPONDED));
+    wr32(out + VTP_OBD_PROBE_OFF_SUPPORTED_01_20,
+         gate32(p->supported_01_20, v, VTP_OBD_VALIDITY_RESPONDED));
+    wr32(out + VTP_OBD_PROBE_OFF_SUPPORTED_21_40,
+         gate32(p->supported_21_40, v, VTP_OBD_VALIDITY_RESPONDED));
+    wr32(out + VTP_OBD_PROBE_OFF_SUPPORTED_41_60,
+         gate32(p->supported_41_60, v, VTP_OBD_VALIDITY_RESPONDED));
+    for (uint8_t i = 0; i < p->count; i++) {
+        wr32(out + VTP_OBD_PROBE_SIZE + (size_t)i * VTP_OBD_ECU_SIZE
+             + VTP_OBD_ECU_OFF_ID, ecus[i].id);
+    }
+    return (int)needed;
 }

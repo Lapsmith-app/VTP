@@ -111,25 +111,11 @@ async def info_rate_ceiling(s):
                    f"maximum", info=_summary(i))
 
 
-@check(id="info.reserved_fields", section="4", phase="info", severity="MUST",
-       title="Reserved bytes of Info are zero")
-async def info_reserved_fields(s):
-    if s.info is None:
-        raise Skip("Info did not decode")
-    # Derived from the schema, so a byte that gains a meaning in a later minor
-    # stops being checked here the moment the schema says it has one. Byte 20
-    # held can_max_payload until §4.1 made the largest payload follow from the
-    # capability bits, and bytes 22-23 held max_notify_bytes until it was
-    # removed as a restatement of the negotiated ATT payload.
-    reserved = [f["name"] for f in refdec.SCHEMA["records"]["info"]["fields"]
-                if f["name"].startswith("reserved")]
-    nonzero = [(name, s.info[name]) for name in reserved if s.info[name]]
-    if nonzero:
-        raise Fail(
-            "; ".join(f"{n} is {v}" for n, v in nonzero)
-            + ". A reserved field MUST be written as zero, so that a client "
-              "reading one in a later minor knows it came from a device that "
-              "meant it", info_hex=s.info_raw.hex())
+# `info.reserved_fields` lived here until SPEC.md §15 assigned Info's last
+# reserved bytes (20 and 22-23) to the OBD capacities: the record now has no
+# reserved field left to hold to §2, and a check that can never fail is a
+# check that does not work. If a later revision reserves an Info byte again,
+# the check comes back with it -- schema-derived, as it was.
 
 
 @check(id="info.can_payload", section="4.1", phase="info", severity="OBSERVE",

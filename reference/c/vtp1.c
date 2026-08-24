@@ -274,9 +274,9 @@ int vtp_decode_info(const uint8_t *b, size_t len,
     o->can_max_frames_per_s   = rd32(b + VTP_INFO_OFF_CAN_MAX_FRAMES_PER_S);
     o->imu_rate_hz            = rd16(b + VTP_INFO_OFF_IMU_RATE_HZ);
     o->imu_max_rate_hz        = rd16(b + VTP_INFO_OFF_IMU_MAX_RATE_HZ);
-    o->reserved_20            = b[VTP_INFO_OFF_RESERVED_20];
+    o->obd_poll_slots         = b[VTP_INFO_OFF_OBD_POLL_SLOTS];
     o->clock_flags            = b[VTP_INFO_OFF_CLOCK_FLAGS];
-    o->reserved_22            = rd16(b + VTP_INFO_OFF_RESERVED_22);
+    o->obd_min_interval_ms    = rd16(b + VTP_INFO_OFF_OBD_MIN_INTERVAL_MS);
     return 0;
 }
 
@@ -505,7 +505,7 @@ int vtp_decode_gnss_aid_caps(const uint8_t *b, size_t len,
      * disagrees with one that reads the bytes the moment a payload carries a
      * non-zero value -- which SPEC.md Appendix A explicitly permits a later
      * minor to send, and which every other reserved field here already
-     * survives (see info.reserved_20). */
+     * survives (see obd_probe.reserved_18). */
     o->reserved_2 = rd16(b + VTP_GNSS_AID_CAPS_OFF_RESERVED_2);
     o->max_bytes  = rd32(b + VTP_GNSS_AID_CAPS_OFF_MAX_BYTES);
     o->held_until = (int64_t)rd64(b + VTP_GNSS_AID_CAPS_OFF_HELD_UNTIL);
@@ -530,4 +530,51 @@ int vtp_decode_aid_commit_result(const uint8_t *b, size_t len,
     o->result        = b[VTP_AID_COMMIT_RESULT_OFF_RESULT];
     o->first_missing = rd16(b + VTP_AID_COMMIT_RESULT_OFF_FIRST_MISSING);
     return 0;
+}
+
+/* SPEC.md §15.2 -- identifier validity for request_id and obd_ecu.id: §6.4's
+ * rule with bits 30-31 required zero, because these fields name identifiers
+ * rather than how a frame travelled. Violations reject the whole response,
+ * for §6.4's reason exactly -- an identifier that can only be used by masking
+ * it becomes a different identifier that looks entirely valid. */
+static int vtp_obd_identifier_ok(uint32_t raw) {
+    if (raw & 0xC0000000u) return 0;
+    if (!(raw & (1u << 29)) && (raw & 0x1FFFFFFFu) > 0x7FFu) return 0;
+    return 1;
+}
+
+int vtp_decode_obd_info(const uint8_t *b, size_t len,
+                        vtp_obd_probe_t *o, const char **err) {
+    if (len < VTP_OBD_PROBE_SIZE) { *err = "length"; return -1; }
+
+    o->validity        = b[VTP_OBD_PROBE_OFF_VALIDITY];
+    o->count           = b[VTP_OBD_PROBE_OFF_COUNT];
+    o->request_id      = rd32(b + VTP_OBD_PROBE_OFF_REQUEST_ID);
+    o->supported_01_20 = rd32(b + VTP_OBD_PROBE_OFF_SUPPORTED_01_20);
+    o->supported_21_40 = rd32(b + VTP_OBD_PROBE_OFF_SUPPORTED_21_40);
+    o->supported_41_60 = rd32(b + VTP_OBD_PROBE_OFF_SUPPORTED_41_60);
+    o->reserved_18     = rd16(b + VTP_OBD_PROBE_OFF_RESERVED_18);
+
+    const size_t needed = (size_t)VTP_OBD_PROBE_SIZE
+                        + (size_t)o->count * VTP_OBD_ECU_SIZE;
+    if (len < needed) { *err = "truncated-record"; return -1; }
+    if (len != needed) { *err = "length"; return -1; }
+
+    if (!vtp_obd_identifier_ok(o->request_id)) { *err = "identifier"; return -1; }
+    for (uint8_t i = 0; i < o->count; i++) {
+        const uint32_t id = rd32(b + VTP_OBD_PROBE_SIZE
+                                 + (size_t)i * VTP_OBD_ECU_SIZE
+                                 + VTP_OBD_ECU_OFF_ID);
+        if (!vtp_obd_identifier_ok(id)) { *err = "identifier"; return -1; }
+    }
+    /* No rejection for count disagreeing with `responded`, duplicate or
+     * unordered entries, or a count above eight: each is a content rule
+     * (SPEC.md 15.2) -- the device MUST NOT emit it, the encoder refuses it,
+     * and a receiver decodes it and flags it rather than repairing it. */
+    return 0;
+}
+
+void vtp_obd_ecu_at(const uint8_t *b, uint8_t index, vtp_obd_ecu_t *o) {
+    o->id = rd32(b + VTP_OBD_PROBE_SIZE
+                 + (size_t)index * VTP_OBD_ECU_SIZE + VTP_OBD_ECU_OFF_ID);
 }

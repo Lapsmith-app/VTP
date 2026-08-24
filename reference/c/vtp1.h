@@ -115,9 +115,9 @@ typedef struct {
     uint16_t gps_rate_hz, gps_max_rate_hz, can_subscription_slots;
     uint32_t can_max_frames_per_s;
     uint16_t imu_rate_hz, imu_max_rate_hz;
-    uint8_t  reserved_20;   /* was can_max_payload; SPEC.md 4.1 derives it */
+    uint8_t  obd_poll_slots;      /* SPEC.md 15.4; byte 20, assigned per 11.2 */
     uint8_t  clock_flags;
-    uint16_t reserved_22;   /* was max_notify_bytes; SPEC.md 2 removed it */
+    uint16_t obd_min_interval_ms; /* SPEC.md 15.4; bytes 22-23, ditto */
 } vtp_info_t;
 
 int vtp_decode_info(const uint8_t *buf, size_t len,
@@ -291,6 +291,46 @@ int vtp_power_source_known(uint8_t source);
 
 int vtp_decode_power_state(const uint8_t *buf, size_t len,
                            vtp_power_state_t *out, const char **err);
+
+/* ---- OBD (SPEC.md §15) ------------------------------------------------ */
+
+/* SPEC.md §15.2 -- the detail of an OBD_INFO response: what the car in front
+ * of the device answered, measured when asked. Followed by `count` obd_ecu
+ * entries.
+ *
+ * One validity bit gates four fields, because they are one measurement: a
+ * probe nothing answered has no request identifier that worked and no masks
+ * that were read. `count` is NOT gated -- it is what the payload is walked
+ * by, so it is layout -- and its agreement with `responded` is a content
+ * rule the decoder deliberately does not reject (§1.1's split). */
+typedef struct {
+    uint8_t  validity;
+    uint8_t  count;
+    uint32_t request_id;       /* bits 0-28 arbitration, b29 extended */
+    uint32_t supported_01_20;  /* bit n = PID 0x01+n, LSB first. SPEC.md 15.3 */
+    uint32_t supported_21_40;  /* bit n = PID 0x21+n */
+    uint32_t supported_41_60;  /* bit n = PID 0x41+n */
+    uint16_t reserved_18;      /* Appendix A holds it; MUST be ignored on receive */
+} vtp_obd_probe_t;
+
+typedef struct {
+    uint32_t id;               /* response identifier, same layout as request_id */
+} vtp_obd_ecu_t;
+
+static inline int vtp_obd_valid(const vtp_obd_probe_t *p, uint8_t bit) {
+    return (p->validity & bit) != 0;
+}
+
+/* Validates length arithmetic and §15.2's identifier validity for the whole
+ * response before returning. The content rules -- count agreeing with
+ * `responded`, entries strictly ascending, at most eight -- are NOT rejected
+ * here: the layout is sound, so the response decodes and the CLIENT flags
+ * the contradiction. The encoder refuses all of them (vtp1_encode.c). */
+int vtp_decode_obd_info(const uint8_t *buf, size_t len,
+                        vtp_obd_probe_t *out, const char **err);
+/* Caller supplies index < out->count; the buffer must already have been
+ * validated by vtp_decode_obd_info. */
+void vtp_obd_ecu_at(const uint8_t *buf, uint8_t index, vtp_obd_ecu_t *out);
 
 /* SPEC.md §9.5 -- two readings of the device clock, so a client can take the
  * device's own processing time out of the round trip and bound its error. */

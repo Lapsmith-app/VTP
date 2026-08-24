@@ -26,9 +26,9 @@
 #define VTP_INFO_OFF_CAN_MAX_FRAMES_PER_S 12
 #define VTP_INFO_OFF_IMU_RATE_HZ 16
 #define VTP_INFO_OFF_IMU_MAX_RATE_HZ 18
-#define VTP_INFO_OFF_RESERVED_20 20
+#define VTP_INFO_OFF_OBD_POLL_SLOTS 20
 #define VTP_INFO_OFF_CLOCK_FLAGS 21
-#define VTP_INFO_OFF_RESERVED_22 22
+#define VTP_INFO_OFF_OBD_MIN_INTERVAL_MS 22
 
 /* One complete position solution. Never split, never paired, never packed. */
 #define VTP_GPS_FIX_SIZE 74
@@ -154,6 +154,20 @@
 #define VTP_AID_COMMIT_RESULT_OFF_RESULT 1
 #define VTP_AID_COMMIT_RESULT_OFF_FIRST_MISSING 2
 
+/* The detail of an OBD_INFO response. What the car answered, measured when asked. Followed by `count` obd_ecu entries. */
+#define VTP_OBD_PROBE_SIZE 20
+#define VTP_OBD_PROBE_OFF_VALIDITY 0
+#define VTP_OBD_PROBE_OFF_COUNT 1
+#define VTP_OBD_PROBE_OFF_REQUEST_ID 2
+#define VTP_OBD_PROBE_OFF_SUPPORTED_01_20 6
+#define VTP_OBD_PROBE_OFF_SUPPORTED_21_40 10
+#define VTP_OBD_PROBE_OFF_SUPPORTED_41_60 14
+#define VTP_OBD_PROBE_OFF_RESERVED_18 18
+
+/* One ECU that answered the probe, named by the identifier it responds on. */
+#define VTP_OBD_ECU_SIZE 4
+#define VTP_OBD_ECU_OFF_ID 0
+
 typedef enum {
     VTP_FIX_TYPE_NONE = 0,
     VTP_FIX_TYPE_DEAD_RECKON = 1,
@@ -241,11 +255,13 @@ typedef enum {
 #define VTP_CAPABILITIES_MASKED_SUBSCRIPTIONS (1u << 6)
 #define VTP_CAPABILITIES_POWER (1u << 8)
 #define VTP_CAPABILITIES_GNSS_AIDING (1u << 9)
-#define VTP_CAPABILITIES_RESERVED 0xFFFFFC80u
+#define VTP_CAPABILITIES_OBD (1u << 10)
+#define VTP_CAPABILITIES_RESERVED 0xFFFFF880u
 #define VTP_CAPABILITIES_KNOWN (~(uint32_t)VTP_CAPABILITIES_RESERVED)
 
 #define VTP_CAN_FLAGS_SHEDDING (1u << 0)
-#define VTP_CAN_FLAGS_RESERVED 0xFEu
+#define VTP_CAN_FLAGS_POLLING (1u << 1)
+#define VTP_CAN_FLAGS_RESERVED 0xFCu
 #define VTP_CAN_FLAGS_KNOWN (~(uint32_t)VTP_CAN_FLAGS_RESERVED)
 
 #define VTP_IMU_FLAGS_ACCEL (1u << 0)
@@ -276,6 +292,10 @@ typedef enum {
 #define VTP_COMMIT_VALIDITY_RESERVED 0xFEu
 #define VTP_COMMIT_VALIDITY_KNOWN (~(uint32_t)VTP_COMMIT_VALIDITY_RESERVED)
 
+#define VTP_OBD_VALIDITY_RESPONDED (1u << 0)
+#define VTP_OBD_VALIDITY_RESERVED 0xFEu
+#define VTP_OBD_VALIDITY_KNOWN (~(uint32_t)VTP_OBD_VALIDITY_RESERVED)
+
 /* SPEC.md 4.1 -- a capability bit and every bit it requires. */
 typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rule_t;
 #define VTP_CAPABILITY_RULES { \
@@ -288,8 +308,9 @@ typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rul
     { (1u << 6), 0x00000002u, "masked_subscriptions" }, \
     { (1u << 8), 0x00000010u, "power" }, \
     { (1u << 9), 0x00000011u, "gnss_aiding" }, \
+    { (1u << 10), 0x00000012u, "obd" }, \
 }
-#define VTP_CAPABILITY_RULE_COUNT 9
+#define VTP_CAPABILITY_RULE_COUNT 10
 
 /* SPEC.md 4.1 -- info fields that MUST be zero when their
  * capability bit is clear. Offset and size, so one loop covers all. */
@@ -301,7 +322,9 @@ typedef struct { uint32_t bit; uint8_t offset, size; const char *field; } vtp_ca
     { (1u << 1), 12, 4, "can_max_frames_per_s" }, \
     { (1u << 2), 16, 2, "imu_rate_hz" }, \
     { (1u << 2), 18, 2, "imu_max_rate_hz" }, \
+    { (1u << 10), 20, 1, "obd_poll_slots" }, \
+    { (1u << 10), 22, 2, "obd_min_interval_ms" }, \
 }
-#define VTP_CAPACITY_RULE_COUNT 6
+#define VTP_CAPACITY_RULE_COUNT 8
 
 #endif /* VTP1_GENERATED_H */

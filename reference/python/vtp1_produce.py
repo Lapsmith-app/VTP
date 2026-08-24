@@ -54,6 +54,8 @@ def produce(record, data):
         return enc.encode_aid_begin_result(data)
     if record == "aid_commit_result":
         return enc.encode_aid_commit_result(data)
+    if record == "obd_info":
+        return enc.encode_obd_info(data["probe"], data["ecus"])
     raise LookupError(record)
 
 

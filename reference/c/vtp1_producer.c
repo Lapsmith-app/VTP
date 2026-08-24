@@ -401,9 +401,9 @@ static void do_info(const jctx *c, const jv *in) {
     v.can_max_frames_per_s   = (uint32_t)jint(c, in, "can_max_frames_per_s");
     v.imu_rate_hz            = (uint16_t)jint(c, in, "imu_rate_hz");
     v.imu_max_rate_hz        = (uint16_t)jint(c, in, "imu_max_rate_hz");
-    v.reserved_20            = (uint8_t) jint(c, in, "reserved_20");
+    v.obd_poll_slots         = (uint8_t) jint(c, in, "obd_poll_slots");
     v.clock_flags            = (uint8_t) jint(c, in, "clock_flags");
-    v.reserved_22            = (uint16_t)jint(c, in, "reserved_22");
+    v.obd_min_interval_ms    = (uint16_t)jint(c, in, "obd_min_interval_ms");
     encoded(vtp_encode_info(&v, out, sizeof out), out);
 }
 
@@ -518,6 +518,33 @@ static void do_aid_commit_result(const jctx *c, const jv *in) {
     encoded(vtp_encode_aid_commit_result(&r, out, sizeof out), out);
 }
 
+static void do_obd_info(const jctx *c, const jv *in) {
+    const jv *pr = jget(c, in, "probe");
+    const jv *es = jget(c, in, "ecus");
+    if (!pr) { refuse("no `probe` object"); return; }
+    int n = jlen(c, es);
+    if (n < 0) { refuse("no `ecus` array"); return; }
+    if (n > MAX_ENTRIES) { refuse("too many ecus for this harness"); return; }
+
+    vtp_obd_probe_t probe;
+    memset(&probe, 0, sizeof probe);
+    probe.validity        = (uint8_t) jint(c, pr, "validity");
+    probe.count           = (uint8_t) jint(c, pr, "count");
+    probe.request_id      = (uint32_t)jint(c, pr, "request_id");
+    probe.supported_01_20 = (uint32_t)jint(c, pr, "supported_01_20");
+    probe.supported_21_40 = (uint32_t)jint(c, pr, "supported_21_40");
+    probe.supported_41_60 = (uint32_t)jint(c, pr, "supported_41_60");
+    if ((int)probe.count != n) { refuse("obd_probe.count disagrees with `ecus`"); return; }
+
+    static vtp_obd_ecu_t ecus[MAX_ENTRIES];
+    memset(ecus, 0, sizeof ecus);
+    for (int i = 0; i < n; i++) {
+        const jv *e = jat(c, es, i);
+        ecus[i].id = (uint32_t)jint(c, e, "id");
+    }
+    encoded(vtp_encode_obd_info(&probe, n ? ecus : NULL, out, sizeof out), out);
+}
+
 /* ---- main ------------------------------------------------------------- */
 
 int main(void) {
@@ -555,6 +582,7 @@ int main(void) {
         else if (!strcmp(record, "gnss_aid_caps"))    do_gnss_aid_caps(&ctx, in);
         else if (!strcmp(record, "aid_begin_result")) do_aid_begin_result(&ctx, in);
         else if (!strcmp(record, "aid_commit_result")) do_aid_commit_result(&ctx, in);
+        else if (!strcmp(record, "obd_info"))         do_obd_info(&ctx, in);
         else printf("{\"ok\":false,\"reason\":\"harness: no encoder for record\"}\n");
         fflush(stdout);
     }

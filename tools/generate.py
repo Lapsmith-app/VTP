@@ -219,8 +219,8 @@ def _validate_control(schema):
             problems.append(f"{where}: params {spec!r} has surrounding space")
         if not spec:
             continue
-        for part in spec.split(","):
-            part = part.strip()
+        parts = [part.strip() for part in spec.split(",")]
+        for i, part in enumerate(parts):
             if part.count(":") != 1:
                 problems.append(
                     f"{where}: parameter {part!r} is not `name:type`. A "
@@ -230,6 +230,19 @@ def _validate_control(schema):
             if not pname.isidentifier():
                 problems.append(f"{where}: parameter name {pname!r} is not an "
                                 f"identifier")
+            # `name:type*` is a trailing counted list: exactly `count` values
+            # of `type` follow the fixed parameters. Grammar, not prose,
+            # because refdec.py derives request sizes from this string and a
+            # shape it cannot parse is a harness crash mid-run.
+            if ptype.endswith("*"):
+                ptype = ptype[:-1]
+                if i != len(parts) - 1:
+                    problems.append(f"{where}: variadic parameter {pname!r} "
+                                    f"must be the last parameter")
+                if i == 0 or parts[i - 1] != "count:u8":
+                    problems.append(
+                        f"{where}: variadic parameter {pname!r} must follow "
+                        f"`count:u8`, which carries its length")
             if ptype not in PARAM_TYPES:
                 problems.append(f"{where}: parameter {pname!r} has unknown "
                                 f"type {ptype!r}")
@@ -940,6 +953,16 @@ def _reserved_case(schema, record, field, value):
         clean = dict(format=1, max_bytes=65536, held_until=0)
         return (dict(clean, **{field: value}),
                 encode(schema, "gnss_aid_caps", dict(clean, **{field: value})))
+    if record == "obd_probe":
+        # `responded` set requires at least one entry (SPEC.md 15.2), so the
+        # reserved-bit case still has to be a probe that could exist.
+        clean = dict(count=1, request_id=0x7DF,
+                     supported_01_20=0x981C1005, supported_21_40=0x8800E001,
+                     supported_41_60=0x0080137E)
+        ecu = dict(id=0x7E8)
+        return ({"probe": dict(clean, **{field: value}), "ecus": [ecu]},
+                encode(schema, "obd_probe", dict(clean, **{field: value}))
+                + encode(schema, "obd_ecu", ecu))
     if record == "aid_commit_result":
         # `incomplete`, because the reserved-bit case sets every ASSIGNED bit
         # of the mask alongside the reserved one -- and SPEC.md 14.4 sets
@@ -965,7 +988,7 @@ LEGAL_ASSIGNED = {
 
 RESERVED_CASE_RECORD = {
     "can_header": "can_batch", "imu_header": "imu_batch",
-    "monitor_value": "monitor_update",
+    "monitor_value": "monitor_update", "obd_probe": "obd_info",
 }
 
 
@@ -1449,6 +1472,22 @@ def vectors(schema):
                  + can_rec(0, 0x1A0, bytes.fromhex("00"))).hex()},
     ]
 
+    files["can-batch.json"].append(can_batch(
+        "polling-flag-set",
+        "flags bit 1 (`polling`): this device's OBD poll set is non-empty, "
+        "so it is transmitting diagnostic requests on the bus (SPEC.md "
+        "15.6). The frame is the kind of thing the flag travels beside: a "
+        "Mode 01 response on 0x7E8, DLC 8 with ISO 15765-4 padding. A "
+        "decoder MUST surface the flag -- it is how anyone watching the "
+        "stream can tell a transmitting dongle from a pure sniffer.",
+        dict(seq=12, dropped=0, t_base=21_000_000, count=1, flags=0x02),
+        [can_rec(0, 0x7E8, bytes.fromhex("04410c1af8000000"))],
+        [{"dt": 0, "id": 0x7E8, "extended": False, "fd": False, "rtr": False,
+          "len": 8, "payload": "04410c1af8000000", "t_device_us": 21_000_000}],
+        note="The payload decodes as 1726 rpm, and nothing in this protocol "
+             "knows that: the device carries the transaction and the "
+             "arithmetic stays in the client (SPEC.md 15.5)."))
+
     # ---- IMU -------------------------------------------------------------
     def imu_batch(name, desc, hdr, samples, *, canonical=True, **kw):
         # SPEC.md 7: a sample group whose presence flag is clear MUST be zero on
@@ -1705,30 +1744,46 @@ def vectors(schema):
              "figures and SHOULD report them.",
              refused_by="info-capacity-without-capability",
              no_roundtrip=True),
-        {"name": "reserved-bytes-nonzero",
-         "desc": "Bytes 20 and 22-23 carry values assigned by a future minor. "
-                 "Byte 20 held can_max_payload until SPEC.md 4.1 derived the "
-                 "CAN payload ceiling from the capability bits; bytes 22-23 "
-                 "held max_notify_bytes until it was removed as a restatement "
-                 "of the negotiated ATT payload. Both halves of SPEC.md 2 "
-                 "apply: a decoder MUST ignore them, and an encoder MUST "
-                 "normalise them to zero.",
-         "record": "info",
-         "hex": encode(schema, "info",
-                       dict(protocol_major=1, protocol_minor=0,
-                            capabilities=C["gps"], gps_rate_hz=10,
-                            gps_max_rate_hz=10, reserved_20=0x40,
-                            reserved_22=0xBEEF)).hex(),
-         "expect": {f["name"]: dict(protocol_major=1, protocol_minor=0,
-                                    capabilities=C["gps"], gps_rate_hz=10,
-                                    gps_max_rate_hz=10, reserved_20=0x40,
-                                    reserved_22=0xBEEF).get(f["name"], 0)
-                    for f in schema["records"]["info"]["fields"]},
-         "canonical": False,
-         "expect_roundtrip_hex": encode(schema, "info",
-                       dict(protocol_major=1, protocol_minor=0,
-                            capabilities=C["gps"], gps_rate_hz=10,
-                            gps_max_rate_hz=10)).hex()},
+        # SPEC.md 15 -- the OBD role in Info. Bytes 20 and 22-23 were
+        # reserved (before that, can_max_payload and max_notify_bytes); the
+        # `reserved-bytes-nonzero` vector that covered them retired with
+        # their assignment, because Info now has no reserved bytes left to
+        # test. §11.2 is why the assignment is safe: older firmware writes
+        # both as zero, and zero is exactly what "no OBD" means.
+        case(schema, "info", "obd-dongle",
+             dict(protocol_major=1, protocol_minor=0,
+                  capabilities=(C["gps"] | C["can"] | C["control"]
+                                | C["masked_subscriptions"] | C["obd"]),
+                  gps_rate_hz=25, gps_max_rate_hz=25, can_subscription_slots=32,
+                  can_max_frames_per_s=4000, obd_poll_slots=16,
+                  obd_min_interval_ms=20, clock_flags=0b01),
+             "An OBD-port dongle: GPS, CAN and the OBD role. Bit 10 is the "
+             "declaration that this device TRANSMITS on the vehicle bus "
+             "(SPEC.md 15), and the two capacities say how much a client may "
+             "ask of it: at most 16 PIDs in a poll set, no interval below "
+             "20 ms."),
+        case(schema, "info", "obd-without-can",
+             dict(protocol_major=1, protocol_minor=0,
+                  capabilities=C["control"] | C["obd"],
+                  obd_poll_slots=16, obd_min_interval_ms=20),
+             "SPEC.md 4.1 -- `obd` requires `can`: poll responses are "
+             "delivered as ordinary CAN frames, so an OBD device without the "
+             "CAN role transmits questions whose answers no client can "
+             "receive. Decodes; the OBD role MUST NOT be used.",
+             refused_by="info-obd-without-can",
+             no_roundtrip=True),
+        case(schema, "info", "obd-capacity-without-capability",
+             dict(protocol_major=1, protocol_minor=0, capabilities=C["gps"],
+                  gps_rate_hz=10, gps_max_rate_hz=10,
+                  obd_poll_slots=16, obd_min_interval_ms=20),
+             "SPEC.md 4.1 -- both OBD capacities MUST be zero while bit 10 "
+             "is clear. Sharper here than for any other role: a non-zero "
+             "poll capacity behind a cleared bit is a device advertising "
+             "that it transmits on a vehicle bus while declaring that it "
+             "does not. Decodes; a client MUST NOT use either figure and "
+             "SHOULD report the contradiction.",
+             refused_by="info-obd-capacity-without-capability",
+             no_roundtrip=True),
         {"name": "short-payload",
          "desc": "23 bytes. Info is fixed-size; a truncated read MUST be rejected.",
          "record": "info",
@@ -2228,6 +2283,224 @@ def vectors(schema):
          "must_reject": "length"},
     ]
 
+    # ---- OBD (SPEC.md 15) ------------------------------------------------
+    OV = {b["name"]: 1 << b["bit"]
+          for b in schema["bitmasks"]["obd_validity"]["bits"]}
+    EXT = 1 << 29
+
+    def pid_mask(base, pids):
+        """SPEC.md 15.3 -- bit n = PID base+n, LSB first.
+
+        Computed rather than written as literals: J1979's own PID 0x00
+        response puts PID 0x01 in the MSB of the first data byte, and
+        re-ordering that by hand is exactly the mistake 15.3 pins.
+        """
+        mask = 0
+        for pid in pids:
+            assert base <= pid < base + 32, f"PID 0x{pid:02X} outside window"
+            mask |= 1 << (pid - base)
+        return mask
+
+    def obd_info(name, desc, probe, ecus, *, canonical=True, no_roundtrip=False,
+                 refused_by=None, **kw):
+        # The composite twin of case(): obd_probe carries the validity mask,
+        # so the gating, absence and normalisation rules all apply to it, and
+        # the entries ride behind exactly as monitor channels do.
+        if no_roundtrip:
+            if not refused_by:
+                sys.exit(f"obd case {name}: no_roundtrip without refused_by")
+            NO_ROUNDTRIP_PAIRS.append((name, refused_by))
+        elif refused_by:
+            sys.exit(f"obd case {name}: refused_by without no_roundtrip")
+        wire = _normalise(schema, "obd_probe", probe) if canonical else probe
+        raw = encode(schema, "obd_probe", wire) + b"".join(
+            encode(schema, "obd_ecu", e) for e in ecus)
+        c = {"name": name, "desc": desc, "record": "obd_info", "hex": raw.hex(),
+             "expect": {"probe": {f["name"]: wire.get(f["name"], 0)
+                                  for f in schema["records"]["obd_probe"]["fields"]},
+                        "ecus": [{"id": e.get("id", 0)} for e in ecus]},
+             "expect_absent": _gated_fields(schema, "obd_probe", probe)}
+        if no_roundtrip:
+            c["no_roundtrip"] = True
+        if not canonical:
+            c["canonical"] = False
+            c["expect_roundtrip_hex"] = (
+                encode(schema, "obd_probe", _normalise(schema, "obd_probe", probe))
+                + b"".join(encode(schema, "obd_ecu", e) for e in ecus)).hex()
+        c.update(kw)
+        return c
+
+    # A petrol car's engine ECU union, computed from the PID list. Distinct
+    # from the other masks and from every identifier, so no two u32 fields of
+    # obd_probe ever hold equal values across the corpus -- the field-pair
+    # rule tools/check_corpus.py holds every record to.
+    U1 = pid_mask(0x01, [0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C,
+                         0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x13, 0x15, 0x1C,
+                         0x1F, 0x20])
+    U2 = pid_mask(0x21, [0x21, 0x2E, 0x2F, 0x30, 0x31, 0x33, 0x3C, 0x40])
+    U3 = pid_mask(0x41, [0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x49, 0x4C,
+                         0x51, 0x56])
+    # A different car for the 29-bit case, so the two probes share no mask.
+    W1 = pid_mask(0x01, [0x01, 0x04, 0x05, 0x0C, 0x0D, 0x11, 0x1C, 0x20])
+    W2 = pid_mask(0x21, [0x2F, 0x31, 0x40])
+    W3 = pid_mask(0x41, [0x46, 0x51])
+
+    nominal_probe = dict(validity=OV["responded"], count=2, request_id=0x7DF,
+                         supported_01_20=U1, supported_21_40=U2,
+                         supported_41_60=U3)
+
+    files["obd.json"] = [
+        obd_info("eleven-bit-two-ecus",
+                 "The ordinary answer on a post-2008 petrol car: 11-bit "
+                 "functional addressing on 0x7DF, the engine and transmission "
+                 "ECUs answering on 0x7E8 and 0x7E9, and the union of their "
+                 "supported-PID masks. The masks are what a client checks a "
+                 "poll set against BEFORE asking (SPEC.md 15.3).",
+                 nominal_probe,
+                 [dict(id=0x7E8), dict(id=0x7E9)],
+                 note="request_id drops straight into CAN_SUBSCRIBE, and so "
+                      "does each entry id: the identifier layout is "
+                      "can_record's, so 11-versus-29-bit is derived from bit "
+                      "29 rather than stated in a second field."),
+        obd_info("twenty-nine-bit-addressing",
+                 "A car that only answers 29-bit functional addressing "
+                 "(SPEC.md 15.2): requests on 18DB33F1, three ECUs answering "
+                 "on ascending 18DAF1xx identifiers, every id with bit 29 "
+                 "set. A decoder reading these as 11-bit identifiers "
+                 "truncates them into different, valid-looking ones.",
+                 dict(validity=OV["responded"], count=3,
+                      request_id=0x18DB33F1 | EXT,
+                      supported_01_20=W1, supported_21_40=W2,
+                      supported_41_60=W3),
+                 [dict(id=0x18DAF110 | EXT), dict(id=0x18DAF118 | EXT),
+                  dict(id=0x18DAF128 | EXT)]),
+        obd_info("nothing-responded",
+                 "The probe transmitted and no OBD-II ECU answered -- a "
+                 "gatewayed port, an ignition-off bus, a race car with no "
+                 "J1979 stack. `responded` is clear, count is 0, and a "
+                 "decoder MUST report every gated field absent rather than "
+                 "an empty mask on a silent car: 'no PIDs supported' and "
+                 "'nothing answered' are different findings (SPEC.md 15.2).",
+                 dict(validity=0, count=0), []),
+        obd_info("stale-values-behind-cleared-bits",
+                 "A non-conforming device that clears `responded` and leaves "
+                 "the previous car's probe in the bytes. A decoder MUST "
+                 "report all four gated fields absent on the strength of the "
+                 "bit alone, and MUST NOT read a request identifier out of "
+                 "them.",
+                 dict(nominal_probe, validity=0, count=0), [],
+                 canonical=False,
+                 note="Not byte-canonical: the round-trip asserts a "
+                      "conforming encoder normalises these bytes to zero. "
+                      "This is the only coverage the four obd_probe encoder "
+                      "gates get, so one vector clears the bit behind all of "
+                      "them at once."),
+        obd_info("reserved-bits-and-bytes",
+                 "obd_validity bit 7 and both bytes of reserved_18 carry "
+                 "values a future minor assigned. Both halves of SPEC.md 2: "
+                 "a decoder MUST ignore them and decode the known fields "
+                 "normally, and a VTP/1.0 encoder MUST normalise them away.",
+                 dict(nominal_probe, validity=OV["responded"] | (1 << 7),
+                      count=1, reserved_18=0xBEEF),
+                 [dict(id=0x7E8)],
+                 canonical=False),
+        obd_info("responded-with-no-ecus",
+                 "`responded` set with count 0: the device says something "
+                 "answered and lists nothing that did. A device-side "
+                 "violation of SPEC.md 15.2; the layout is sound, so a "
+                 "receiver MUST decode it -- and SHOULD flag the "
+                 "contradiction rather than guess which half was meant.",
+                 dict(nominal_probe, count=0), [],
+                 no_roundtrip=True, refused_by="obd-responded-with-no-ecus",
+                 note="No round-trip: the decode is required and the "
+                      "re-encode is forbidden, the same split as every "
+                      "content rule."),
+        obd_info("ecu-behind-a-silent-probe",
+                 "count 1 with `responded` clear: an ECU listed on a probe "
+                 "that says nothing answered. The other half of the "
+                 "count-agrees rule (SPEC.md 15.2); decodes, and the entry "
+                 "MUST NOT be treated as an ECU that answered.",
+                 dict(validity=0, count=1), [dict(id=0x7E8)],
+                 no_roundtrip=True, refused_by="obd-ecu-behind-a-silent-probe"),
+        obd_info("duplicate-ecu-id",
+                 "0x7E8 listed twice. SPEC.md 15.2 makes the entry list "
+                 "strictly ascending, so one ECU cannot appear to be two; "
+                 "decodes, SHOULD be flagged as a device defect.",
+                 dict(nominal_probe),
+                 [dict(id=0x7E8), dict(id=0x7E8)],
+                 no_roundtrip=True, refused_by="obd-duplicate-ecu-id",
+                 note="Decoded rather than rejected, where a duplicate "
+                      "Monitor slot rejects (SPEC.md 13.3): a slot is an "
+                      "ADDRESS whose ambiguity breaks every later update, "
+                      "while an entry here is a report -- redundant, not "
+                      "ambiguous. The malformed/content split, drawn the "
+                      "same way it is everywhere."),
+        obd_info("ecu-ids-not-ascending",
+                 "0x7E9 before 0x7E8. Strictly ascending is what makes the "
+                 "entry list canonical -- two conforming devices seeing one "
+                 "car produce identical bytes (SPEC.md 15.2). Decodes; "
+                 "SHOULD be flagged.",
+                 dict(nominal_probe),
+                 [dict(id=0x7E9), dict(id=0x7E8)],
+                 no_roundtrip=True, refused_by="obd-ecu-ids-not-ascending"),
+        obd_info("nine-ecus",
+                 "Nine entries. ISO 15765-4 caps the responders to a "
+                 "functional request at eight, so a ninth is a claim about a "
+                 "bus that cannot happen (SPEC.md 15.2). The layout is sound "
+                 "-- the length arithmetic agrees with count -- so it "
+                 "decodes, and SHOULD be flagged.",
+                 dict(nominal_probe, count=9),
+                 [dict(id=0x7E8 + i) for i in range(9)],
+                 no_roundtrip=True, refused_by="obd-nine-ecus"),
+        obd_info("request-id-flag-bits",
+                 "request_id with bit 31 set. Bits 30-31 say how a frame "
+                 "travelled, and this field names an identifier, not a "
+                 "frame: SPEC.md 15.2 holds it to §6.4's identifier "
+                 "validity with bits 30-31 zero, and a violation MUST be "
+                 "rejected whole -- using the id means masking it into a "
+                 "different, valid-looking one.",
+                 dict(nominal_probe, count=1, request_id=0x7DF | (1 << 31)),
+                 [dict(id=0x7E8)],
+                 must_reject="identifier"),
+        obd_info("request-id-above-eleven-bits",
+                 "A standard-format request_id (bit 29 clear) with bit 15 "
+                 "set. An eleven-bit identifier that does not fit in eleven "
+                 "bits is malformed (§6.4), and MUST be rejected for §6.4's "
+                 "reason exactly: truncating it yields a different "
+                 "identifier that looks entirely valid.",
+                 dict(nominal_probe, count=1, request_id=0x87DF),
+                 [dict(id=0x7E8)],
+                 must_reject="identifier"),
+        obd_info("ecu-id-flag-bits",
+                 "An entry id with bit 30 set. The same identifier-validity "
+                 "rule as request_id, on the field whose whole use is to "
+                 "become a CAN_SUBSCRIBE id. MUST be rejected whole.",
+                 dict(nominal_probe, count=1),
+                 [dict(id=0x7E8 | (1 << 30))],
+                 must_reject="identifier"),
+        {"name": "short-payload",
+         "desc": "19 bytes: shorter than the probe record. MUST be rejected.",
+         "record": "obd_info",
+         "hex": encode(schema, "obd_probe", dict(validity=0))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "count-exceeds-payload",
+         "desc": "The probe claims two entries, one is present. MUST be "
+                 "rejected: a decoder that trusts count without checking the "
+                 "buffer reads an ECU identifier out of adjacent memory.",
+         "record": "obd_info",
+         "hex": (encode(schema, "obd_probe", dict(nominal_probe))
+                 + encode(schema, "obd_ecu", dict(id=0x7E8))).hex(),
+         "must_reject": "truncated-record"},
+        {"name": "long-payload",
+         "desc": "One entry declared, one present, plus a trailing byte. "
+                 "MUST be rejected rather than ignored.",
+         "record": "obd_info",
+         "hex": (encode(schema, "obd_probe", dict(nominal_probe, count=1))
+                 + encode(schema, "obd_ecu", dict(id=0x7E8))
+                 + b"\x00").hex(),
+         "must_reject": "length"},
+    ]
+
     # ---- Control response envelope ---------------------------------------
     def resp(opcode, tag, status, detail=b""):
         return bytes([opcode, tag, status]) + detail
@@ -2603,6 +2876,125 @@ def vectors(schema):
          "input": dict(protocol_major=1, protocol_minor=0,
                        capabilities=C["gps"], gps_rate_hz=10,
                        gps_max_rate_hz=10, can_max_frames_per_s=4000)},
+        {"name": "info-obd-without-can",
+         "record": "info", "must_refuse": True, "vector": "obd-without-can",
+         "desc": "SPEC.md 4.1 -- `obd` requires `can`: poll responses are "
+                 "delivered as ordinary CAN frames (SPEC.md 15.5), so an OBD "
+                 "device without the CAN role transmits questions whose "
+                 "answers no client can receive.",
+         "input": dict(protocol_major=1, protocol_minor=0,
+                       capabilities=C["control"] | C["obd"],
+                       obd_poll_slots=16, obd_min_interval_ms=20)},
+        {"name": "info-obd-capacity-without-capability",
+         "record": "info", "must_refuse": True,
+         "vector": "obd-capacity-without-capability",
+         "desc": "SPEC.md 4.1 -- both OBD capacities are zero while bit 10 "
+                 "is clear. Sharper than any other capacity rule: a poll "
+                 "capacity behind a cleared bit advertises transmitting on a "
+                 "vehicle bus while declaring not to.",
+         "input": dict(protocol_major=1, protocol_minor=0,
+                       capabilities=C["gps"], gps_rate_hz=10,
+                       gps_max_rate_hz=10, obd_poll_slots=16,
+                       obd_min_interval_ms=20)},
+        # SPEC.md 15.2, in the producer direction. The five content rules
+        # of the probe record: each is the device-side half of a no_roundtrip
+        # vector above, held together by the pairing gate.
+        {"name": "obd-responded-with-no-ecus",
+         "record": "obd_info", "must_refuse": True,
+         "vector": "responded-with-no-ecus",
+         "desc": "SPEC.md 15.2 -- `responded` set with count 0 says "
+                 "something answered and lists nothing that did.",
+         "input": {"probe": dict(validity=1, count=0, request_id=0x7DF,
+                                 supported_01_20=U1, supported_21_40=U2,
+                                 supported_41_60=U3),
+                   "ecus": []}},
+        {"name": "obd-ecu-behind-a-silent-probe",
+         "record": "obd_info", "must_refuse": True,
+         "vector": "ecu-behind-a-silent-probe",
+         "desc": "SPEC.md 15.2 -- an ECU listed on a probe that says "
+                 "nothing answered.",
+         "input": {"probe": dict(validity=0, count=1),
+                   "ecus": [dict(id=0x7E8)]}},
+        {"name": "obd-duplicate-ecu-id",
+         "record": "obd_info", "must_refuse": True,
+         "vector": "duplicate-ecu-id",
+         "desc": "SPEC.md 15.2 -- the entry list is strictly ascending, so "
+                 "one ECU cannot appear to be two.",
+         "input": {"probe": dict(validity=1, count=2, request_id=0x7DF,
+                                 supported_01_20=U1, supported_21_40=U2,
+                                 supported_41_60=U3),
+                   "ecus": [dict(id=0x7E8), dict(id=0x7E8)]}},
+        {"name": "obd-ecu-ids-not-ascending",
+         "record": "obd_info", "must_refuse": True,
+         "vector": "ecu-ids-not-ascending",
+         "desc": "SPEC.md 15.2 -- ascending order is what makes the entry "
+                 "list canonical; an encoder reordering silently would emit "
+                 "bytes its caller did not describe, so it refuses instead.",
+         "input": {"probe": dict(validity=1, count=2, request_id=0x7DF,
+                                 supported_01_20=U1, supported_21_40=U2,
+                                 supported_41_60=U3),
+                   "ecus": [dict(id=0x7E9), dict(id=0x7E8)]}},
+        {"name": "obd-nine-ecus",
+         "record": "obd_info", "must_refuse": True, "vector": "nine-ecus",
+         "desc": "SPEC.md 15.2 -- ISO 15765-4 caps the responders to a "
+                 "functional request at eight.",
+         "input": {"probe": dict(validity=1, count=9, request_id=0x7DF,
+                                 supported_01_20=U1, supported_21_40=U2,
+                                 supported_41_60=U3),
+                   "ecus": [dict(id=0x7E8 + i) for i in range(9)]}},
+        # Identifier validity (SPEC.md 15.2 via 6.4): structural, because the
+        # decoder rejects the same bytes.
+        {"name": "obd-request-id-flag-bits",
+         "record": "obd_info", "must_refuse": True, "structural": True,
+         "desc": "SPEC.md 15.2 -- request_id bits 30-31 MUST be zero; the "
+                 "field names an identifier, not how a frame travelled.",
+         "input": {"probe": dict(validity=1, count=1,
+                                 request_id=0x7DF | (1 << 31),
+                                 supported_01_20=U1, supported_21_40=U2,
+                                 supported_41_60=U3),
+                   "ecus": [dict(id=0x7E8)]}},
+        {"name": "obd-request-id-above-arbitration",
+         "record": "obd_info", "must_refuse": True, "structural": True,
+         "desc": "SPEC.md 15.2 via 6.4 -- a standard-format request_id with "
+                 "bits 11-28 set. Refused, not masked: masking produces a "
+                 "different identifier that looks entirely valid.",
+         "input": {"probe": dict(validity=1, count=1, request_id=0x87DF,
+                                 supported_01_20=U1, supported_21_40=U2,
+                                 supported_41_60=U3),
+                   "ecus": [dict(id=0x7E8)]}},
+        {"name": "obd-ecu-id-flag-bits",
+         "record": "obd_info", "must_refuse": True, "structural": True,
+         "desc": "SPEC.md 15.2 -- an entry id with bit 30 set, on the field "
+                 "whose whole use is to become a CAN_SUBSCRIBE id.",
+         "input": {"probe": dict(validity=1, count=1, request_id=0x7DF,
+                                 supported_01_20=U1, supported_21_40=U2,
+                                 supported_41_60=U3),
+                   "ecus": [dict(id=0x7E8 | (1 << 30))]}},
+        # ...and what MUST encode, with the bytes pinned from the schema's
+        # own offsets.
+        {"name": "obd-well-formed-probe",
+         "record": "obd_info", "must_refuse": False,
+         "desc": "The canonical two-ECU probe. An encoder refusing "
+                 "everything cannot pass.",
+         "input": {"probe": dict(validity=1, count=2, request_id=0x7DF,
+                                 supported_01_20=U1, supported_21_40=U2,
+                                 supported_41_60=U3),
+                   "ecus": [dict(id=0x7E8), dict(id=0x7E9)]},
+         "expect_hex": (
+             encode(schema, "obd_probe",
+                    dict(validity=1, count=2, request_id=0x7DF,
+                         supported_01_20=U1, supported_21_40=U2,
+                         supported_41_60=U3, reserved_18=0))
+             + encode(schema, "obd_ecu", dict(id=0x7E8))
+             + encode(schema, "obd_ecu", dict(id=0x7E9))).hex()},
+        {"name": "obd-nothing-responded",
+         "record": "obd_info", "must_refuse": False,
+         "desc": "SPEC.md 15.2 -- the silent-car answer is a legal record: "
+                 "`responded` clear, count 0, every gated field zero. An "
+                 "encoder that refuses it leaves a device no way to report "
+                 "a gatewayed port.",
+         "input": {"probe": dict(validity=0, count=0), "ecus": []},
+         "expect_hex": encode(schema, "obd_probe", dict(validity=0)).hex()},
         *reserved_bit_cases(schema),
         {"name": "control-detail-on-ok",
          "record": "control_response", "must_refuse": False,

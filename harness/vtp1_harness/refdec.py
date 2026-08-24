@@ -134,11 +134,35 @@ OPCODE_CAPABILITY = {op["name"]: op.get("capability")
 #: could go stale, in a repository whose whole argument is that such tables do.
 _PARAM_WIDTH = {"u8": 1, "i8": 1, "u16": 2, "i16": 2,
                 "u32": 4, "i32": 4, "u64": 8, "i64": 8}
+
+
+def _param_size(spec):
+    """FIXED parameter bytes of one opcode. A trailing `type*` list (SPEC.md
+    §15.4's `pids:u8*`) contributes nothing here: its length is carried by
+    the `count:u8` in front of it, so the fixed part is the request every
+    well-formed variadic write begins with."""
+    total = 0
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        ptype = part.split(":")[1].strip()
+        if ptype.endswith("*"):
+            continue
+        total += _PARAM_WIDTH[ptype]
+    return total
+
+
 OPCODE_PARAM_SIZE = {
-    op["name"]: sum(_PARAM_WIDTH[part.split(":")[1].strip()]
-                    for part in op.get("params", "").split(",") if part.strip())
+    op["name"]: _param_size(op.get("params", ""))
     for op in SCHEMA["control"]["opcodes"]
 }
+#: Opcodes whose parameter list ends in a counted trailing array. For these,
+#: OPCODE_PARAM_SIZE is a minimum, and the true length is that plus what the
+#: request's own count field declares.
+OPCODE_VARIADIC = frozenset(
+    op["name"] for op in SCHEMA["control"]["opcodes"]
+    if op.get("params", "").rstrip().endswith("*"))
 STATUS = enum_values("status")
 STATUS_VALUE = {name: value for value, name in STATUS.items()}
 CAPABILITIES = bits("capabilities")

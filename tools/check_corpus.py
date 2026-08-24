@@ -52,7 +52,8 @@ PACK = {"u8": "B", "i8": "b", "u16": "H", "i16": "h",
 COMPOSITE = {"can_batch": ("can_header", "can_record"),
              "imu_batch": ("imu_header", "imu_sample"),
              "monitor_list": ("monitor_declaration", "monitor_channel"),
-             "monitor_update": ("monitor_header", "monitor_value")}
+             "monitor_update": ("monitor_header", "monitor_value"),
+             "obd_info": ("obd_probe", "obd_ecu")}
 STANDALONE = ("gps_fix", "info", "control_response", "time_sync",
               "power_state", "gnss_aid_caps", "aid_begin_result",
               "aid_commit_result")

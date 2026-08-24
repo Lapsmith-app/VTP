@@ -291,7 +291,6 @@ FAULTS = {
     "implication_broken": "SPEC.md §4.1 — a capability bit without the bit it requires",
     "opcode_capability_late": "SPEC.md §9 — an unowned opcode answered bad_params, not unsupported_opcode",
     "rate_not_applied": "SPEC.md §9.6 — a rate answered ok and never applied",
-    "info_reserved_nonzero": "SPEC.md §4 — a reserved byte of Info is not zero",
     # Everything below is a defect a device could be shipping today and this
     # harness would have said nothing about, because no seeded fault ever made
     # the check that covers it fail. See harness/selftest.py: the reverse
@@ -333,6 +332,18 @@ FAULTS = {
     "aid_begin_keeps_transfer": "SPEC.md §14.3 — a BEGIN over an open transfer is answered ok and the old transfer kept",
     "aid_token_reused": "SPEC.md §14.3 — a superseding BEGIN reuses the discarded transfer's token",
     "aid_token_ignored": "SPEC.md §14.3 — a chunk naming the wrong token is accepted instead of ignored",
+    # SPEC.md §15. The OBD role transmits on the vehicle bus, so most of what
+    # is worth seeding is a device that transmits when it said it would not,
+    # or misreports what the car said when it did.
+    "obd_probe_unsupported": "SPEC.md §15.2 — OBD_INFO refused by a device that declares the capability owning it",
+    "obd_responded_without_ecus": "SPEC.md §15.2 — `responded` set with no ECU listed",
+    "obd_entries_descending": "SPEC.md §15.2 — the ECU list is not strictly ascending",
+    "obd_stale_behind_bit": "SPEC.md §15.2 — a previous car's probe left in the bytes behind a cleared `responded` bit",
+    "obd_reserved_nonzero": "SPEC.md §15.2 — the reserved bytes of obd_probe are not zero",
+    "obd_capacity_zero": "SPEC.md §15 — the `obd` bit declared with obd_poll_slots 0, a poll set nothing fits",
+    "obd_accepts_unsupported_pid": "SPEC.md §15.4 — a PID the probe's union does not claim is polled anyway",
+    "obd_ignores_stop": "SPEC.md §15.7 — the empty poll set is answered ok and the transmitter keeps going",
+    "obd_flag_never_set": "SPEC.md §15.6 — the poll set is non-empty and no batch carries the polling flag",
 }
 
 
@@ -562,8 +573,13 @@ class LoopbackTransport(Transport):
             if {"caps_reserved_bits", "implication_broken"} & self.faults:
                 struct.pack_into("<I", info, refdec.offset("info", "capabilities"),
                                  self._capabilities())
-            if "info_reserved_nonzero" in self.faults:
-                info[refdec.offset("info", "reserved_20")] = 1
+            if "obd_capacity_zero" in self.faults:
+                # SPEC.md §15 -- the bit is set and the slot count is zero: a
+                # poll set nothing fits in, on a role whose whole claim is
+                # about what may be asked of it. The generic capacity fault
+                # zeroes a capacity's LAST field, so this one takes the
+                # first, and the two checks stay separately breakable.
+                info[refdec.offset("info", "obd_poll_slots")] = 0
             if "info_major_wrong" in self.faults:
                 info[refdec.offset("info", "protocol_major")] = \
                     refdec.PROTOCOL_MAJOR + 1
@@ -670,6 +686,14 @@ class LoopbackTransport(Transport):
         if "params_ignored" in self.faults:
             request = self._parse_leniently(request)
         request = self._indulge_aiding(request)
+        if "obd_accepts_unsupported_pid" in self.faults:
+            request = self._indulge_obd(request)
+        # SPEC.md §15.7 -- a device that answers ok to the stop and keeps
+        # transmitting. The poll set is captured before dispatch and put back
+        # after it, so the defect is the transmitter's state, not a cosmetic
+        # rewrite of the reply.
+        obd_poll_before = (list(getattr(self.device, "_obd_poll", ())),
+                           getattr(self.device, "_obd_interval_ms", 0))
 
         # SPEC.md §14.3 -- a BEGIN over an open transfer MUST discard it; this
         # device answers ok and keeps the old one, chunks and all. Seeded
@@ -763,6 +787,11 @@ class LoopbackTransport(Transport):
         response = self.device.handle_control(request, t_rx=t_rx)
         if response is None:
             return
+        if "obd_ignores_stop" in self.faults and len(request) >= 5 and \
+                request[0] == refdec.OPCODE["OBD_POLL_SET"] and \
+                request[4] == 0 and response[2] == 0 and obd_poll_before[0]:
+            self.device._obd_poll = obd_poll_before[0]
+            self.device._obd_interval_ms = obd_poll_before[1]
         if "drops_a_response" in self.faults and len(request) == 2 and \
                 request[0] == refdec.OPCODE["TIME_SYNC"]:
             # Only the well-formed one, so exactly one check meets it. A device
@@ -857,6 +886,21 @@ class LoopbackTransport(Transport):
                 total = ceiling
         return bytes(request[:2]) + struct.pack("<BI", fmt, total)
 
+    def _indulge_obd(self, request):
+        """SPEC.md §15.4 — a device that polls whatever it is asked.
+
+        Every PID the device would refuse is rewritten into one its own car
+        supports before dispatch, so the request is answered ok and the poll
+        loop genuinely runs -- the defect a client meets is a device
+        transmitting for a PID it never verified."""
+        if len(request) < 5 or request[0] != refdec.OPCODE["OBD_POLL_SET"]:
+            return request
+        pids = bytearray(request[5:])
+        for i, pid in enumerate(pids):
+            if not self.device._obd_pid_supported(pid):
+                pids[i] = 0x0C
+        return bytes(request[:5]) + bytes(pids)
+
     def _corrupt_response(self, response, request):
         opcode, status = response[0], response[2]
         if "timesync_unsupported" in self.faults and \
@@ -891,6 +935,39 @@ class LoopbackTransport(Transport):
             # client cannot then tell a device that implements a later minor's
             # command from one that ignored it.
             response[2] = refdec.STATUS_VALUE["ok"]
+        if "obd_probe_unsupported" in self.faults and \
+                opcode == refdec.OPCODE["OBD_INFO"]:
+            # SPEC.md §15.2 -- the device's own Info says bit 10; refusing the
+            # opcode leaves a client no way to tell which statement is true.
+            return bytearray(
+                response[:2]
+                + bytes([refdec.STATUS_VALUE["unsupported_opcode"]]))
+        if opcode == refdec.OPCODE["OBD_INFO"] and status == 0:
+            base = 3
+            if "obd_responded_without_ecus" in self.faults:
+                # `responded` kept, the list emptied: the probe says something
+                # answered and names nothing that did.
+                response[base + refdec.offset("obd_probe", "count")] = 0
+                del response[base + refdec.size("obd_probe"):]
+            if "obd_entries_descending" in self.faults:
+                esz = refdec.size("obd_ecu")
+                start = base + refdec.size("obd_probe")
+                entries = [bytes(response[start + i * esz:
+                                          start + (i + 1) * esz])
+                           for i in range(len(response[start:]) // esz)]
+                if len(entries) >= 2:
+                    response[start:] = b"".join(reversed(entries))
+            if "obd_stale_behind_bit" in self.faults:
+                # The previous car's masks and request id, behind a cleared
+                # bit -- §1.1's stale-value shape, on the record that decides
+                # what a client polls.
+                response[base + refdec.offset("obd_probe", "validity")] = 0
+                response[base + refdec.offset("obd_probe", "count")] = 0
+                del response[base + refdec.size("obd_probe"):]
+            if "obd_reserved_nonzero" in self.faults:
+                struct.pack_into(
+                    "<H", response,
+                    base + refdec.offset("obd_probe", "reserved_18"), 0xBEEF)
         if "aid_stale_held_until" in self.faults and status == 0 and \
                 opcode == refdec.OPCODE["GNSS_AID_INFO"]:
             # SPEC.md §1.1 applied to the one field that decides whether a
@@ -1066,6 +1143,11 @@ class LoopbackTransport(Transport):
     _SEQ_RECORD = {"gps": "gps_fix", "can": "can_header", "imu": "imu_header"}
 
     def _apply_stream_faults(self, stream, payload):
+        if "obd_flag_never_set" in self.faults and stream == "can":
+            # SPEC.md §15.6 -- the one bit that makes the transmitter
+            # observable from the stream, never set.
+            off = refdec.offset("can_header", "flags")
+            payload[off] &= ~(1 << refdec.bit("can_flags", "polling")) & 0xFF
         if "seq_starts_at_one" in self.faults or "seq_repeats" in self.faults:
             off = refdec.offset(self._SEQ_RECORD[stream], "seq")
             seq = struct.unpack_from("<H", payload, off)[0]
