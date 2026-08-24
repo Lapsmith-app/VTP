@@ -110,6 +110,33 @@
       "note": "Not byte-canonical: the round-trip asserts a conforming encoder normalises these bytes to zero. This is the only coverage the four obd_probe encoder gates get, so one vector clears the bit behind all of them at once."
     },
     {
+      "name": "stale-identifier-behind-cleared-bit",
+      "desc": "The stale bytes behind a cleared `responded` bit are not even a valid identifier: request_id holds 0x87DF, a standard-format id above eleven bits. \u00a715.2 scopes identifier validity to a probe that answered -- with the bit clear the field is absent (\u00a71.1), a receiver MUST NOT read it, and so MUST NOT reject on it: the response decodes, the gated fields report absent, and a conforming encoder normalises the bytes to zero rather than refusing them.",
+      "record": "obd_info",
+      "hex": "0000df8700007dfc15c800000000000000000000",
+      "expect": {
+        "probe": {
+          "validity": 0,
+          "count": 0,
+          "request_id": 34783,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 0,
+          "supported_41_60": 0,
+          "reserved_18": 0
+        },
+        "ecus": []
+      },
+      "expect_absent": [
+        "request_id",
+        "supported_01_20",
+        "supported_21_40",
+        "supported_41_60"
+      ],
+      "canonical": false,
+      "expect_roundtrip_hex": "0000000000000000000000000000000000000000",
+      "note": "Pins the scope of the identifier reject: request-id-flag-bits and request-id-above-eleven-bits carry `responded` SET and MUST reject; this carries it CLEAR and MUST decode. A field a receiver may not read cannot be the reason it discards the response it may."
+    },
+    {
       "name": "reserved-bits-and-bytes",
       "desc": "obd_validity bit 7 and both bytes of reserved_18 carry values a future minor assigned. Both halves of SPEC.md 2: a decoder MUST ignore them and decode the known fields normally, and a VTP/1.0 encoder MUST normalise them away.",
       "record": "obd_info",

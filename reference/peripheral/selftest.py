@@ -1309,6 +1309,22 @@ def main():
               f"PID 0x0C decodes to {got_rpm} rpm; the circuit says "
               f"{want_rpm:.0f} at that instant")
 
+    # SPEC.md 15.1 -- spacing is measured from the last transmission, so a
+    # poll-set replacement mid-interval does not reset the clock: no two
+    # requests, across the boundary included, may be closer than the
+    # interval. Observed through the response timestamps, which are the
+    # request ticks in this model.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x76,
+                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+          "replacing the poll set with itself must answer ok")
+    spaced = [r for b in obd_run(0.6) for r in b["records"]]
+    ticks = sorted({r["t_device_us"] for r in spaced
+                    if bytes.fromhex(r["payload"])[1:3] == b"\x41\x0c"})
+    check(len(ticks) >= 2, "the spacing check needs at least two requests")
+    check(all(b - a >= 25_000 for a, b in zip(ticks, ticks[1:])),
+          "two requests closer than interval_ms apart: a replacement MUST "
+          "NOT reset the spacing clock (SPEC.md 15.1)")
+
     # SPEC.md 15.5 -- the fallback is not an entry in the table: it holds no
     # slot and CAN_UNSUBSCRIBE cannot name it.
     check(obd_ctl(dev.CAN_UNSUBSCRIBE, 0x80,
@@ -1375,10 +1391,16 @@ def main():
     check(obd_ctl(dev.OBD_POLL_SET, 0x6B, struct.pack("<HB", 0, 0))[2]
           == dev.ST_OK, "the empty poll set is the stop and MUST answer ok")
     drained = obd_run(0.5)
-    check(all(not b["header"]["flags"] & 0x02 for b in drained),
-          "a batch flushed after the stop MUST carry the polling flag clear")
+    # SPEC.md 15.7 -- the stop flushes what was already accepted rather than
+    # stranding it, and it flushes BEFORE the set clears, so that one batch
+    # legitimately carries the polling flag. Everything after it must not.
+    check(all(not b["header"]["flags"] & 0x02 for b in drained[1:]),
+          "a batch flushed after the stop's own flush MUST carry the polling "
+          "flag clear")
     check(not [r for b in drained[1:] for r in b["records"]],
-          "no new response may arrive after the stop; the transmitter is off")
+          "no new response may arrive after the stop; the transmitter is off "
+          "and nothing is stranded for a later subscription to surface "
+          "(SPEC.md 15.7)")
 
     # SPEC.md 15.7 -- CAN_RESET clears the poll set along with the table:
     # the one opcode that clears the receiver clears the transmitter too.
@@ -1398,6 +1420,26 @@ def main():
     check(obd_ctl(dev.OBD_POLL_SET, 0x6F,
                   struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
           "the probe result survives CAN_RESET; only the poll set clears")
+
+    # SPEC.md 15.2 -- a probe nothing answered clears the poll set with the
+    # probe result it replaces: the set was verified against a car that has
+    # stopped answering, and without this rule the device transmits into
+    # silence with the fallback's delivery path already dead.
+    car.OBD_ECUS = {}          # the gateway closes mid-session
+    silent = obd_ctl(dev.OBD_INFO, 0x77)
+    check(silent[2] == dev.ST_OK
+          and vtp1.decode_obd_info(silent[3:])["probe"]["count"] == 0,
+          "a mid-session silent probe answers ok with `responded` clear")
+    quiet = obd_run(0.6)
+    check(not [r for b in quiet[1:] for r in b["records"]],
+          "a probe nothing answered MUST clear the poll set: after its own "
+          "flush, nothing may be transmitted or delivered (SPEC.md 15.7)")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x78,
+                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2]
+          == dev.ST_BAD_PARAMS,
+          "the silent probe replaced the probe result too, so nothing is "
+          "pollable until a probe answers again (SPEC.md 15.4)")
+    del car.OBD_ECUS           # back to the class's car
 
     # SPEC.md 15.7 -- transmit never survives the link.
     car.on_disconnect()

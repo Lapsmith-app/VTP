@@ -2162,6 +2162,14 @@ with no J1979 stack. Every gated field is then absent under §1.1, and a
 receiver MUST NOT read an empty mask out of a silent car — "no PIDs
 supported" and "nothing answered" are different findings.
 
+A probe that nothing answered also **clears the poll set** (§15.7): the
+PIDs an installed set names were verified against the previous probe, and
+the car that verified them is no longer answering. Without this rule a
+mid-session silent probe leaves a device transmitting requests whose
+answers nothing can deliver — §15.5's fallback follows the most recent
+probe, which now reports no identifiers — which is the worst state this
+role has, reached through two individually reasonable requests.
+
 **`request_id` is the identifier the device's requests go out on** — the one
 that actually elicited the responses being reported, never one the device
 did not use. Its layout is `can_record`'s: bits 0–28 arbitration identifier,
@@ -2191,13 +2199,20 @@ NOT repair it, and SHOULD surface a violation as a device defect:
 - A device MUST NOT report through this record any ECU that did not answer
   this probe.
 
-Identifier validity is not a content rule. `request_id` and every entry `id`
-MUST satisfy §6.4 with bits 30–31 zero — these fields name identifiers, not
-how a frame travelled — and a receiver MUST **reject the whole response**
-on a violation, for §6.4's reason exactly: a standard identifier that does
-not fit in eleven bits, or an identifier carrying frame-transmission flags,
-can only be used by masking it into a different identifier that looks
-entirely valid.
+Identifier validity is not a content rule, and it is scoped by the
+validity mask. Every entry `id` — and `request_id` when `responded` is set
+— MUST satisfy §6.4 with bits 30–31 zero: these fields name identifiers,
+not how a frame travelled, and a receiver MUST **reject the whole
+response** on a violation, for §6.4's reason exactly — a standard
+identifier that does not fit in eleven bits, or one carrying
+frame-transmission flags, can only be used by masking it into a different
+identifier that looks entirely valid. When `responded` is clear,
+`request_id` is absent (§1.1): a receiver MUST NOT read it, so it MUST NOT
+reject on it either. Stale bytes behind the cleared bit — whether or not
+they happen to form a valid identifier — decode and are surfaced exactly
+as the stale-value rule above requires, and a conforming encoder
+normalises them to zero. A field a receiver may not read cannot be the
+reason it discards the response it may.
 
 A payload whose length is not exactly the record plus `count` entries is
 malformed and MUST be rejected whole (§1.1).
@@ -2395,6 +2410,10 @@ cleared, and polling therefore stops, on every one of:
 - **Link loss** — exactly as the subscription table is cleared (§9.1). A
   reconnecting client finds a known, silent state and reprograms
   everything, which §9.1 already makes the strategy.
+- **A probe nothing answered** — an `OBD_INFO` whose probe no ECU answers
+  clears the poll set along with the probe result it replaces (§15.2):
+  §15.4's rule that nothing is pollable without a probe result holds
+  mid-connection exactly as it holds at connect.
 - **Bus-off** — a device whose controller reaches bus-off MUST clear the
   poll set and MUST NOT resume transmitting on its own; recovery is a new
   `OBD_POLL_SET` from the client. `responded` reporting and the polling
@@ -2407,7 +2426,11 @@ VTP/1 device transmits and no connected client asked it to.
 §15.5's fallback delivery ends with the poll set, in every one of these
 cases: it exists so a polling client receives the answers, and once nothing
 is being asked, nothing is delivered that the subscription table does not
-name. What survives which edge follows what each thing is — the probe
+name. Stopping the transmitter MUST NOT strand what it already accepted:
+frames batched for delivery when the poll set clears are flushed, or
+discarded and counted in `dropped` (§8.3) — never held to surface on a
+later subscription carrying a `t_base` from a period the device had
+declared itself silent. What survives which edge follows what each thing is — the probe
 result is a fact about the car, so `CAN_RESET` leaves it standing and a new
 poll set re-arms without a second probe; the link's death clears
 everything, and the next connection starts at declare, verify, use.

@@ -62,7 +62,11 @@ deliberately not a minor version, which v0.x exists to permit.
   while the poll set is non-empty, with the subscription table governing
   anything it matches first, so an accepted poll set is the whole of what
   a client does to receive the answers; supported-PID masks make the role
-  declare-verify-use like everything else. Info's two freed
+  declare-verify-use like everything else. Identifier validity on the
+  probe is scoped to a probe that answered — a gated request_id is absent
+  and cannot reject the response it rides in — and a probe nothing
+  answered clears the poll set, so a transmitter never outlives the car
+  that verified it. Info's two freed
   reserved fields become the role's capacities (`obd_poll_slots` at offset
   20, `obd_min_interval_ms` at 22) per §11.2 — the wire bytes of every
   existing vector are unchanged, but the decode keys renamed, so the
@@ -83,7 +87,7 @@ deliberately not a minor version, which v0.x exists to permit.
   the answers with nothing subscribed and on no identifier the probe did
   not report, the polling flag rides every batch and falls on the stop,
   and the empty poll set actually silences the transmitter. Every
-  MUST/SHOULD is held by a seeded fault or an explicit excuse; 71 faults,
+  MUST/SHOULD is held by a seeded fault or an explicit excuse; 72 faults,
   each caught by the check that claims it. (`info.reserved_fields`
   retired with Info's last reserved bytes, which §15 assigned.)
 

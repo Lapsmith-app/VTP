@@ -459,11 +459,17 @@ def decode_obd_info(buf):
         raise Reject("truncated-record")
     if len(buf) != hsz + probe["count"] * esz:
         raise Reject("length")
-    if not _obd_identifier_valid(probe["request_id"]):
-        raise Reject("identifier")
 
     bit_of = {b["name"]: b["bit"]
               for b in SCHEMA["bitmasks"]["obd_validity"]["bits"]}
+    # §15.2 scopes the identifier reject to a probe that answered: with
+    # `responded` clear, request_id is absent (§1.1) and a receiver MUST NOT
+    # read it -- so it cannot be the reason the response is discarded. Stale
+    # bytes behind the cleared bit, valid identifier or not, decode and are
+    # surfaced by the absent list below.
+    if (probe["validity"] & (1 << bit_of["responded"])
+            and not _obd_identifier_valid(probe["request_id"])):
+        raise Reject("identifier")
     probe["absent"] = sorted(
         f["name"] for f in SCHEMA["records"]["obd_probe"]["fields"]
         if f.get("valid_bit") is not None

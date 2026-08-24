@@ -532,17 +532,6 @@ int vtp_decode_aid_commit_result(const uint8_t *b, size_t len,
     return 0;
 }
 
-/* SPEC.md §15.2 -- identifier validity for request_id and obd_ecu.id: §6.4's
- * rule with bits 30-31 required zero, because these fields name identifiers
- * rather than how a frame travelled. Violations reject the whole response,
- * for §6.4's reason exactly -- an identifier that can only be used by masking
- * it becomes a different identifier that looks entirely valid. */
-static int vtp_obd_identifier_ok(uint32_t raw) {
-    if (raw & 0xC0000000u) return 0;
-    if (!(raw & (1u << 29)) && (raw & 0x1FFFFFFFu) > 0x7FFu) return 0;
-    return 1;
-}
-
 int vtp_decode_obd_info(const uint8_t *b, size_t len,
                         vtp_obd_probe_t *o, const char **err) {
     if (len < VTP_OBD_PROBE_SIZE) { *err = "length"; return -1; }
@@ -560,7 +549,14 @@ int vtp_decode_obd_info(const uint8_t *b, size_t len,
     if (len < needed) { *err = "truncated-record"; return -1; }
     if (len != needed) { *err = "length"; return -1; }
 
-    if (!vtp_obd_identifier_ok(o->request_id)) { *err = "identifier"; return -1; }
+    /* SPEC.md 15.2 scopes the identifier reject to a probe that answered:
+     * with `responded` clear, request_id is absent (1.1) and a receiver MUST
+     * NOT read it -- so it cannot be the reason the response is discarded.
+     * The predicate itself is shared with the encoder (vtp1.h). */
+    if ((o->validity & VTP_OBD_VALIDITY_RESPONDED)
+            && !vtp_obd_identifier_ok(o->request_id)) {
+        *err = "identifier"; return -1;
+    }
     for (uint8_t i = 0; i < o->count; i++) {
         const uint32_t id = rd32(b + VTP_OBD_PROBE_SIZE
                                  + (size_t)i * VTP_OBD_ECU_SIZE

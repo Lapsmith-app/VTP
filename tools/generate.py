@@ -797,6 +797,24 @@ def _normalise(schema, record, values):
 NO_ROUNDTRIP_PAIRS = []
 
 
+def _pair_content_rule(name, no_roundtrip, refused_by):
+    """The two halves of a content rule, registered in one place.
+
+    case() and every composite builder call this rather than each keeping a
+    copy of the contract: the gate exists because encoder guards once went
+    untested when vectors lacked producer pairs, and a gate stated twice is
+    a gate that can be tightened in one place and not the other."""
+    if no_roundtrip and not refused_by:
+        sys.exit(f"case {name}: no_roundtrip declares a content rule, whose "
+                 f"device-side half is an encoder refusal -- name the "
+                 f"encoders.json case that holds it via refused_by=")
+    if refused_by and not no_roundtrip:
+        sys.exit(f"case {name}: refused_by without no_roundtrip -- a case the "
+                 f"encoder may reproduce has no refusal to pair with")
+    if no_roundtrip:
+        NO_ROUNDTRIP_PAIRS.append((name, refused_by))
+
+
 def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=None,
          canonical=True, no_roundtrip=False, refused_by=None):
     # SPEC.md 5.1: a field whose validity bit is clear MUST be written as zero.
@@ -808,15 +826,7 @@ def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=Non
     # from the round-trip: it asserts that re-encoding NORMALISES those bytes to
     # zero, which is the only coverage the encoder's gating rule gets. Exempting
     # it left that rule completely untested.
-    if no_roundtrip and not refused_by:
-        sys.exit(f"case {name}: no_roundtrip declares a content rule, whose "
-                 f"device-side half is an encoder refusal -- name the "
-                 f"encoders.json case that holds it via refused_by=")
-    if refused_by and not no_roundtrip:
-        sys.exit(f"case {name}: refused_by without no_roundtrip -- a case the "
-                 f"encoder may reproduce has no refusal to pair with")
-    if no_roundtrip:
-        NO_ROUNDTRIP_PAIRS.append((name, refused_by))
+    _pair_content_rule(name, no_roundtrip, refused_by)
 
     gated = _normalise(schema, record, values)
     if canonical:
@@ -2306,12 +2316,7 @@ def vectors(schema):
         # The composite twin of case(): obd_probe carries the validity mask,
         # so the gating, absence and normalisation rules all apply to it, and
         # the entries ride behind exactly as monitor channels do.
-        if no_roundtrip:
-            if not refused_by:
-                sys.exit(f"obd case {name}: no_roundtrip without refused_by")
-            NO_ROUNDTRIP_PAIRS.append((name, refused_by))
-        elif refused_by:
-            sys.exit(f"obd case {name}: refused_by without no_roundtrip")
+        _pair_content_rule(name, no_roundtrip, refused_by)
         wire = _normalise(schema, "obd_probe", probe) if canonical else probe
         raw = encode(schema, "obd_probe", wire) + b"".join(
             encode(schema, "obd_ecu", e) for e in ecus)
@@ -2395,6 +2400,25 @@ def vectors(schema):
                       "This is the only coverage the four obd_probe encoder "
                       "gates get, so one vector clears the bit behind all of "
                       "them at once."),
+        obd_info("stale-identifier-behind-cleared-bit",
+                 "The stale bytes behind a cleared `responded` bit are not "
+                 "even a valid identifier: request_id holds 0x87DF, a "
+                 "standard-format id above eleven bits. §15.2 scopes "
+                 "identifier validity to a probe that answered -- with the "
+                 "bit clear the field is absent (§1.1), a receiver MUST NOT "
+                 "read it, and so MUST NOT reject on it: the response "
+                 "decodes, the gated fields report absent, and a conforming "
+                 "encoder normalises the bytes to zero rather than refusing "
+                 "them.",
+                 dict(validity=0, count=0, request_id=0x87DF,
+                      supported_01_20=U1), [],
+                 canonical=False,
+                 note="Pins the scope of the identifier reject: "
+                      "request-id-flag-bits and request-id-above-eleven-bits "
+                      "carry `responded` SET and MUST reject; this carries "
+                      "it CLEAR and MUST decode. A field a receiver may not "
+                      "read cannot be the reason it discards the response "
+                      "it may."),
         obd_info("reserved-bits-and-bytes",
                  "obd_validity bit 7 and both bytes of reserved_18 carry "
                  "values a future minor assigned. Both halves of SPEC.md 2: "

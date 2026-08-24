@@ -281,7 +281,7 @@ bitmasks:
       # Bit 7 was on_change_subscriptions and is deliberately not renumbered
       # over: a capability bit is a wire value, and reusing it would make a
       # device built against the draft that assigned it indistinguishable from
-      # one meaning whatever bit 7 says next. It is reserved like bits 10+,
+      # one meaning whatever bit 7 says next. It is reserved like bits 11+,
       # and the generated masks treat every unnamed bit the same way.
       #
       # Bit 8 is the first capability the advertisement cannot carry: SPEC.md

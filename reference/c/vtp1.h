@@ -321,6 +321,18 @@ static inline int vtp_obd_valid(const vtp_obd_probe_t *p, uint8_t bit) {
     return (p->validity & bit) != 0;
 }
 
+/* SPEC.md §15.2 -- identifier validity for request_id and obd_ecu.id: §6.4's
+ * rule with bits 30-31 required zero, because these fields name identifiers
+ * rather than how a frame travelled. One inline shared by the decoder and
+ * the encoder, so the two translation units cannot drift on one rule --
+ * §15.2 scopes WHERE it applies (entry ids always; request_id only when
+ * `responded` is set), and each caller carries that scope. */
+static inline int vtp_obd_identifier_ok(uint32_t raw) {
+    if (raw & 0xC0000000u) return 0;
+    if (!(raw & (1u << 29)) && (raw & 0x1FFFFFFFu) > 0x7FFu) return 0;
+    return 1;
+}
+
 /* Validates length arithmetic and §15.2's identifier validity for the whole
  * response before returning. The content rules -- count agreeing with
  * `responded`, entries strictly ascending, at most eight -- are NOT rejected

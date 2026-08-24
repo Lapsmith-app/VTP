@@ -553,7 +553,13 @@ def encode_obd_info(probe, ecus):
             f"obd_probe.count is {len(ecus)}; ISO 15765-4 caps the "
             f"responders to a functional request at {OBD_MAX_ECUS} "
             f"(SPEC.md 15.2)")
-    _check_obd_identifier("obd_probe.request_id", probe.get("request_id", 0))
+    # §15.2 -- the identifier rule is scoped to a probe that answered: with
+    # `responded` clear the field is gated to zero on the wire below, so a
+    # stale invalid value in the caller's struct is normalised away, exactly
+    # as the decoder tolerates it.
+    if responded:
+        _check_obd_identifier("obd_probe.request_id",
+                              probe.get("request_id", 0))
     prev = None
     for e in ecus:
         _check_obd_identifier("obd_ecu.id", e.get("id", 0))

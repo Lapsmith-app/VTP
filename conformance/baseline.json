@@ -138,6 +138,7 @@
  "obd/reserved-bits-and-bytes": "4ef481f92c7ba2697a2547b55c643b25601694183cacbf64586f15ed19624de3",
  "obd/responded-with-no-ecus": "82622225138fc4cd72a094a06f66b7e8f4f876de1a585dc87619019cc49a281a",
  "obd/short-payload": "f6ce0ed0b67fc5cc53f3287b3e23fb9998064d9d3208757663f2e8f39d70ee4e",
+ "obd/stale-identifier-behind-cleared-bit": "b2dd099443422bc18f2f8afbaeba78c239f7526344959a457ef56a2a780e51b7",
  "obd/stale-values-behind-cleared-bits": "c07aebf5a3998dee547f5f3579f5d85b6b39a2ba44aef909f820adee3b7f6029",
  "obd/twenty-nine-bit-addressing": "2378bd42f40cc3748cff589063dda8b9852b7bb1354a71de79f390ca62674507",
  "power/charged-on-external": "5f5ba0253ee74a4a7b7b6bea639350315f1e0a26e8c3e08e9f85e1c1a595f207",

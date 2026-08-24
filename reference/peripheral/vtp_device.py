@@ -31,14 +31,21 @@ import vtp1_encode as enc  # noqa: E402
 # Capability and layout constants
 # ---------------------------------------------------------------------------
 
-CAP_GPS, CAP_CAN, CAP_IMU = 1 << 0, 1 << 1, 1 << 2
-CAP_MONITOR = 1 << 3
-CAP_CONTROL, CAP_CAN_FD = 1 << 4, 1 << 5
-CAP_MASKED_SUBS = 1 << 6
+# Read from the schema rather than restated, for the reason _OPCODE below
+# gives: a hand-transcribed bit survives a schema change holding its old
+# value, and a peripheral declaring a different role than the schema defines
+# is diagnosed on the wire, weeks later, by whoever holds the client. A
+# renamed or moved bit arrives here as a KeyError at import instead.
+_CAP = {b["name"]: 1 << b["bit"]
+        for b in enc.SCHEMA["bitmasks"]["capabilities"]["bits"]}
+CAP_GPS, CAP_CAN, CAP_IMU = _CAP["gps"], _CAP["can"], _CAP["imu"]
+CAP_MONITOR = _CAP["monitor"]
+CAP_CONTROL, CAP_CAN_FD = _CAP["control"], _CAP["can_fd"]
+CAP_MASKED_SUBS = _CAP["masked_subscriptions"]
 # Bit 7 was on_change_subscriptions in a pre-1.0 draft and stays unassigned.
-CAP_POWER = 1 << 8
-CAP_GNSS_AIDING = 1 << 9
-CAP_OBD = 1 << 10
+CAP_POWER = _CAP["power"]
+CAP_GNSS_AIDING = _CAP["gnss_aiding"]
+CAP_OBD = _CAP["obd"]
 
 V_T_UTC, V_T_UTC_RESOLVED, V_POSITION = 1 << 0, 1 << 1, 1 << 2
 V_ALT_MSL, V_ALT_ELLIPSOID, V_VELOCITY = 1 << 3, 1 << 4, 1 << 5
@@ -180,8 +187,11 @@ CAN_MAX_FRAMES_PER_S = 4000
 # SPEC.md 15.4 -- the two OBD capacities this build declares in Info.
 OBD_POLL_SLOTS = 16
 OBD_MIN_INTERVAL_MS = 20
-# SPEC.md 15.6 -- can_header.flags bit 1: the poll set is non-empty.
-CAN_FLAG_POLLING = 0x02
+# SPEC.md 15.6 -- can_header.flags `polling`: the poll set is non-empty.
+# Schema-derived like the capability bits above.
+CAN_FLAG_POLLING = next(1 << b["bit"]
+                        for b in enc.SCHEMA["bitmasks"]["can_flags"]["bits"]
+                        if b["name"] == "polling")
 # SPEC.md 15.1 -- everything a Mode 01 request may name.
 OBD_PID_FLOOR, OBD_PID_CEILING = 0x01, 0x60
 
@@ -421,24 +431,27 @@ class VtpDevice:
         # protocol's clock and does not belong in poll().
         self._power = {"source": SRC_DISCHARGING, "percent": 63}
 
-        # SPEC.md §15 -- the OBD role's per-connection state. `_obd_masks` is
-        # what the most recent probe of THIS connection read (None until one
-        # has); nothing is pollable without it, which is what makes
-        # declare-verify-use structural rather than convention (SPEC.md 15.4).
-        # `_obd_ecu_ids` is the probe's reported response identifiers -- the
-        # ones SPEC.md 15.5's fallback delivers on while the poll set is
-        # non-empty. `_obd_poll` is the ordered PID schedule; empty means the
-        # transmitter is off, and empty is the only state a connection ever
-        # starts in.
-        self._obd_masks = None
-        self._obd_ecu_ids = frozenset()
-        self._obd_poll = []
-        self._obd_interval_ms = 0
-        self._obd_index = 0
-        self._next_obd_tx_us = 0
-        # Response frames the synthetic ECUs have put on the bus, waiting for
-        # the next poll() to run them through subscription admission.
-        self._obd_rx = []
+        # SPEC.md §15 -- the OBD role's per-connection state, all assigned by
+        # _obd_clear so a field added there is reset at every edge at once
+        # (a field forgotten at one of four hand-copied sites is a §15.7
+        # leak). `_obd_masks` is what the most recent probe of THIS
+        # connection read (None until one has); nothing is pollable without
+        # it, which is what makes declare-verify-use structural rather than
+        # convention (SPEC.md 15.4). `_obd_ecu_ids` is the probe's reported
+        # response identifiers -- the ones SPEC.md 15.5's fallback delivers
+        # on while the poll set is non-empty. `_obd_poll` is the ordered PID
+        # schedule; empty means the transmitter is off, and empty is the
+        # only state a connection ever starts in.
+        #
+        # `_obd_last_tx_us` is the schedule: SPEC.md 15.1 bounds SPACING --
+        # never two requests closer than the interval -- so what is tracked
+        # is the last transmission, not the next one. A next-transmit time
+        # was tried first and reset on every accepted OBD_POLL_SET, which
+        # let a replacement transmit immediately after a request the old set
+        # had just sent. It survives every edge short of construction,
+        # because the bus does not care why two frames were close together.
+        self._obd_last_tx_us = None
+        self._obd_clear()
 
     # -- clock ------------------------------------------------------------
 
@@ -474,10 +487,7 @@ class VtpDevice:
         self._aid = None
         # SPEC.md 15.7 -- polling never survives a connection edge, and the
         # probe result belongs to the connection that asked for it.
-        self._obd_masks = None
-        self._obd_ecu_ids = frozenset()
-        self._obd_poll, self._obd_interval_ms, self._obd_index = [], 0, 0
-        self._obd_rx = []
+        self._obd_clear()
 
     def record_refused(self, stream, payload):
         """A notification the transport would not accept.
@@ -532,10 +542,7 @@ class VtpDevice:
         # is: a disconnected device that kept polling would be transmitting
         # on a car whose owner has walked away with the phone. The fallback
         # delivery dies with the poll set it serves.
-        self._obd_masks = None
-        self._obd_ecu_ids = frozenset()
-        self._obd_poll, self._obd_interval_ms, self._obd_index = [], 0, 0
-        self._obd_rx = []
+        self._obd_clear()
         # The MTU was NEGOTIATED, so it describes a link that has gone. It used
         # to persist until a new central happened to replace it, so batches for
         # the next connection were sized to this one's link.
@@ -842,14 +849,19 @@ class VtpDevice:
         # the list in order and wrapping; a request the bus did not answer is
         # abandoned when the next transmission is due, which in this model is
         # implicit -- the synthetic ECUs answer immediately or not at all.
-        if caps & CAP_OBD and self._obd_poll and now >= self._next_obd_tx_us:
+        #
+        # Spacing is measured FROM THE LAST TRANSMISSION, whatever caused it
+        # (§15.1): a replacement poll set does not reset it, a probe advances
+        # it, and a device not polled for a while emits one request rather
+        # than a backlog, because `_obd_last_tx_us` only moves when a frame
+        # actually goes out.
+        if caps & CAP_OBD and self._obd_poll and (
+                self._obd_last_tx_us is None
+                or now - self._obd_last_tx_us
+                >= self._obd_interval_ms * 1000):
             pid = self._obd_poll[self._obd_index % len(self._obd_poll)]
             self._obd_index += 1
-            # `now + interval` rather than `+=`: a device that was not polled
-            # for a while must not replay the gap as a transmit burst -- the
-            # bound is "never two requests closer than interval_ms" (§15.1),
-            # and a backlog of requests is exactly what it forbids.
-            self._next_obd_tx_us = now + self._obd_interval_ms * 1000
+            self._obd_last_tx_us = now
             self._obd_transmit(pid, now)
 
         # OBD responses first: anything a probe put on the synthetic bus
@@ -895,6 +907,25 @@ class VtpDevice:
             self._next_can_flush_us = now + 100_000
         return [(c, p) for c, p in out if p is not None]
 
+    def _admit(self, sub, cid, now):
+        """SPEC.md §6.8 -- one admission decision for every frame source.
+
+        Per-identifier mode state: the first matching frame is forwarded in
+        every mode, and `periodic` then rations by `emitted_at`. Stated once
+        and called from both frame generators, because two copies of the
+        governance rule are two rules the moment either is edited -- the
+        copies had already drifted before this was extracted."""
+        st = sub["per_id"].setdefault(
+            cid, {"last": 0, "seen": 0, "emitted_at": 0})
+        st["seen"] += 1
+        first = st["seen"] == 1
+        emit = True
+        if sub["mode"] == SUB_PERIODIC and sub["arg"] and not first:
+            emit = (now - st["emitted_at"]) >= sub["arg"] * 1000
+        if emit:
+            st["emitted_at"] = now
+        return emit
+
     def _governing(self, cid):
         """SPEC.md §9.2 — of the subscriptions matching `cid`, the one that
         governs: most specific mask first, then the one installed earliest. A
@@ -912,35 +943,51 @@ class VtpDevice:
             sub = self._governing(cid)
             if sub is None:
                 continue
-            # SPEC.md §6.8 — one set of mode state per matching identifier.
+            # The natural bus rate of this synthetic broadcast signal -- a
+            # property of the frame GENERATOR, not of admission, so it stays
+            # here while the §6.8 decision lives in _admit.
             st = sub["per_id"].setdefault(
                 cid, {"last": 0, "seen": 0, "emitted_at": 0})
             interval = round(1_000_000 / rate_hz)
             if now - st["last"] < interval:
                 continue
-            st["seen"] += 1
-            # SPEC.md §6.8 — the first matching frame is forwarded in every
-            # mode. A client that installs a subscription and waits for a value
-            # to display should not have to wait for a second frame.
-            first = st["seen"] == 1
-            emit = True
-            if sub["mode"] == SUB_PERIODIC and sub["arg"] and not first:
-                emit = (now - st["emitted_at"]) >= sub["arg"] * 1000
             st["last"] = now
-            if emit:
-                st["emitted_at"] = now
+            if self._admit(sub, cid, now):
                 yield {"id": cid, "payload": payload, "_t": now}
 
     # -- OBD (SPEC.md §15) --------------------------------------------------
 
-    def _obd_union(self):
-        """The union over the synthetic car's ECUs, which is what the probe
-        reads and what OBD_POLL_SET checks a PID against (SPEC.md 15.3)."""
-        u = [0, 0, 0]
-        for masks in self.OBD_ECUS.values():
-            for i in range(3):
-                u[i] |= masks[i]
-        return tuple(u)
+    def _obd_stop(self, *, flush):
+        """SPEC.md 15.7 -- the transmitter off, and nothing stranded.
+
+        `flush` delivers the pending CAN batch before the poll set clears,
+        so frames already accepted while polling are not held to surface on
+        a later subscription with a stale t_base -- flushed BEFORE the set
+        clears, so the batch's polling flag is truthful. The connection
+        edges pass flush=False: the link those frames belonged to is gone.
+        """
+        if flush:
+            batch = self._flush_can(self.now_us())
+            if batch is not None:
+                self._deferred.append(("can", batch))
+        self._obd_poll, self._obd_interval_ms, self._obd_index = [], 0, 0
+        self._obd_rx = []
+
+    def _obd_clear(self, *, flush=False):
+        """Everything _obd_stop clears, plus the probe result -- the
+        connection edges, and a probe nothing answered (SPEC.md 15.2)."""
+        self._obd_stop(flush=flush)
+        self._obd_masks = None
+        self._obd_ecu_ids = frozenset()
+
+    @staticmethod
+    def _mask_has(masks, pid):
+        """SPEC.md 15.3 -- bit n of window w is PID 0x01 + 32w + n, LSB
+        first. The ONE statement of the window arithmetic: the probe, the
+        transmit loop and the poll-set gate all call this, so an off-by-one
+        cannot leave them disagreeing about which PIDs one car supports."""
+        window, bit = divmod(pid - 0x01, 32)
+        return bool(masks[window] & (1 << bit))
 
     def _obd_pid_supported(self, pid):
         """SPEC.md 15.4 -- pollable means inside 0x01..0x60 AND declared by
@@ -950,8 +997,7 @@ class VtpDevice:
             return False
         if self._obd_masks is None:
             return False
-        window, bit = divmod(pid - 0x01, 32)
-        return bool(self._obd_masks[window] & (1 << bit))
+        return self._mask_has(self._obd_masks, pid)
 
     def _obd_pid_data(self, pid, st):
         """Data bytes of a positive Mode 01 response.
@@ -992,9 +1038,8 @@ class VtpDevice:
         whose own masks cover the PID answers -- functional addressing asks
         the car, not an ECU."""
         st = self.circuit.at(now / 1e6)
-        window, bit = divmod(pid - 0x01, 32)
         for ecu_id in sorted(self.OBD_ECUS):
-            if not (self.OBD_ECUS[ecu_id][window] & (1 << bit)):
+            if not self._mask_has(self.OBD_ECUS[ecu_id], pid):
                 continue
             self._obd_rx.append(
                 (now, ecu_id, self._obd_response_frame(pid, self._obd_pid_data(pid, st))))
@@ -1022,16 +1067,7 @@ class VtpDevice:
                 if self._obd_fallback_delivers(cid):
                     yield {"id": cid, "payload": payload, "_t": t}
                 continue
-            st = sub["per_id"].setdefault(
-                cid, {"last": 0, "seen": 0, "emitted_at": 0})
-            st["seen"] += 1
-            first = st["seen"] == 1
-            emit = True
-            if sub["mode"] == SUB_PERIODIC and sub["arg"] and not first:
-                emit = (now - st["emitted_at"]) >= sub["arg"] * 1000
-            st["last"] = t
-            if emit:
-                st["emitted_at"] = now
+            if self._admit(sub, cid, now):
                 yield {"id": cid, "payload": payload, "_t": t}
 
     def _obd_probe(self, now):
@@ -1050,11 +1086,11 @@ class VtpDevice:
         # (SPEC.md 15.2 -- a device MUST NOT request a mask PID the union
         # does not claim).
         for window, mask_pid in enumerate((0x00, 0x20, 0x40)):
-            if mask_pid and not self._obd_pid_supported_in(union, mask_pid):
+            if mask_pid and not self._mask_has(union, mask_pid):
                 continue
             for ecu_id in sorted(self.OBD_ECUS):
                 masks = self.OBD_ECUS[ecu_id]
-                if mask_pid and not self._ecu_supports(masks, mask_pid):
+                if mask_pid and not self._mask_has(masks, mask_pid):
                     continue
                 answered[ecu_id] = True
                 union[window] |= masks[window]
@@ -1063,14 +1099,21 @@ class VtpDevice:
                      self._obd_response_frame(
                          mask_pid, _j1979_mask_bytes(masks[window]))))
         # SPEC.md 15.1 -- a probe's requests take the place of poll requests
-        # in the same schedule rather than adding to them: the next poll
-        # transmission is pushed out by at least one spacing.
-        if self._obd_poll:
-            self._next_obd_tx_us = max(
-                self._next_obd_tx_us, now + self._obd_interval_ms * 1000)
+        # in the same schedule rather than adding to them, so the probe
+        # advances the last-transmission mark exactly as the poll loop does.
+        # The probe's own internal spacing is time-compressed here, like
+        # every other duration in this synthetic device: handle_control is
+        # synchronous, so the mask requests land at one instant that real
+        # firmware would spread a spacing apart. What is modelled honestly
+        # is the boundary the schedule shares with the poll loop.
+        self._obd_last_tx_us = now
         if not answered:
-            self._obd_masks = None
-            self._obd_ecu_ids = frozenset()
+            # SPEC.md 15.2 -- a probe nothing answered clears the poll set
+            # with the probe result it replaces (§15.7's fifth stop): the
+            # PIDs an installed set names were verified against a car that
+            # has stopped answering, and a device that kept transmitting
+            # here would be doing so with the delivery path already dead.
+            self._obd_clear(flush=True)
             return enc.encode_obd_info(dict(validity=0, count=0), [])
         self._obd_masks = tuple(union)
         self._obd_ecu_ids = frozenset(answered)
@@ -1080,16 +1123,6 @@ class VtpDevice:
                  supported_01_20=union[0], supported_21_40=union[1],
                  supported_41_60=union[2]),
             [dict(id=ecu_id) for ecu_id in sorted(answered)])
-
-    @staticmethod
-    def _ecu_supports(masks, pid):
-        window, bit = divmod(pid - 0x01, 32)
-        return bool(masks[window] & (1 << bit))
-
-    @staticmethod
-    def _obd_pid_supported_in(union, pid):
-        window, bit = divmod(pid - 0x01, 32)
-        return bool(union[window] & (1 << bit))
 
     # -- Control ----------------------------------------------------------
 
@@ -1163,9 +1196,9 @@ class VtpDevice:
             # SPEC.md 15.7 -- the CAN role has one reset, and it resets
             # everything the role does: the opcode that clears the receiver
             # clears the transmitter with it. The probe result survives; it
-            # is a fact about the car, not about the poll set.
-            self._obd_poll, self._obd_interval_ms, self._obd_index = [], 0, 0
-            self._obd_rx = []
+            # is a fact about the car, not about the poll set. flush=False
+            # because the pending batch was cleared with the receiver above.
+            self._obd_stop(flush=False)
             return reply(ST_OK)
 
         if opcode in (CAN_SUBSCRIBE, CAN_SUBSCRIBE_MASK):
@@ -1343,10 +1376,12 @@ class VtpDevice:
             if count == 0:
                 # The stop. Accepted whatever the probe state, and its
                 # interval MUST be 0 -- there is no schedule for it to pace.
+                # flush=True: frames already accepted while polling are
+                # delivered now rather than stranded until some later
+                # subscription surfaces them with a stale t_base (§15.7).
                 if interval_ms != 0:
                     return reply(ST_BAD_PARAMS)
-                self._obd_poll, self._obd_interval_ms = [], 0
-                self._obd_index = 0
+                self._obd_stop(flush=True)
                 return reply(ST_OK)
             # SPEC.md 15.4 -- zero is NOT "no limit" here: the device would
             # be generating unbounded traffic, not filtering existing
@@ -1358,10 +1393,13 @@ class VtpDevice:
             # which is what makes declare-verify-use structural.
             if any(not self._obd_pid_supported(pid) for pid in pids):
                 return reply(ST_BAD_PARAMS)
+            # The schedule is NOT reset: spacing is measured from the last
+            # transmission (§15.1), so a replacement mid-interval waits out
+            # the remainder instead of transmitting immediately, and a first
+            # set transmits at the next poll() tick.
             self._obd_poll = list(pids)
             self._obd_interval_ms = interval_ms
             self._obd_index = 0
-            self._next_obd_tx_us = self.now_us()
             return reply(ST_OK)
 
         if opcode == MONITOR_LIST:

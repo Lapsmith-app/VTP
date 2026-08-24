@@ -111,11 +111,30 @@ async def info_rate_ceiling(s):
                    f"maximum", info=_summary(i))
 
 
-# `info.reserved_fields` lived here until SPEC.md §15 assigned Info's last
-# reserved bytes (20 and 22-23) to the OBD capacities: the record now has no
-# reserved field left to hold to §2, and a check that can never fail is a
-# check that does not work. If a later revision reserves an Info byte again,
-# the check comes back with it -- schema-derived, as it was.
+@check(id="info.reserved_fields", section="4", phase="info", severity="MUST",
+       title="Reserved bytes of Info are zero")
+async def info_reserved_fields(s):
+    if s.info is None:
+        raise Skip("Info did not decode")
+    # Driven by the schema's own `reserved` flag, so a byte that gains a
+    # meaning stops being checked the moment the schema says so -- and a
+    # byte a later minor re-reserves is checked again without an edit here.
+    # SPEC.md §15 assigned Info's last reserved bytes (20 and 22-23) to the
+    # OBD capacities, so today this skips; the Skip, its EXPECTED_SKIPS
+    # entry and its NOT_SEEDED excuse all fall out the day the schema
+    # reserves an Info byte again, and the coverage gate then demands the
+    # seeded fault back.
+    reserved = [f["name"] for f in refdec.SCHEMA["records"]["info"]["fields"]
+                if f.get("reserved")]
+    if not reserved:
+        raise Skip("Info has no reserved fields in this version")
+    nonzero = [(name, s.info[name]) for name in reserved if s.info[name]]
+    if nonzero:
+        raise Fail(
+            "; ".join(f"{n} is {v}" for n, v in nonzero)
+            + ". A reserved field MUST be written as zero, so that a client "
+              "reading one in a later minor knows it came from a device that "
+              "meant it", info_hex=s.info_raw.hex())
 
 
 @check(id="info.can_payload", section="4.1", phase="info", severity="OBSERVE",

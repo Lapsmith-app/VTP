@@ -19,6 +19,14 @@ POLLING = 1 << refdec.bit("can_flags", "polling")
 RESPONDED = 1 << refdec.bit("obd_validity", "responded")
 
 
+def _identity(frame):
+    """A decoded can_record's identifier over bits 0-29 (SPEC.md §15.5's
+    comparison): the decoder splits the format bit out, the probe's ids
+    carry it in bit 29, and comparing across that split silently never
+    matches on a 29-bit-addressed car."""
+    return frame["id"] | ((1 << 29) if frame["extended"] else 0)
+
+
 def _control(s):
     if s.control is None:
         raise Skip("this device does not declare the control capability")
@@ -250,15 +258,19 @@ async def obd_poll_and_flag(s):
                       if _union_bit(probe, pid)), None)
     if supported is None:
         raise Skip("the probe's union claims no PID at all")
-    ecu_ids = [e["id"] for e in probe["ecus"]]
+    ecu_ids = {e["id"] for e in probe["ecus"]}
     interval = max(s.info["obd_min_interval_ms"], 25)
+    # §15.4 lets the set take effect within one interval, so a fixed window
+    # fails a conforming device whose declared floor is large: every wait
+    # here scales with the interval actually in use.
+    settle = max(3 * interval / 1000, 0.35)
     log = s.streams["can"]
 
     def batches_since(t):
         out = []
         for n in log.since(t):
             try:
-                out.append(refdec.decode("can_batch", n.payload))
+                out.append((n.t_host, refdec.decode("can_batch", n.payload)))
             except refdec.Reject:
                 continue        # the decode checks own that finding
         return out
@@ -281,41 +293,46 @@ async def obd_poll_and_flag(s):
                        f"§15.7 leaves the probe result standing across the "
                        f"CAN_RESET this check just issued")
         t_started = time.monotonic()
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(settle)
 
         running = batches_since(t_started)
-        frames = [rec for b in running for rec in b["records"]]
-        heard = [f for f in frames if f["id"] in ecu_ids]
+        frames = [rec for _, b in running for rec in b["records"]]
+        heard = [f for f in frames if _identity(f) in ecu_ids]
         if not heard:
             raise Fail(
-                f"no response arrived on any reported ECU id within 0.35 s "
-                f"of an accepted poll set (PID 0x{supported:02X}, "
-                f"{interval} ms) with nothing subscribed; §15.5 -- the "
-                f"fallback delivers on the probe's reported identifiers, so "
-                f"a polling device that stays silent has either stopped "
-                f"transmitting or is discarding the answers it asked for")
-        strays = [f for f in frames if f["id"] not in ecu_ids]
+                f"no response arrived on any reported ECU id within "
+                f"{settle:.2f} s of an accepted poll set (PID "
+                f"0x{supported:02X}, {interval} ms) with nothing subscribed; "
+                f"§15.5 -- the fallback delivers on the probe's reported "
+                f"identifiers, so a polling device that stays silent has "
+                f"either stopped transmitting or is discarding the answers "
+                f"it asked for")
+        strays = [f for f in frames if _identity(f) not in ecu_ids]
         if strays:
             raise Fail(
                 f"{len(strays)} frame(s) arrived on identifiers outside the "
                 f"probe's reported list, with nothing subscribed; §15.5's "
                 f"fallback delivers on the reported response identifiers "
                 f"and nothing else",
-                ids=sorted({hex(f["id"]) for f in strays}))
-        request_id = probe["probe"]["request_id"] & 0x1FFFFFFF
-        if any(f["id"] == request_id for f in frames):
+                ids=sorted({hex(_identity(f)) for f in strays}))
+        request_id = probe["probe"]["request_id"]
+        if any(_identity(f) == request_id for f in frames):
             raise Fail(
                 "the device's own request frames appear in the stream; "
                 "§15.5 -- the CAN stream carries what the device hears, "
                 "never what it says")
-        unflagged = [b for b in running if not b["header"]["flags"] & POLLING]
+        # §15.6's rising edge, with the same grace the falling edge gets: a
+        # batch flushed before the ok can be delivered after it over a real
+        # link, and the loopback's synchrony must not hide that race.
+        t_flag = t_started + max(2 * interval / 1000, 0.15)
+        unflagged = [b for t, b in running
+                     if t >= t_flag and not b["header"]["flags"] & POLLING]
         if unflagged:
             raise Fail(
-                f"{len(unflagged)} of {len(running)} batch(es) flushed while "
-                f"the poll set was non-empty carry the polling flag clear; "
-                f"§15.6 puts the flag on every one, because it is how anyone "
-                f"watching the stream tells a transmitting dongle from a "
-                f"sniffer")
+                f"{len(unflagged)} batch(es) flushed while the poll set was "
+                f"non-empty carry the polling flag clear; §15.6 puts the "
+                f"flag on every one, because it is how anyone watching the "
+                f"stream tells a transmitting dongle from a sniffer")
 
         # The stop, and its falling edge on the wire.
         r = await c.request(refdec.OPCODE["OBD_POLL_SET"],
@@ -323,20 +340,21 @@ async def obd_poll_and_flag(s):
         if not r.ok:
             raise Fail(f"the empty poll set was answered {r.status_name}")
         # One interval of grace: a response already on the bus when the stop
-        # arrived may still be delivered and is not a violation.
-        await asyncio.sleep(max(interval / 1000 * 2, 0.1))
+        # arrived -- and the stop's own flush of the pending batch (§15.7) --
+        # may still be delivered and is not a violation.
+        await asyncio.sleep(max(interval / 1000 * 2, 0.15))
         t_settled = time.monotonic()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(max(3 * interval / 1000, 0.3))
         after = batches_since(t_settled)
-        late = [rec for b in after for rec in b["records"]
-                if rec["id"] in ecu_ids]
+        late = [rec for _, b in after for rec in b["records"]
+                if _identity(rec) in ecu_ids]
         if late:
             raise Fail(
                 f"{len(late)} response frame(s) arrived well after the empty "
                 f"poll set was acknowledged; §15.7 -- the empty set stops "
                 f"the transmitter, and transmit MUST NOT outlive the request "
                 f"that turned it off")
-        flagged = [b for b in after if b["header"]["flags"] & POLLING]
+        flagged = [b for _, b in after if b["header"]["flags"] & POLLING]
         if flagged:
             raise Fail(
                 f"{len(flagged)} batch(es) flushed after the stop still "
@@ -349,5 +367,65 @@ async def obd_poll_and_flag(s):
         # phase installs its own subscriptions afterwards.
         try:
             await c.request(refdec.OPCODE["CAN_RESET"])
+        except ControlTimeout:
+            pass
+
+
+@check(id="obd.reset_stops", section="15.7", phase="control", severity="MUST",
+       requires=("obd",), adversarial=True,
+       title="CAN_RESET clears the poll set and silences the transmitter")
+async def obd_reset_stops(s):
+    c = _control(s)
+    probe = _probe(s)
+    if s.info is None:
+        raise Skip("Info did not decode")
+    if not probe["probe"]["validity"] & RESPONDED:
+        raise Skip("nothing answered the probe, so there is nothing to poll")
+    supported = next((pid for pid in range(0x01, 0x61)
+                      if _union_bit(probe, pid)), None)
+    if supported is None:
+        raise Skip("the probe's union claims no PID at all")
+    ecu_ids = {e["id"] for e in probe["ecus"]}
+    interval = max(s.info["obd_min_interval_ms"], 25)
+    log = s.streams["can"]
+    try:
+        # §15.7 -- the probe result survives the previous check's CAN_RESET,
+        # so a poll set re-arms without a second probe.
+        r = await c.request(
+            refdec.OPCODE["OBD_POLL_SET"],
+            struct.pack("<HB", interval, 1) + bytes([supported]))
+        if not r.ok:
+            raise Fail(f"re-arming the poll set after CAN_RESET was answered "
+                       f"{r.status_name}; §15.7 -- the probe result is a "
+                       f"fact about the car and survives the reset")
+        await asyncio.sleep(max(2 * interval / 1000, 0.15))
+        r = await c.request(refdec.OPCODE["CAN_RESET"])
+        if not r.ok:
+            raise Fail(f"CAN_RESET was answered {r.status_name}")
+        # Grace for responses already in flight and the reset's own effects,
+        # then a window in which nothing OBD may appear.
+        await asyncio.sleep(max(2 * interval / 1000, 0.15))
+        t_quiet = time.monotonic()
+        await asyncio.sleep(max(3 * interval / 1000, 0.3))
+        offending = []
+        for t, n in ((n.t_host, n) for n in log.since(t_quiet)):
+            try:
+                batch = refdec.decode("can_batch", n.payload)
+            except refdec.Reject:
+                continue
+            if any(_identity(rec) in ecu_ids for rec in batch["records"]) \
+                    or batch["header"]["flags"] & POLLING:
+                offending.append(batch)
+        if offending:
+            raise Fail(
+                f"{len(offending)} batch(es) after CAN_RESET still carry OBD "
+                f"responses or the polling flag; §15.7 -- the one opcode "
+                f"that clears the receiver clears the transmitter with it, "
+                f"and a device that keeps transmitting through it is exactly "
+                f"the device an app cannot silence")
+    finally:
+        try:
+            await c.request(refdec.OPCODE["OBD_POLL_SET"],
+                            struct.pack("<HB", 0, 0))
         except ControlTimeout:
             pass

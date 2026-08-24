@@ -261,6 +261,12 @@ class BleakTransport(Transport):
 #: Faults the loopback device can be told to exhibit. Each one is a real
 #: mistake a firmware could make, and each is here because some check in this
 #: harness claims to catch it — tests/test_faults.py asserts that it does.
+# SPEC.md §15.4 -- opcode byte + tag + the fixed parameters; the pid list
+# follows. Derived from the schema exactly as the aiding fault offsets are,
+# so a later minor adding a fixed parameter cannot silently move the bytes
+# these fault sites read.
+_OBD_POLL_FIXED = 2 + refdec.OPCODE_PARAM_SIZE["OBD_POLL_SET"]
+
 FAULTS = {
     "seq_starts_at_one": "SPEC.md §8.2 — first notification carries 1, not 0",
     "seq_repeats": "SPEC.md §8.2 — the sequence number does not advance",
@@ -343,6 +349,7 @@ FAULTS = {
     "obd_capacity_zero": "SPEC.md §15 — the `obd` bit declared with obd_poll_slots 0, a poll set nothing fits",
     "obd_accepts_unsupported_pid": "SPEC.md §15.4 — a PID the probe's union does not claim is polled anyway",
     "obd_ignores_stop": "SPEC.md §15.7 — the empty poll set is answered ok and the transmitter keeps going",
+    "obd_reset_keeps_polling": "SPEC.md §15.7 — CAN_RESET clears the subscriptions and leaves the poll set transmitting",
     "obd_delivery_needs_subscription": "SPEC.md §15.5 — poll responses are delivered only through the table, so an unsubscribed polling client transmits on the car and receives nothing",
     "obd_flag_never_set": "SPEC.md §15.6 — the poll set is non-empty and no batch carries the polling flag",
 }
@@ -695,12 +702,15 @@ class LoopbackTransport(Transport):
         request = self._indulge_aiding(request)
         if "obd_accepts_unsupported_pid" in self.faults:
             request = self._indulge_obd(request)
-        # SPEC.md §15.7 -- a device that answers ok to the stop and keeps
-        # transmitting. The poll set is captured before dispatch and put back
-        # after it, so the defect is the transmitter's state, not a cosmetic
-        # rewrite of the reply.
-        obd_poll_before = (list(getattr(self.device, "_obd_poll", ())),
-                           getattr(self.device, "_obd_interval_ms", 0))
+        # SPEC.md §15.7 -- a device that answers ok to a stop (the empty
+        # poll set, or CAN_RESET) and keeps transmitting. The poll set is
+        # captured before dispatch and put back after it, so the defect is
+        # the transmitter's state, not a cosmetic rewrite of the reply.
+        # Captured only when one of those faults is seeded.
+        obd_poll_before = None
+        if {"obd_ignores_stop", "obd_reset_keeps_polling"} & self.faults:
+            obd_poll_before = (list(getattr(self.device, "_obd_poll", ())),
+                               getattr(self.device, "_obd_interval_ms", 0))
 
         # SPEC.md §14.3 -- a BEGIN over an open transfer MUST discard it; this
         # device answers ok and keeps the old one, chunks and all. Seeded
@@ -794,9 +804,19 @@ class LoopbackTransport(Transport):
         response = self.device.handle_control(request, t_rx=t_rx)
         if response is None:
             return
-        if "obd_ignores_stop" in self.faults and len(request) >= 5 and \
+        if "obd_ignores_stop" in self.faults and obd_poll_before and \
+                obd_poll_before[0] and response[2] == 0 and \
+                len(request) >= _OBD_POLL_FIXED and \
                 request[0] == refdec.OPCODE["OBD_POLL_SET"] and \
-                request[4] == 0 and response[2] == 0 and obd_poll_before[0]:
+                request[_OBD_POLL_FIXED - 1] == 0:
+            self.device._obd_poll = obd_poll_before[0]
+            self.device._obd_interval_ms = obd_poll_before[1]
+        if "obd_reset_keeps_polling" in self.faults and obd_poll_before and \
+                obd_poll_before[0] and response[2] == 0 and \
+                request[0] == refdec.OPCODE["CAN_RESET"]:
+            # The reset cleared the receiver and was answered ok; the
+            # transmitter quietly keeps its schedule -- the pre-amendment
+            # CAN_RESET, as a shipped device would carry it.
             self.device._obd_poll = obd_poll_before[0]
             self.device._obd_interval_ms = obd_poll_before[1]
         if "drops_a_response" in self.faults and len(request) == 2 and \
@@ -861,6 +881,14 @@ class LoopbackTransport(Transport):
         if wanted is None:
             return request
         params = request[2:2 + wanted].ljust(wanted, b"\x00")
+        if name in refdec.OPCODE_VARIADIC:
+            # The grammar puts count:u8 last in the fixed part, so a lenient
+            # device trims or pads the trailing list to the count it read --
+            # without this the "device that copes" refused every well-formed
+            # variadic request by truncating its tail away.
+            count = params[-1]
+            tail = bytes(request[2 + wanted:2 + wanted + count])
+            return bytes(request[:2]) + params + tail.ljust(count, b"\x00")
         return bytes(request[:2]) + params
 
     def _indulge_aiding(self, request):
@@ -900,13 +928,14 @@ class LoopbackTransport(Transport):
         supports before dispatch, so the request is answered ok and the poll
         loop genuinely runs -- the defect a client meets is a device
         transmitting for a PID it never verified."""
-        if len(request) < 5 or request[0] != refdec.OPCODE["OBD_POLL_SET"]:
+        if len(request) < _OBD_POLL_FIXED or \
+                request[0] != refdec.OPCODE["OBD_POLL_SET"]:
             return request
-        pids = bytearray(request[5:])
+        pids = bytearray(request[_OBD_POLL_FIXED:])
         for i, pid in enumerate(pids):
             if not self.device._obd_pid_supported(pid):
                 pids[i] = 0x0C
-        return bytes(request[:5]) + bytes(pids)
+        return bytes(request[:_OBD_POLL_FIXED]) + bytes(pids)
 
     def _corrupt_response(self, response, request):
         opcode, status = response[0], response[2]

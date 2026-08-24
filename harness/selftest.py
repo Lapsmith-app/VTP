@@ -108,6 +108,7 @@ CAUGHT_BY = {
     "obd_capacity_zero": "obd.capacities",
     "obd_accepts_unsupported_pid": "obd.poll_refusals",
     "obd_ignores_stop": "obd.poll_and_flag",
+    "obd_reset_keeps_polling": "obd.reset_stops",
     "obd_delivery_needs_subscription": "obd.poll_and_flag",
     "obd_flag_never_set": "obd.poll_and_flag",
 }
@@ -122,6 +123,11 @@ CAUGHT_BY = {
 #: silently forever. Every entry is a debt with a reason attached, not a
 #: dispensation: shortening this list is how this harness gets better.
 NOT_SEEDED = {
+    "info.reserved_fields":
+        "Info has no reserved fields in this version (SPEC.md 15 assigned "
+        "bytes 20 and 22-23), so no byte exists to seed a fault against; "
+        "when a later minor reserves one, the check revives itself and this "
+        "excuse must be deleted with a fault added",
     "gatt.service":
         "the loopback transport IS the service; a run against a device without "
         "one cannot reach the checks that follow it",
@@ -316,6 +322,9 @@ def _coverage_problems():
 #: matching, a refusal newly read as "not applicable" -- looks exactly like a
 #: passing run. This is the baseline that makes that visible.
 EXPECTED_SKIPS = {
+    "info.reserved_fields":
+        "Info has no reserved fields in this version; the check revives "
+        "when a later minor reserves a byte",
     "control.opcode_capability":
         "this profile owns every opcode in this version",
     "gatt.inert_cccd":
