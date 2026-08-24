@@ -475,9 +475,9 @@ def decode_obd_info(buf):
         if not _obd_identifier_valid(e["id"]):
             raise Reject("identifier")
         ecus.append(e)
-    # The id is reported raw, bit 29 included: identity is bits 0-29, and the
-    # whole use of the value is to become a CAN_SUBSCRIBE id, which takes the
-    # same layout.
+    # The id is reported raw, bit 29 included: identity is bits 0-29, these
+    # are the identifiers §15.5's fallback delivers on, and the value drops
+    # straight into a CAN_SUBSCRIBE id, which takes the same layout.
     #
     # `absent` rides at the top level, where the runner checks it, and inside
     # the probe for callers holding only that record.

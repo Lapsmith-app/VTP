@@ -2168,8 +2168,10 @@ did not use. Its layout is `can_record`'s: bits 0–28 arbitration identifier,
 bit 29 the format bit, so 11- versus 29-bit addressing is derived from the
 value rather than stated beside it, and the value drops directly into a
 `CAN_SUBSCRIBE` `id`. Each `obd_ecu` entry carries the response identifier
-of one answering ECU in the same layout, for the same reason: subscribing to
-the entries is how a client arranges to receive the answers (§15.5).
+of one answering ECU in the same layout: these are the identifiers §15.5's
+fallback delivers on while a poll set is active, and the values a client
+uses directly if it chooses to govern that delivery with subscriptions of
+its own.
 
 Four rules bind the record's content, and they are content rules in §1.1's
 sense — the layout is sound, so a receiver MUST decode the response, MUST
@@ -2283,19 +2285,60 @@ is idempotent — replacing a set with itself is the same set — which is its
 §9.4 retry-safety. The change takes effect within one interval: after an
 `ok`, at most one further request MAY go out under the old set.
 
+An accepted, non-empty poll set is the whole of what a client must do to
+receive the answers: §15.5 delivers them on the probe's reported response
+identifiers with no subscription required. Subscriptions remain what they
+are everywhere — the client's choice of broadcast traffic, and its means
+of governing the diagnostic identifiers more tightly than `every_frame`.
+
 ### 15.5 Delivery — responses are ordinary frames
 
 There is no OBD record type and no OBD stream. An ECU's answer is a CAN
 frame on its response identifier, and it reaches the client exactly as any
 other frame does: through the CAN characteristic, inside batches, with
-bus-arrival timestamps, subject to `seq`, `dropped` and shedding (§6) — and
-**only through subscriptions**. A client that wants the answers subscribes
-to the entry identifiers `OBD_INFO` reported, or to `0x7E8`–`0x7EF` with
-one masked subscription. A device MUST NOT install, modify or widen a
-subscription on the client's behalf, and MUST NOT deliver a response frame
-no subscription matches: what the poll set controls is the transmitter,
-what subscriptions control is the receiver, and this section is the whole
-of how they relate.
+bus-arrival timestamps, subject to `seq`, `dropped` and shedding (§6).
+Which frames reach it is decided by the subscription table plus exactly one
+rule:
+
+> **While the poll set is non-empty, a frame whose identifier (over bits
+> 0–29) equals an entry id reported by the most recent probe, and which
+> matches no installed subscription, MUST be forwarded, as if by an
+> `every_frame` subscription.**
+
+A client that sets a poll therefore receives the answers, with no further
+ceremony: `OBD_POLL_SET` is the one instruction, and a protocol that let a
+device transmit on a car while discarding the replies as unsubscribed would
+have made its worst state the price of forgetting a call. The rule is a
+**fallback, not an entry in the table**, and each half of that is load-
+bearing:
+
+- **Frames the table matches are governed by the table**, exactly as if the
+  OBD role did not exist: §9.1 and §9.2 apply unchanged, and this rule
+  never sees those frames. A client that wants the responses rate-limited
+  installs an ordinary `periodic` subscription on the response identifiers,
+  and it governs. The fallback yields to anything the client says.
+- **It is not subscription state.** It consumes no slot against
+  `can_subscription_slots`, `CAN_UNSUBSCRIBE` cannot name it — an attempt
+  is `unknown_subscription`, as for anything the client never installed —
+  and it needs no per-identifier mode state, because `every_frame` has
+  none. It exists exactly while the poll set is non-empty and the probe
+  result stands, and dies with them (§15.7).
+
+Frames the fallback forwards are accepted frames like any other: they are
+batched, timestamped, counted by `seq`, and shed under load with the loss
+reported in `dropped` (§6.3, §8.3).
+
+The identifiers are the probe's, so the fallback delivers **what the bus
+says on the diagnostic response identifiers**, not only what this device
+asked for: another tester's answers on `0x7E8` arrive too, exactly as they
+would through an explicit subscription. That is deliberate — the frames are
+self-describing, as the next paragraph makes them, and a logger that
+suppressed them would be hiding real traffic — and it is the stated cost: a
+client is delivered
+frames on identifiers it never named. A probe's own mask responses ride the
+same rule: delivered through a matching subscription, or through the
+fallback when a poll set is already active, and otherwise not at all — the
+client gets their content in the `OBD_INFO` detail either way.
 
 **The CAN stream carries what the device hears, never what it says.** A
 device MUST NOT emit a `can_record` for a frame it transmitted itself,
@@ -2347,9 +2390,8 @@ cleared, and polling therefore stops, on every one of:
   stop, always accepted (§15.4).
 - **`CAN_RESET`** — which clears the poll set along with the subscription
   table (§9). The CAN role has one reset, and it resets everything the
-  role does: a device left transmitting requests whose responses nothing
-  is subscribed to would be the worst reachable state, so the one opcode
-  that clears the receiver clears the transmitter with it.
+  role does: after it, the device neither transmits nor forwards, and a
+  client rebuilds both halves the way §9.1 already makes the strategy.
 - **Link loss** — exactly as the subscription table is cleared (§9.1). A
   reconnecting client finds a known, silent state and reprograms
   everything, which §9.1 already makes the strategy.
@@ -2361,6 +2403,14 @@ cleared, and polling therefore stops, on every one of:
 A device MUST NOT re-arm polling itself in any of these cases, and MUST
 NOT persist a poll set across connections. There is no state in which a
 VTP/1 device transmits and no connected client asked it to.
+
+§15.5's fallback delivery ends with the poll set, in every one of these
+cases: it exists so a polling client receives the answers, and once nothing
+is being asked, nothing is delivered that the subscription table does not
+name. What survives which edge follows what each thing is — the probe
+result is a fact about the car, so `CAN_RESET` leaves it standing and a new
+poll set re-arms without a second probe; the link's death clears
+everything, and the next connection starts at declare, verify, use.
 
 ### 15.8 Sharing the bus
 

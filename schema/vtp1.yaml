@@ -697,8 +697,10 @@ records:
     size: 4
     desc: "One ECU that answered the probe, named by the identifier it responds on."
     fields:
-      # Same identifier layout as request_id, for the same reason: the whole
-      # use of this value is to become the `id` of a CAN_SUBSCRIBE.
+      # Same identifier layout as request_id, for the same reason: these are
+      # the identifiers SPEC.md 15.5's fallback delivers on while a poll set
+      # is active, and the value drops straight into a CAN_SUBSCRIBE `id`
+      # when a client chooses to govern that delivery itself.
       - {name: id, offset: 0, size: 4, type: u32,
          desc: "Response identifier; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero. Entries strictly ascending over bits 0-29 (SPEC.md 15.2)"}
 

@@ -238,7 +238,7 @@ async def obd_poll_refusals(s):
 
 @check(id="obd.poll_and_flag", section="15.6", phase="control", severity="MUST",
        requires=("obd",), adversarial=True,
-       title="Polling delivers through subscriptions, is flagged, and stops")
+       title="Polling delivers with nothing subscribed, is flagged, and stops")
 async def obd_poll_and_flag(s):
     c = _control(s)
     probe = _probe(s)
@@ -263,21 +263,23 @@ async def obd_poll_and_flag(s):
                 continue        # the decode checks own that finding
         return out
 
-    # The receiver: one subscription per reported ECU id. The device MUST
-    # NOT have installed any of this itself -- §15.5 -- which is implicitly
-    # held by can.silent_until_asked watching the stream before now.
-    for ecu in ecu_ids:
-        r = await c.subscribe_can(ecu)
-        if not r.ok:
-            raise Fail(f"subscribing to reported ECU id 0x{ecu:X} was "
-                       f"answered {r.status_name}")
+    # Deliberately NOTHING is subscribed: §15.5's fallback is the delivery
+    # path, and an accepted poll set is the whole of what a client does to
+    # receive the answers. A known state first -- CAN_RESET clears any table
+    # entries earlier checks left, and leaves the probe result standing
+    # (§15.7).
+    r = await c.request(refdec.OPCODE["CAN_RESET"])
+    if not r.ok:
+        raise Fail(f"CAN_RESET was answered {r.status_name}")
     try:
         r = await c.request(
             refdec.OPCODE["OBD_POLL_SET"],
             struct.pack("<HB", interval, 1) + bytes([supported]))
         if not r.ok:
             raise Fail(f"a probed, supported PID (0x{supported:02X}) at "
-                       f"{interval} ms was answered {r.status_name}")
+                       f"{interval} ms was answered {r.status_name} -- and "
+                       f"§15.7 leaves the probe result standing across the "
+                       f"CAN_RESET this check just issued")
         t_started = time.monotonic()
         await asyncio.sleep(0.35)
 
@@ -288,8 +290,18 @@ async def obd_poll_and_flag(s):
             raise Fail(
                 f"no response arrived on any reported ECU id within 0.35 s "
                 f"of an accepted poll set (PID 0x{supported:02X}, "
-                f"{interval} ms); either the transmitter is not running or "
-                f"delivery bypasses the subscriptions that were installed")
+                f"{interval} ms) with nothing subscribed; §15.5 -- the "
+                f"fallback delivers on the probe's reported identifiers, so "
+                f"a polling device that stays silent has either stopped "
+                f"transmitting or is discarding the answers it asked for")
+        strays = [f for f in frames if f["id"] not in ecu_ids]
+        if strays:
+            raise Fail(
+                f"{len(strays)} frame(s) arrived on identifiers outside the "
+                f"probe's reported list, with nothing subscribed; §15.5's "
+                f"fallback delivers on the reported response identifiers "
+                f"and nothing else",
+                ids=sorted({hex(f["id"]) for f in strays}))
         request_id = probe["probe"]["request_id"] & 0x1FFFFFFF
         if any(f["id"] == request_id for f in frames):
             raise Fail(

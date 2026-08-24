@@ -1062,8 +1062,38 @@ construction.
 
 Delivering responses as ordinary `can_record`s follows from the same
 split, and it kept the wire format untouched: no new record type, no new
-characteristic, no new stream — a VTP/1.0 client that has never heard of
-bit 10 sees frames it did not subscribe to nothing of.
+characteristic, no new stream — and a VTP/1.0 client that has never heard
+of bit 10 is unaffected, because nothing below is reachable without an
+`OBD_POLL_SET` it cannot send.
+
+How the responses reach the client was the last question settled, and it
+was settled by reversing a draft. The draft required an explicit
+subscription: poll responses would arrive only through the table, like
+every other frame, on the argument that one delivery path is cleaner than
+two. What that design actually permitted was a device **transmitting
+requests on a moving car and discarding the answers as unsubscribed** —
+every cost of the role and none of its benefit, reachable as the default
+consequence of forgetting one call. A protocol whose worst state is its
+most likely mistake fails this repository's own standard, and the
+double-instruction bought nothing the safety story needed: the
+safety-relevant act is transmitting, and `OBD_POLL_SET` is already its
+explicit consent. Requiring a second instruction before the device may
+*hand over* answers it already extracted was ceremony wearing safety's
+clothes.
+
+SPEC §15.5's rule is the repair, shaped so the draft's one real virtue —
+a stream fully determined by declared state, with SPEC §9.2 total over
+it —
+survives: while the poll set is non-empty, frames on the probe's reported
+response identifiers that match **no installed subscription** are forwarded
+`every_frame`. The table still governs everything it matches, so SPEC §9.1
+and SPEC §9.2 are untouched and a client that wants tighter control installs
+ordinary `periodic` subscription, which wins; the fallback exists only
+underneath, is not table state, and dies with the poll set. The cost is
+recorded where it is paid (SPEC §15.5): the device cannot tell its own
+answers from another tester's on the same identifiers, so a polling client
+is delivered what the bus says there, including frames it never asked
+after — which for a logger is closer to a duty than a defect.
 
 ### 11.4 Why the probe is an opcode, and Info stays about the device
 

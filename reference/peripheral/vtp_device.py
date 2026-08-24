@@ -425,10 +425,13 @@ class VtpDevice:
         # what the most recent probe of THIS connection read (None until one
         # has); nothing is pollable without it, which is what makes
         # declare-verify-use structural rather than convention (SPEC.md 15.4).
-        # `_obd_poll` is the ordered PID schedule; empty means the
+        # `_obd_ecu_ids` is the probe's reported response identifiers -- the
+        # ones SPEC.md 15.5's fallback delivers on while the poll set is
+        # non-empty. `_obd_poll` is the ordered PID schedule; empty means the
         # transmitter is off, and empty is the only state a connection ever
         # starts in.
         self._obd_masks = None
+        self._obd_ecu_ids = frozenset()
         self._obd_poll = []
         self._obd_interval_ms = 0
         self._obd_index = 0
@@ -472,6 +475,7 @@ class VtpDevice:
         # SPEC.md 15.7 -- polling never survives a connection edge, and the
         # probe result belongs to the connection that asked for it.
         self._obd_masks = None
+        self._obd_ecu_ids = frozenset()
         self._obd_poll, self._obd_interval_ms, self._obd_index = [], 0, 0
         self._obd_rx = []
 
@@ -526,8 +530,10 @@ class VtpDevice:
         # SPEC.md 15.7 -- transmit MUST NOT outlive the client that asked for
         # it. Cleared when the link DROPS, exactly as the subscription table
         # is: a disconnected device that kept polling would be transmitting
-        # on a car whose owner has walked away with the phone.
+        # on a car whose owner has walked away with the phone. The fallback
+        # delivery dies with the poll set it serves.
         self._obd_masks = None
+        self._obd_ecu_ids = frozenset()
         self._obd_poll, self._obd_interval_ms, self._obd_index = [], 0, 0
         self._obd_rx = []
         # The MTU was NEGOTIATED, so it describes a link that has gone. It used
@@ -876,8 +882,11 @@ class VtpDevice:
             })
 
         # Flush partial batches on a timer so a quiet bus or a slow ODR still
-        # delivers, rather than waiting for a batch that may never fill.
-        if (caps & CAP_CAN and self._subscriptions
+        # delivers, rather than waiting for a batch that may never fill. The
+        # fallback (SPEC.md 15.5) is a delivery path like the table, so an
+        # active poll set keeps the timer alive with no subscription
+        # installed -- the common OBD-only client has exactly that shape.
+        if (caps & CAP_CAN and (self._subscriptions or self._obd_poll)
                 and "can" not in undelivered
                 and now >= self._next_can_flush_us):
             batch = self._flush_can(now)
@@ -990,17 +999,28 @@ class VtpDevice:
             self._obd_rx.append(
                 (now, ecu_id, self._obd_response_frame(pid, self._obd_pid_data(pid, st))))
 
+    def _obd_fallback_delivers(self, cid):
+        """SPEC.md 15.5 -- the one delivery rule beside the table: while the
+        poll set is non-empty, a frame on a probe-reported response
+        identifier that matches no installed subscription is forwarded
+        every_frame. A fallback and not an entry: it holds no slot, keeps no
+        mode state, and dies with the poll set (SPEC.md 15.7)."""
+        return bool(self._obd_poll) and cid in self._obd_ecu_ids
+
     def _due_obd_frames(self, now):
-        """Bus arrivals the device's own requests caused, through the same
-        admission as any other frame: governing subscription, then per-id
-        mode state (SPEC.md §6.8). A device MUST NOT install a subscription
-        on the client's behalf and MUST NOT deliver a response nothing
-        matches (SPEC.md 15.5), and this shared path is what makes that true
-        by construction rather than by parallel code."""
+        """Bus arrivals the device's own requests caused.
+
+        Admission runs the table first, exactly as for any other frame: a
+        frame a subscription matches is governed by that subscription's mode
+        (SPEC.md §6.8), so a client that installs a periodic entry on a
+        response identifier gets exactly what it asked for. Only a frame the
+        table ignores falls through to SPEC.md 15.5's rule."""
         pending, self._obd_rx = self._obd_rx, []
         for t, cid, payload in pending:
             sub = self._governing(cid)
             if sub is None:
+                if self._obd_fallback_delivers(cid):
+                    yield {"id": cid, "payload": payload, "_t": t}
                 continue
             st = sub["per_id"].setdefault(
                 cid, {"last": 0, "seen": 0, "emitted_at": 0})
@@ -1050,8 +1070,10 @@ class VtpDevice:
                 self._next_obd_tx_us, now + self._obd_interval_ms * 1000)
         if not answered:
             self._obd_masks = None
+            self._obd_ecu_ids = frozenset()
             return enc.encode_obd_info(dict(validity=0, count=0), [])
         self._obd_masks = tuple(union)
+        self._obd_ecu_ids = frozenset(answered)
         return enc.encode_obd_info(
             dict(validity=1, count=len(answered),
                  request_id=self.OBD_REQUEST_ID,

@@ -545,11 +545,14 @@ Nothing appears on these identifiers until a client drives the role:
 `OBD_INFO` probes (the mask responses `41 00 …` cross the bus, in J1979's own
 MSB-first bit order — the probe *detail* carries SPEC.md §15.3's LSB-first
 order, and the transcription between them is deliberate), and `OBD_POLL_SET`
-starts the loop. Responses are subject to subscriptions like every other
-frame, the request frames never appear (§15.5), and `can_header.flags` bit 1
-is set on every batch flushed while the poll set is non-empty. The values
-derive from the same motion state as everything else: PID `0x0C` decodes to
-the same rpm `0x0C0` carries.
+starts the loop. While the poll set is non-empty the answers are delivered
+with nothing subscribed — SPEC.md §15.5's fallback, on exactly the response
+identifiers the probe reported — and any subscription a client does install
+on those identifiers governs its frames first, `periodic` included. The
+request frames never appear (§15.5), and `can_header.flags` bit 1 is set on
+every batch flushed while the poll set is non-empty. The values derive from
+the same motion state as everything else: PID `0x0C` decodes to the same rpm
+`0x0C0` carries.
 
 ## The screen
 

@@ -1260,25 +1260,25 @@ def main():
     check(probe["absent"] == [],
           "a probe something answered has every gated field valid")
 
-    # SPEC.md 15.5 -- the probe's mask responses were real bus frames, and
-    # the poll loop's responses will be too; with NOTHING subscribed, none of
-    # them may reach the client.
+    # SPEC.md 15.5 -- the probe's mask responses were real bus frames, but
+    # with no poll set and nothing subscribed there is no delivery path.
+    # Their content reached the client in the OBD_INFO detail; the frames
+    # themselves have nowhere to go yet.
+    check(not obd_run(0.3),
+          "probe responses have no delivery path before a poll set exists "
+          "(SPEC.md 15.5)")
+
+    # SPEC.md 15.4, 15.5 -- an accepted poll set is the WHOLE of what a
+    # client must do to receive the answers: nothing is subscribed here, and
+    # the fallback delivers on the probe's reported response identifiers.
     check(obd_ctl(dev.OBD_POLL_SET, 0x63,
                   struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
           "a probed, supported PID at a legal interval MUST be accepted")
-    check(not obd_run(0.5),
-          "no subscription matched, so no OBD response may be delivered: the "
-          "poll set controls the transmitter, never the receiver "
-          "(SPEC.md 15.5)")
-
-    # Subscribe to the diagnostic response block and the answers arrive as
-    # ordinary frames, on the ids OBD_INFO reported, polling flag set.
-    check(obd_ctl(dev.CAN_SUBSCRIBE_MASK, 0x64,
-                  struct.pack("<IIBH", 0x7E8, 0x3FFFFFF8, 0, 0))[2]
-          == dev.ST_OK, "subscribing 0x7E8-0x7EF must succeed")
     batches = obd_run(1.0)
     frames = [r for b in batches for r in b["records"]]
-    check(frames, "a subscribed client MUST receive the poll responses")
+    check(frames,
+          "a polling client MUST receive the answers with no subscription "
+          "installed -- the fallback is the delivery path (SPEC.md 15.5)")
     check({r["id"] for r in frames} <= set(car.OBD_ECUS),
           "every delivered frame is on an ECU response id OBD_INFO reported")
     check(all(b["header"]["flags"] & 0x02 for b in batches),
@@ -1308,6 +1308,35 @@ def main():
         check(abs(got_rpm - want_rpm) < 2,
               f"PID 0x0C decodes to {got_rpm} rpm; the circuit says "
               f"{want_rpm:.0f} at that instant")
+
+    # SPEC.md 15.5 -- the fallback is not an entry in the table: it holds no
+    # slot and CAN_UNSUBSCRIBE cannot name it.
+    check(obd_ctl(dev.CAN_UNSUBSCRIBE, 0x80,
+                  struct.pack("<II", 0x7E8, 0x3FFFFFFF))[2]
+          == dev.ST_UNKNOWN_SUBSCRIPTION,
+          "CAN_UNSUBSCRIBE naming a fallback-delivered id MUST answer "
+          "unknown_subscription; the client never installed anything "
+          "(SPEC.md 15.5)")
+
+    # SPEC.md 15.5 -- the fallback yields to the table. A periodic
+    # subscription installed on one response identifier governs those
+    # frames; the other ECU's answers stay every_frame underneath.
+    check(obd_ctl(dev.CAN_SUBSCRIBE, 0x81,
+                  struct.pack("<IBH", 0x7E8, dev.SUB_PERIODIC, 400))[2]
+          == dev.ST_OK, "a periodic subscription on a response id must install")
+    obd_run(0.3)      # drain frames admitted before the subscription governed
+    governed = [r for b in obd_run(1.0) for r in b["records"]]
+    n_7e8 = sum(1 for r in governed if r["id"] == 0x7E8)
+    n_7e9 = sum(1 for r in governed if r["id"] == 0x7E9)
+    check(n_7e8 <= 5,
+          f"0x7E8 is governed by a 400 ms periodic subscription and MUST be "
+          f"rate-limited; {n_7e8} frames arrived in 1 s")
+    check(n_7e9 >= 20,
+          f"0x7E9 matches nothing installed and stays every_frame under the "
+          f"fallback; only {n_7e9} frames arrived in 1 s")
+    check(obd_ctl(dev.CAN_UNSUBSCRIBE, 0x82,
+                  struct.pack("<II", 0x7E8, 0x3FFFFFFF))[2] == dev.ST_OK,
+          "removing the periodic subscription must succeed")
 
     # SPEC.md 15.4 -- a refused request leaves the installed set unchanged.
     check(obd_ctl(dev.OBD_POLL_SET, 0x65,
@@ -1361,8 +1390,9 @@ def main():
                   struct.pack("<IIBH", 0x7E8, 0x3FFFFFF8, 0, 0))[2]
           == dev.ST_OK, "resubscribing after CAN_RESET must succeed")
     check(not obd_run(0.5),
-          "CAN_RESET MUST clear the poll set: with a fresh subscription and "
-          "no new OBD_POLL_SET, nothing may arrive (SPEC.md 15.7)")
+          "CAN_RESET MUST clear the poll set: even with a subscription "
+          "installed, no new OBD_POLL_SET means no transmitter and nothing "
+          "on the bus to forward (SPEC.md 15.7)")
     # ...but the probe result is a fact about the car, not the poll set, so
     # a re-arm without a second probe still works on this connection.
     check(obd_ctl(dev.OBD_POLL_SET, 0x6F,

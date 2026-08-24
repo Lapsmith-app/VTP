@@ -343,6 +343,7 @@ FAULTS = {
     "obd_capacity_zero": "SPEC.md §15 — the `obd` bit declared with obd_poll_slots 0, a poll set nothing fits",
     "obd_accepts_unsupported_pid": "SPEC.md §15.4 — a PID the probe's union does not claim is polled anyway",
     "obd_ignores_stop": "SPEC.md §15.7 — the empty poll set is answered ok and the transmitter keeps going",
+    "obd_delivery_needs_subscription": "SPEC.md §15.5 — poll responses are delivered only through the table, so an unsubscribed polling client transmits on the car and receives nothing",
     "obd_flag_never_set": "SPEC.md §15.6 — the poll set is non-empty and no batch carries the polling flag",
 }
 
@@ -433,6 +434,12 @@ class LoopbackTransport(Transport):
         self.device = vtp_device.VtpDevice(mtu=self._mtu, **self._device_kwargs)
         self.device.set_negotiated_mtu(self._mtu)
         self.device.on_connect()
+        if "obd_delivery_needs_subscription" in self.faults:
+            # SPEC.md §15.5 -- the superseded draft, as a device would have
+            # shipped it: the fallback is disabled and only table matches are
+            # forwarded, so a client that sets a poll and subscribes nothing
+            # pays the bus traffic and sees none of the answers.
+            self.device._obd_fallback_delivers = lambda cid: False
         if "subs_survive_reconnect" in self.faults and self._stale_subs:
             # SPEC.md §9.1 — the table MUST be cleared when the link drops. A
             # device that keeps it hands the next client state it never

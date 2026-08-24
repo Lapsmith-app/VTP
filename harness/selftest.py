@@ -108,6 +108,7 @@ CAUGHT_BY = {
     "obd_capacity_zero": "obd.capacities",
     "obd_accepts_unsupported_pid": "obd.poll_refusals",
     "obd_ignores_stop": "obd.poll_and_flag",
+    "obd_delivery_needs_subscription": "obd.poll_and_flag",
     "obd_flag_never_set": "obd.poll_and_flag",
 }
 
