@@ -26,10 +26,10 @@ Then, from `reference/peripheral/`:
 ```sh
 # with the debug panel (the device's display) — costs ~30% of
 # notification throughput
-open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py"
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --encrypt none
 
 # headless — REQUIRED when measuring throughput or loss
-open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display
+open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display --encrypt none
 ```
 
 **`open -n` is mandatory.** Plain `open` activates an already-running copy and
@@ -37,8 +37,14 @@ open -n "$PWD/VTPPeripheral.app" --args "$PWD/serve.py" --no-display
 with a new `--encrypt` mode) when nothing changed. If in doubt, stop the old
 instance first.
 
-Other modes (`--encrypt all|control|none`, custom CAN channel CSV): see the
-README. Default is encrypt-everything-except-Info.
+**`--encrypt none` is deliberate here**, and differs from `serve.py`'s own
+default of `all` (everything except Info). A Mac hosting the peripheral for an
+iPhone on the same iCloud account hits a macOS stack fault that leaves the link
+unusable — see [When the client can see `VTP` but cannot
+connect](#when-the-client-can-see-vtp-but-cannot-connect). Drop the flag to
+exercise the real postures (`--encrypt all|control|none`), but expect that
+fault, and prefer a Linux host for posture work. Custom CAN channel CSV and the
+rest: see the README.
 
 ### Linux
 
@@ -60,6 +66,39 @@ negotiation and `CTRL ... -> ok` lines. Caveat when reading the log:
 CoreBluetooth gives a peripheral no true connect/disconnect callback, so a
 client that unsubscribes from everything while staying connected logs as a
 disconnect.
+
+## When the client can see `VTP` but cannot connect
+
+The symptom: the client lists the device, connecting does nothing, and
+`/tmp/vtp-peripheral.log` shows the advertisement and then **nothing at all** —
+no `READ`, no `ATT MTU`, no `CLIENT CONNECTED`.
+
+That silence is not proof the client never arrived. CoreBluetooth gives a
+peripheral no connect callback and the MTU line fires only on subscribe, so a
+connection and a complete service discovery leave no trace in this log. Check
+the Mac's stack instead — note `/usr/bin/log`, because zsh's `log` builtin
+shadows the tool and fails with "too many arguments":
+
+```sh
+/usr/bin/log show --last 5m \
+  --predicate 'subsystem == "com.apple.bluetooth" AND category == "Stack.SMP"' \
+  --style compact | grep -c "Failed to encrypt"
+```
+
+Non-zero means the fault is the Mac's and not the peripheral's. macOS expects an
+encrypted link for an iCloud cloud-paired (`SameAccount`) iPhone on *any*
+incoming LE connection — including one to this GATT server, which rides on the
+Mac's single LE identity — then fails to produce the key, logs `Failed to
+encrypt connection STATUS 761` with `isPairing=0`, and disables encryption
+rather than re-pairing. The link stays up and unusable.
+
+Deleting the MacBook from the iPhone's Bluetooth list clears it, but iCloud
+re-pairs within seconds, so it returns. There is no `VTP` entry on the iPhone to
+forget — the peripheral has no identity of its own. No `serve.py` flag affects
+any of this: it fails under `--encrypt none` too, which is why that posture is
+only a partial mitigation. The durable fix is a host with no Apple-ecosystem
+relationship to the client — the Linux path above needs no bundle, no signing
+and no permission prompt, and `bluetoothctl` gives deterministic bond control.
 
 ## Stop
 
