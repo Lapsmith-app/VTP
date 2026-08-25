@@ -319,7 +319,24 @@ bitmasks:
       # physical listen-only switch clears it while the switch is set.
       - {bit: 10, name: obd, implies: [can, control],
          desc: "Device transmits OBD-II diagnostic requests on the bus (§15)"}
-    reserved_from: 11
+      # Bit 11 buys back sample rate without moving the bound bit 10 exists to
+      # state. SPEC.md 15.1 already pads every request frame to eight bytes, so
+      # `[0x07, 0x01, p1..p6]` costs exactly what `[0x02, 0x01, pid]` costs: the
+      # worst case on the bus stays one short frame per obd_min_interval_ms,
+      # and the response side gets STRICTLY smaller -- one frame per ECU per
+      # group where there were one per ECU per PID.
+      #
+      # `implies: [obd]` and not [obd, can, control]: the validator walks every
+      # set bit, so obd's own implications are checked when it reaches obd.
+      #
+      # No Info capacity accompanies it. Six PIDs per request is the request
+      # frame's own limit and six response bytes per group is J1979's; both are
+      # constants of the bus rather than properties of a device, so a field
+      # would be a second statement of what the client already knows -- the
+      # argument that removed max_notify_bytes (RATIONALE 8.2).
+      - {bit: 11, name: obd_pid_grouping, implies: [obd],
+         desc: "Accepts grouped PIDs in OBD_POLL_SET (SPEC.md 15.4.1)"}
+    reserved_from: 12
     reserved_purpose: "Roles and features added in a later minor"
   # These three were plain u8 fields with a prose description, so nothing
   # derived their reserved ranges: Appendix A listed them by hand and went

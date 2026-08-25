@@ -1034,17 +1034,17 @@
       "name": "reserved-bits-info-capabilities",
       "record": "info",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- info.capabilities bits 11-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "desc": "SPEC.md 2 -- info.capabilities bits 12-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
         "protocol_major": 1,
         "protocol_minor": 0,
-        "capabilities": 2147485567,
+        "capabilities": 2147487615,
         "gps_rate_hz": 10,
         "gps_max_rate_hz": 10,
         "obd_poll_slots": 16,
         "obd_min_interval_ms": 20
       },
-      "expect_hex": "01007f0700000a000a000000000000000000000010001400"
+      "expect_hex": "01007f0f00000a000a000000000000000000000010001400"
     },
     {
       "name": "reserved-bits-info-clock-flags",
