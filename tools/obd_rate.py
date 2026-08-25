@@ -44,6 +44,41 @@ PID_RESPONSE_BYTES = {
 GROUP_BUDGET = 6
 
 
+def verify_table(car, now_s=0.0):
+    """Check PID_RESPONSE_BYTES against what the car actually emits.
+
+    The table above is the CLIENT's, and SPEC.md 15.5 is why: the device
+    holds no PID sizes and must not. But a client table that silently drifts
+    from the car does not fail loudly -- it changes the measurement. One
+    wrong entry (0x33 as 3 rather than 2) made the packer emit six groups
+    instead of five and this tool report 8.20 Hz where the truth was 9.80,
+    with no error anywhere. In the other direction the walk in classify()
+    steps into the middle of a pair, reads a data byte as a PID, and
+    undercounts.
+
+    So the one number this tool exists to produce is guarded by comparing
+    the table against the car's own answers before anything is measured.
+    Nothing is derived FROM the car -- that would defeat the point, which is
+    that clients size groups themselves -- only checked against it.
+    """
+    st = car.circuit.at(now_s)
+    wrong = []
+    for pid in sorted(set(RACE_SET)):
+        if pid not in PID_RESPONSE_BYTES:
+            wrong.append(f"PID {pid:02X} is polled but has no size in "
+                         f"PID_RESPONSE_BYTES")
+            continue
+        actual = 1 + len(car._obd_pid_data(pid, st))
+        if actual != PID_RESPONSE_BYTES[pid]:
+            wrong.append(f"PID {pid:02X}: the table says {PID_RESPONSE_BYTES[pid]} "
+                         f"response bytes, the car emits {actual}")
+    if wrong:
+        raise SystemExit(
+            "the client PID size table disagrees with the car, so every rate "
+            "below would be wrong in a way nothing reports:\n  "
+            + "\n  ".join(wrong))
+
+
 def pack_greedily(pids):
     """Group PIDs first-fit into six-byte responses, preserving order.
 
@@ -177,6 +212,10 @@ def main():
         dev.OBD_MIN_INTERVAL_MS = args.min_interval_ms
     interval = (args.interval_ms if args.interval_ms is not None
                 else dev.OBD_MIN_INTERVAL_MS)
+
+    # Before anything is measured, and before the packer reads the table.
+    probe_car = dev.VtpDevice(now_us=lambda: 0, mtu=247, gps_hz=0, imu_hz=0)
+    verify_table(probe_car)
 
     grouped = pack_greedily(RACE_SET)
     single = [[pid] for pid in RACE_SET]

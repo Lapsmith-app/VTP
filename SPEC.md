@@ -2356,6 +2356,19 @@ Three rules, continuing §15.4's ordered refusals:
    it reads bit 11 first, and declare-verify-use holds as it does for the
    role itself.
 
+**The cost is one lost error check, and it is stated rather than hidden.**
+On a device declaring bit 11, a PID byte with bit 7 set is a grouped PID and
+not a malformed one. A client that computes a PID wrongly — an `OR` against
+a flag constant, a sign-extended byte, a stale enum — and sends `0x8C` in a
+non-terminal position is answered `ok` and polls `0x0C` grouped with
+whatever follows, where the same request to a device without bit 11 is
+`bad_params` under rule 5. Only the terminal position is still caught, by
+rule 7. This is inherent to the encoding: bit 7 cannot be both a flag and a
+range check, and every alternative that keeps both costs a field in a record
+this major version has closed (§11.3). A client MUST NOT set bit 7 except to
+group deliberately, and a client that validates its own PID values before
+sending them keeps the check the device gave up.
+
 **The device does not check response sizes, and MUST NOT.** Whether a
 group's answer fits a single frame is arithmetic over J1979 response
 lengths, and those tables live in the client (§15.5). A group whose response

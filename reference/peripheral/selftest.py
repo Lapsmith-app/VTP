@@ -1476,6 +1476,30 @@ def main():
           "the answer to a (0C, 0D) group MUST be one single frame carrying "
           "both pairs: PCI 06, 41, then 0C hi lo and 0D speed")
 
+    # SPEC.md 15.1 -- the request frame, asserted directly. Grouping's whole
+    # safety claim is that a six-PID request occupies the same eight bytes a
+    # one-PID request occupies, so the worst case on the bus does not move.
+    # That is arithmetic, and arithmetic in a specification is checked.
+    for g in range(1, dev.OBD_MAX_GROUP + 1):
+        frame = dev.VtpDevice._obd_request_frame(tuple(range(1, g + 1)))
+        check(len(frame) == 8,
+              f"a {g}-PID request MUST occupy a full classic CAN frame; "
+              f"grouping is free exactly because this length never changes")
+        check(frame[0] == 1 + g and frame[1] == 0x01,
+              f"a {g}-PID request MUST carry PCI {1 + g} and mode 01")
+        check(dev.VtpDevice._obd_request_pids(frame) == tuple(range(1, g + 1)),
+              f"an ECU reading a {g}-PID request off the bus MUST see exactly "
+              f"the PIDs it names")
+        check(all(b == 0 for b in frame[2 + g:]),
+              f"a {g}-PID request MUST be zero-padded, not left with stale "
+              f"bytes an ECU would read as further PIDs")
+    try:
+        dev.VtpDevice._obd_request_frame(tuple(range(1, dev.OBD_MAX_GROUP + 2)))
+        check(False, "a group of seven does not fit a classic CAN frame and "
+                     "MUST NOT be buildable (SPEC.md 15.4.1 rule 6)")
+    except ValueError:
+        pass
+
     # SPEC.md 15.4.1 -- the device does NOT check response sizes, and the
     # failure when a client oversizes a group is a first frame that dies for
     # want of a flow control SPEC.md 15.1 forbids. Loud, immediate, and never
@@ -1495,6 +1519,27 @@ def main():
     check(all(f[0] >> 4 != 2 for f in oversize),
           "no consecutive frame may ever follow: the device sends no flow "
           "control, so the transfer it opened is dead (SPEC.md 15.1)")
+
+    # SPEC.md 15.4.1 -- the same request, the other ECU. 0x7E9's mask covers
+    # 0x0C and neither 0x10 nor 0x1F, so it answers the group it was NOT
+    # fully asked with a single frame carrying only its own subset -- which
+    # is why a client sizing against "one ECU answers everything" is sizing
+    # conservatively, and is the behaviour most likely to differ on a real
+    # gatewayed car. Untested, it was the largest unasserted claim in the
+    # role.
+    partial = [bytes.fromhex(r["payload"])
+               for b in obd_run(0.6) for r in b["records"]
+               if r["id"] == 0x7E9]
+    check(partial,
+          "an ECU implementing PART of a group MUST still answer with the "
+          "subset it implements (SPEC.md 15.4.1)")
+    check(all(f[0] >> 4 == 0 for f in partial),
+          "0x7E9's subset of (0C, 10, 1F) is one pair and fits a single "
+          "frame; it MUST NOT arrive as a first frame just because the "
+          "group overflowed on the OTHER ECU")
+    check(all(f[:3] == bytes([0x04, 0x41, 0x0C]) for f in partial),
+          "0x7E9 MUST answer with 0x0C alone -- an ECU answering for PIDs "
+          "outside its own mask is a car this device has misread")
 
     # SPEC.md 15.4.1 rule 8 -- a device WITHOUT bit 11 refuses a grouped set
     # through rule 5, unamended: bit 7 set is a value outside 0x01..0x60.

@@ -1117,12 +1117,45 @@ class VtpDevice:
         requests are never grouped."""
         return cls._obd_mode01_frame(bytes([pid]) + data)
 
+    @staticmethod
+    def _obd_request_frame(group):
+        """SPEC.md 15.1 -- the request this device puts on the bus.
+
+        `[1+g, 0x01, p1..pg]` and padding, to DLC 8. This is the whole of why
+        grouping does not move SPEC.md 15.1's bus bound: a six-PID request
+        occupies exactly the eight bytes a one-PID request occupies, so the
+        worst case stays one short frame per obd_min_interval_ms. That claim
+        is load-bearing enough to be BUILT rather than asserted in prose --
+        `_obd_transmit` answers what this frame says and not what its caller
+        meant, so a builder that got the PCI or the padding wrong would show
+        up as wrong responses in every OBD test rather than as a comment
+        nobody can check.
+        """
+        body = bytes([1 + len(group), 0x01]) + bytes(group)
+        if len(body) > 8:
+            # Unreachable through the control plane: SPEC.md 15.4.1 rule 6
+            # refuses a group of seven before it is ever installed. Raised
+            # rather than truncated because a request frame that does not fit
+            # a classic CAN frame is not a frame to put on a car.
+            raise ValueError(f"group of {len(group)} exceeds the request frame")
+        return body + b"\x00" * (8 - len(body))
+
+    @staticmethod
+    def _obd_request_pids(frame):
+        """The PIDs a request frame names, read back off the bus.
+
+        The car answers what it heard. Going through the frame rather than
+        the caller's list is what makes _obd_request_frame testable at all:
+        a wrong PCI length silently changes which PIDs the ECUs see.
+        """
+        return tuple(frame[2:1 + frame[0]])
+
     def _obd_transmit(self, group, now):
         """One Mode 01 request on the synthetic bus, and what answers it.
 
         `group` is one or more PIDs (SPEC.md 15.4.1) and goes out as ONE
-        request: `[1+g, 0x01, p1..pg]`, padded to eight bytes exactly as a
-        single-PID request is.
+        request frame, built by `_obd_request_frame` and read back by the car
+        exactly as an ECU would read it.
 
         The REQUEST frame never reaches `_obd_rx`: the CAN stream carries
         what the device hears, never what it says (SPEC.md 15.5). Every ECU
@@ -1132,10 +1165,11 @@ class VtpDevice:
         "one ECU answers everything" is sizing conservatively.
         """
         st = self.circuit.at(now / 1e6)
+        asked = self._obd_request_pids(self._obd_request_frame(group))
         for ecu_id in sorted(self.OBD_ECUS):
             masks = self.OBD_ECUS[ecu_id]
             body = b"".join(bytes([pid]) + self._obd_pid_data(pid, st)
-                            for pid in group if self._mask_has(masks, pid))
+                            for pid in asked if self._mask_has(masks, pid))
             if not body:
                 # An ECU implementing none of the group says nothing. Real
                 # ECUs vary here -- some refuse a group they support only

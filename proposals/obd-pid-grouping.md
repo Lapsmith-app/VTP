@@ -356,6 +356,29 @@ request/response at a fixed floor, and a client that needs 50 Hz needs the
 CAN broadcast stream, which is where §15.9's "deliberately the floor, not
 the ceiling" points. Grouping narrows a gap; it does not close a category.
 
+## 7.2 The cost: one lost error check
+
+Raised in review against this proposal's own encoding, and answered by
+stating it rather than patching it, because it cannot be patched.
+
+On a device declaring bit 11, a PID byte with bit 7 set is a grouped PID and
+not a malformed one. A client that computes a PID wrongly and sends `0x8C`
+in a non-terminal position is answered `ok` and polls `0x0C` grouped with
+whatever follows — where the same request to a device without bit 11 is
+`bad_params` under rule 5. Only the terminal position is still caught, by
+rule 7.
+
+Bit 7 cannot be both a group flag and a range check. Every alternative that
+keeps both — a separate group-boundary field, a group-count prefix, a second
+opcode — costs a field in a record this major version has closed, or an
+opcode, to buy back a check that only fires on an already-broken client.
+§15.4.1 now states the consequence and tells clients to validate their own
+PID values, which is where the check belongs anyway.
+
+This is the sharpest cost of the bit-7 encoding and it should be ruled on
+explicitly before the encoding is frozen — not because it is likely to bite,
+but because a wire encoding is the one thing this repository cannot revise.
+
 ## 8. Reference implementation
 
 Landed in `reference/peripheral/vtp_device.py`:
