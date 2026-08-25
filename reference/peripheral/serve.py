@@ -462,6 +462,9 @@ class Peripheral:
         self._pending = {}
         self._paint_ms = self._pump_ms = 0.0
         self._paints = 0
+        # Measured, not assumed: the pump's target rate is what every stream is
+        # sized against, so the rate it actually achieves is worth reporting.
+        self._tick_hz = 0.0
         # If the stack never calls back, every refusal costs the 250 ms safety
         # timeout instead, which would throttle far harder than the refusal
         # itself. Counted rather than assumed.
@@ -971,6 +974,18 @@ class Peripheral:
         """
         interval = 1.0 / poll_hz
         ticks = 0
+        # The tick is scheduled against an absolute deadline, not by sleeping
+        # `interval` at the end of the loop. Sleeping a fixed interval AFTER
+        # variable work makes the period `work + interval + whatever the event
+        # loop adds`, which can only ever exceed the target: measured against a
+        # client, a nominal 200 Hz ran at 172, and every stream came out ~14%
+        # under its configured rate -- GPS at 9.7 Hz, the CAN bus at 262
+        # frames/s against 306. Advancing a deadline by exactly `interval` and
+        # sleeping until it absorbs both the work and the overshoot, because a
+        # sleep that runs long shortens the next wait instead of displacing it.
+        next_tick = time.monotonic()
+        tick_epoch, tick_epoch_count = next_tick, 0
+        self._tick_hz = 0.0
         every = max(1, poll_hz // screen_hz)
         # Counted per characteristic. A single total hides the one question a
         # reader of this log actually has, which is which stream is silent.
@@ -1115,6 +1130,10 @@ class Peripheral:
                 # these two describe the link, and hiding them behind the
                 # display meant they vanished from exactly the run somebody
                 # starts with --no-display to find out why throughput is bad.
+                log.info("  pump: %.1f ticks/s (target %d); every stream is "
+                         "sized against this, so a shortfall here is a "
+                         "shortfall in all of them",
+                         self._tick_hz, POLL_HZ)
                 log.info("  delivery: ready-callbacks %d, unprompted retries %d",
                          self._ready_callbacks, self._timeouts)
                 if self._paints:
@@ -1203,7 +1222,24 @@ class Peripheral:
                     return
             if max_ticks is not None and ticks >= max_ticks:
                 return
-            await asyncio.sleep(interval)
+
+            tick_epoch_count += 1
+            next_tick += interval
+            now = time.monotonic()
+            delay = next_tick - now
+            if delay <= 0:
+                # Behind the schedule rather than merely late for one tick.
+                # Running the missed ticks back-to-back to catch up would send
+                # a burst the link never asked for and starve everything else
+                # on this loop, so the ticks are abandoned and the deadline is
+                # taken from now. Falling behind is visible as a tick rate
+                # below poll_hz, which is the honest way to report it.
+                next_tick = now
+                delay = 0
+            if now - tick_epoch >= 1.0:
+                self._tick_hz = tick_epoch_count / (now - tick_epoch)
+                tick_epoch, tick_epoch_count = now, 0
+            await asyncio.sleep(delay)
 
     def telemetry(self, subscribed):
         """Everything the debug panel draws, gathered in one place."""
