@@ -256,7 +256,8 @@ typedef enum {
 #define VTP_CAPABILITIES_POWER (1u << 8)
 #define VTP_CAPABILITIES_GNSS_AIDING (1u << 9)
 #define VTP_CAPABILITIES_OBD (1u << 10)
-#define VTP_CAPABILITIES_RESERVED 0xFFFFF880u
+#define VTP_CAPABILITIES_OBD_PID_GROUPING (1u << 11)
+#define VTP_CAPABILITIES_RESERVED 0xFFFFF080u
 #define VTP_CAPABILITIES_KNOWN (~(uint32_t)VTP_CAPABILITIES_RESERVED)
 
 #define VTP_CAN_FLAGS_SHEDDING (1u << 0)
@@ -309,8 +310,9 @@ typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rul
     { (1u << 8), 0x00000010u, "power" }, \
     { (1u << 9), 0x00000011u, "gnss_aiding" }, \
     { (1u << 10), 0x00000012u, "obd" }, \
+    { (1u << 11), 0x00000400u, "obd_pid_grouping" }, \
 }
-#define VTP_CAPABILITY_RULE_COUNT 10
+#define VTP_CAPABILITY_RULE_COUNT 11
 
 /* SPEC.md 4.1 -- info fields that MUST be zero when their
  * capability bit is clear. Offset and size, so one loop covers all. */

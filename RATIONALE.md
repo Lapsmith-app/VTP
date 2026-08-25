@@ -1141,6 +1141,26 @@ buys off the firmware (ISO-TP state, flow-control timing, per-ECU
 reassembly buffers) was the single largest item in the role's original
 scope estimate.
 
+**This paragraph priced the cost wrongly, and SPEC §15.4.1 is the
+correction.** Request count is bus load; what a client feels is cycle
+latency, which against a fixed per-request floor is *k* × `interval_ms` of
+sample period — a quantity this paragraph never names. And the bus cost of
+grouping is not negligible but *zero*: SPEC §15.1 already pads every request
+frame to eight bytes, so `[0x07, 0x01, p1…p6]` occupies exactly what
+`[0x02, 0x01, pid]` occupies, and the response side gets strictly smaller.
+Measured against the reference peripheral, twelve PIDs at a 20 ms floor go
+from 4.1 Hz each to 9.9 Hz.
+
+The rejection above stands **for the case it examined** — unbounded
+multi-PID packing, whose answers do need ISO-TP. What it never separated out
+is the bounded case: six response bytes fit a single frame by the same
+arithmetic this section already relies on, the client owns the sizing
+because SPEC §15.5 already puts the tables there, and a group sized wrong is
+answered with a first frame that SPEC §15.5 already disposes of. So SPEC §15.4.1 adds
+grouping under capability bit 11 without giving the device ISO-TP, flow
+control, reassembly, or a PID length table — none of the complexity this
+paragraph correctly refused to buy.
+
 ### 11.6 Why the rate is aggregate
 
 Per-PID rates were considered for consistency with `periodic`

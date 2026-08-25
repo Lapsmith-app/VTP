@@ -1429,6 +1429,185 @@ def main():
           == dev.ST_BAD_PARAMS,
           "the empty set MUST carry interval_ms 0 (SPEC.md 15.4)")
 
+    # ---- SPEC.md 15.4.1: PID grouping ----------------------------------
+    # The bound the role is auditable on is "one short frame per
+    # obd_min_interval_ms" (SPEC.md 15.1), and grouping must not move it.
+    # Everything here is about that: a group is ONE request.
+    MORE = dev.OBD_PID_MORE
+
+    check(obd_ctl(dev.OBD_POLL_SET, 0x70, struct.pack("<HB", 25, 7)
+                  + bytes([0x0C | MORE] * 6 + [0x0D]))[2]
+          == dev.ST_BAD_PARAMS,
+          "a group of seven PIDs does not fit the request frame and MUST "
+          "answer bad_params (SPEC.md 15.4.1 rule 6)")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x71, struct.pack("<HB", 25, 2)
+                  + bytes([0x0C, 0x0D | MORE]))[2] == dev.ST_BAD_PARAMS,
+          "a group continuing past the end of the list MUST answer "
+          "bad_params (SPEC.md 15.4.1 rule 7)")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x72, struct.pack("<HB", 25, 2)
+                  + bytes([0x02 | MORE, 0x0D]))[2] == dev.ST_BAD_PARAMS,
+          "rule 5 tests bits 0-6: an unsupported PID inside a group MUST "
+          "answer bad_params")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x73, struct.pack("<HB", 25, 6)
+                  + bytes([0x0C | MORE] * 5 + [0x0D]))[2] == dev.ST_OK,
+          "a group of exactly six PIDs fits the request frame and MUST be "
+          "accepted (SPEC.md 15.4.1 rule 6)")
+
+    # A group is one request: two PIDs, one interval, and both answers carry
+    # the SAME bus-arrival time because one frame asked for both.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x74, struct.pack("<HB", 100, 2)
+                  + bytes([0x0C | MORE, 0x0D]))[2] == dev.ST_OK,
+          "a two-PID group MUST be accepted on a device declaring bit 11")
+    obd_run(0.15)
+    paired = [r for b in obd_run(1.0) for r in b["records"]
+              if r["id"] == 0x7E8]
+    check(paired, "a grouped poll set must produce answers")
+    instants = {r["t_device_us"] for r in paired}
+    check(len(paired) <= 11,
+          f"at interval_ms 100 a two-PID group is ONE request per 100 ms, so "
+          f"at most 11 answers may arrive from one ECU in 1 s; {len(paired)} "
+          f"did -- grouping MUST NOT move SPEC.md 15.1's bus bound")
+    check(len(instants) == len(paired),
+          "each grouped request produces one answer per ECU, so no two "
+          "answers from one ECU may share a bus-arrival instant")
+    check(all(bytes.fromhex(r["payload"])[:3] == bytes([0x06, 0x41, 0x0C])
+              and bytes.fromhex(r["payload"])[5] == 0x0D
+              for r in paired),
+          "the answer to a (0C, 0D) group MUST be one single frame carrying "
+          "both pairs: PCI 06, 41, then 0C hi lo and 0D speed")
+
+    # SPEC.md 15.1 -- the request frame, asserted directly. Grouping's whole
+    # safety claim is that a six-PID request occupies the same eight bytes a
+    # one-PID request occupies, so the worst case on the bus does not move.
+    # That is arithmetic, and arithmetic in a specification is checked.
+    for g in range(1, dev.OBD_MAX_GROUP + 1):
+        frame = dev.VtpDevice._obd_request_frame(tuple(range(1, g + 1)))
+        check(len(frame) == 8,
+              f"a {g}-PID request MUST occupy a full classic CAN frame; "
+              f"grouping is free exactly because this length never changes")
+        check(frame[0] == 1 + g and frame[1] == 0x01,
+              f"a {g}-PID request MUST carry PCI {1 + g} and mode 01")
+        check(dev.VtpDevice._obd_request_pids(frame) == tuple(range(1, g + 1)),
+              f"an ECU reading a {g}-PID request off the bus MUST see exactly "
+              f"the PIDs it names")
+        check(all(b == 0 for b in frame[2 + g:]),
+              f"a {g}-PID request MUST be zero-padded, not left with stale "
+              f"bytes an ECU would read as further PIDs")
+    try:
+        dev.VtpDevice._obd_request_frame(tuple(range(1, dev.OBD_MAX_GROUP + 2)))
+        check(False, "a group of seven does not fit a classic CAN frame and "
+                     "MUST NOT be buildable (SPEC.md 15.4.1 rule 6)")
+    except ValueError:
+        pass
+
+    # SPEC.md 15.4.1 -- the device does NOT check response sizes, and the
+    # failure when a client oversizes a group is a first frame that dies for
+    # want of a flow control SPEC.md 15.1 forbids. Loud, immediate, and never
+    # a wrong value.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x75, struct.pack("<HB", 100, 3)
+                  + bytes([0x0C | MORE, 0x10 | MORE, 0x1F]))[2] == dev.ST_OK,
+          "an oversize group is ACCEPTED: response sizes are the client's "
+          "arithmetic, and a PID length table in firmware is what SPEC.md "
+          "15.9 excludes")
+    obd_run(0.15)
+    oversize = [bytes.fromhex(r["payload"])
+                for b in obd_run(0.6) for r in b["records"]
+                if r["id"] == 0x7E8]
+    check(oversize and all(f[0] >> 4 == 1 for f in oversize),
+          "a group whose answer exceeds seven bytes MUST arrive as a first "
+          "frame (SPEC.md 15.5)")
+    check(all(f[0] >> 4 != 2 for f in oversize),
+          "no consecutive frame may ever follow: the device sends no flow "
+          "control, so the transfer it opened is dead (SPEC.md 15.1)")
+
+    # SPEC.md 15.4.1 -- the same request, the other ECU. 0x7E9's mask covers
+    # 0x0C and neither 0x10 nor 0x1F, so it answers the group it was NOT
+    # fully asked with a single frame carrying only its own subset -- which
+    # is why a client sizing against "one ECU answers everything" is sizing
+    # conservatively, and is the behaviour most likely to differ on a real
+    # gatewayed car. Untested, it was the largest unasserted claim in the
+    # role.
+    partial = [bytes.fromhex(r["payload"])
+               for b in obd_run(0.6) for r in b["records"]
+               if r["id"] == 0x7E9]
+    check(partial,
+          "an ECU implementing PART of a group MUST still answer with the "
+          "subset it implements (SPEC.md 15.4.1)")
+    check(all(f[0] >> 4 == 0 for f in partial),
+          "0x7E9's subset of (0C, 10, 1F) is one pair and fits a single "
+          "frame; it MUST NOT arrive as a first frame just because the "
+          "group overflowed on the OTHER ECU")
+    check(all(f[:3] == bytes([0x04, 0x41, 0x0C]) for f in partial),
+          "0x7E9 MUST answer with 0x0C alone -- an ECU answering for PIDs "
+          "outside its own mask is a car this device has misread")
+
+    # SPEC.md 15.3 -- the mask PIDs are pollable like any other (0x20 and
+    # 0x40 are inside 0x01..0x60 and the union claims them), their answer is
+    # FOUR bytes, and it differs per ECU. A car that answered them with the
+    # one-byte filler made a grouped (0x20, 0x40) decode as 0x20 carrying
+    # four bytes taken from its neighbour -- a plausible wrong value, and
+    # identical from both ECUs, which no real bus produces.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x77, struct.pack("<HB", 100, 2)
+                  + bytes([0x20 | MORE, 0x40]))[2] == dev.ST_OK,
+          "the mask PIDs are inside 0x01-0x60 and claimed by the union, so "
+          "a group naming them MUST be accepted")
+    obd_run(0.15)
+    masked = {r["id"]: bytes.fromhex(r["payload"])
+              for b in obd_run(0.6) for r in b["records"]
+              if r["id"] in (0x7E8, 0x7E9)}
+    check(set(masked) == {0x7E8, 0x7E9}, "both ECUs must answer (0x20, 0x40)")
+    check(all(f[0] >> 4 == 1 for f in masked.values()),
+          "0x20 and 0x40 are four data bytes each, so the pair is 11 bytes "
+          "and CANNOT be a single frame; answering one means the car "
+          "returned the wrong width for a mask PID")
+    check(masked[0x7E8] != masked[0x7E9],
+          "supported-PID masks are ECU-specific, so two ECUs MUST NOT "
+          "answer a mask PID with identical bytes")
+    for ecu_id, frame in masked.items():
+        # A first frame is [0x1L, LL, then six data bytes]: 0x41, the PID,
+        # and the first four bytes of its answer.
+        check(frame[2] == 0x41 and frame[3] == 0x20,
+              f"0x{ecu_id:03X}'s first frame MUST open the Mode 01 answer "
+              f"with 41 20")
+        check(frame[4:8] == dev._j1979_mask_bytes(car.OBD_ECUS[ecu_id][1]),
+              f"0x{ecu_id:03X} MUST report ITS OWN 0x21-0x40 window -- the "
+              f"same bytes its probe response for 0x20 carried")
+
+    # SPEC.md 15.4.1 rule 8 -- a device WITHOUT bit 11 refuses a grouped set
+    # through rule 5, unamended: bit 7 set is a value outside 0x01..0x60.
+    plain_clock = [0]
+    plain = dev.VtpDevice(
+        now_us=lambda: plain_clock[0], mtu=247, gps_hz=0, imu_hz=0,
+        capabilities=dev.VtpDevice.DEFAULT_CAPABILITIES
+        & ~dev.CAP_OBD_PID_GROUPING)
+    plain.on_connect()
+    check(not vtp1.decode_info(plain.info())["capabilities"]
+          & dev.CAP_OBD_PID_GROUPING,
+          "the ungrouped build must not declare bit 11 in Info")
+    plain.handle_control(bytes([dev.OBD_INFO, 0x01]))
+    for _ in range(400):
+        plain_clock[0] += 5_000
+        if plain.due_control_response() is not None:
+            break
+    check(plain.handle_control(bytes([dev.OBD_POLL_SET, 0x02])
+                               + struct.pack("<HB", 25, 2)
+                               + bytes([0x0C | MORE, 0x0D]))[2]
+          == dev.ST_BAD_PARAMS,
+          "a device not declaring bit 11 MUST refuse a grouped poll set "
+          "(SPEC.md 15.4.1 rule 8, via rule 5 unamended)")
+    check(plain.handle_control(bytes([dev.OBD_POLL_SET, 0x03])
+                               + struct.pack("<HB", 25, 2)
+                               + bytes([0x0C, 0x0D]))[2] == dev.ST_OK,
+          "the same PIDs ungrouped MUST still be accepted there")
+
+    # Put the ungrouped device back to a stopped transmitter, and this one
+    # back to a single-PID set for the SPEC.md 15.7 cases that follow.
+    plain.handle_control(bytes([dev.OBD_POLL_SET, 0x04])
+                         + struct.pack("<HB", 0, 0))
+    check(obd_ctl(dev.OBD_POLL_SET, 0x76, struct.pack("<HB", 25, 1)
+                  + bytes([0x0C]))[2] == dev.ST_OK,
+          "an ungrouped set must reinstall after a grouped one")
+
     # SPEC.md 15.7 -- the empty set stops the transmitter, and the polling
     # flag's falling edge is on the wire: a batch flushed after the stop
     # carries it clear.

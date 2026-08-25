@@ -108,6 +108,9 @@ CAUGHT_BY = {
     "obd_capacity_zero": "obd.capacities",
     "obd_accepts_unsupported_pid": "obd.poll_refusals",
     "obd_accepts_zero_interval": "obd.poll_refusals",
+    "obd_accepts_bad_group": "obd.grouping_refusals",
+    "obd_splits_groups": "obd.grouping_is_one_request",
+    "obd_ignores_grouping_bit": "obd.grouping_undeclared_refused",
     "obd_ignores_stop": "obd.poll_and_flag",
     "obd_reset_keeps_polling": "obd.reset_stops",
     "obd_polls_before_probe": "obd.poll_before_probe",
@@ -213,6 +216,16 @@ NEEDS_RECONNECT = {"subs_survive_reconnect", "seq_survives_reconnect"}
 PARTIAL = "gps+imu+control"
 NEEDS_PARTIAL = {"inert_cccd_rejected", "opcode_capability_late"}
 
+#: SPEC.md §15.4.1 rule 8 is the mirror image: it only exists on a device
+#: that declares `obd` and NOT `obd_pid_grouping`, which the everything
+#: profile cannot be. A device with bit 11 clear must refuse a PID byte with
+#: bit 7 set, because rule 5 already calls it a value outside 0x01-0x60 --
+#: and the failure this guards against is a device that quietly STRIPS the
+#: bit and polls the low seven bits, answering ok to a request it does not
+#: implement while the client believes it is grouping.
+PARTIAL_OBD = "can+control+obd"
+NEEDS_PARTIAL_OBD = {"obd_ignores_grouping_bit"}
+
 #: Faults whose rule needs a profile of their own. §4.1's inert-Control rule
 #: only exists on a device that has not declared Control at all, which PARTIAL
 #: does, so it gets a profile that does not.
@@ -222,6 +235,8 @@ FAULT_PROFILE = {"inert_control_accepts_writes": "gps"}
 def profile_for(fault):
     if fault in FAULT_PROFILE:
         return FAULT_PROFILE[fault]
+    if fault in NEEDS_PARTIAL_OBD:
+        return PARTIAL_OBD
     return PARTIAL if fault in NEEDS_PARTIAL else None
 
 OBSERVE_SECONDS = 1.5
@@ -232,7 +247,8 @@ def capabilities(profile):
     import vtp_device
     bits = {"gps": vtp_device.CAP_GPS, "can": vtp_device.CAP_CAN,
             "imu": vtp_device.CAP_IMU, "monitor": vtp_device.CAP_MONITOR,
-            "control": vtp_device.CAP_CONTROL}
+            "control": vtp_device.CAP_CONTROL, "obd": vtp_device.CAP_OBD,
+            "grouping": vtp_device.CAP_OBD_PID_GROUPING}
     word = 0
     for name in profile.split("+"):
         word |= bits[name]
@@ -357,6 +373,10 @@ EXPECTED_SKIPS = {
         "this profile declares Control",
     "can.matches_subscription":
         "the harness subscribes with a mask that matches every frame",
+    "obd.grouping_undeclared_refused":
+        "this profile declares bit 11, and SPEC.md 15.4.1 rule 8 is a rule "
+        "about devices that do not; it is seeded against PARTIAL_OBD, which "
+        "declares `obd` with grouping clear",
 }
 
 

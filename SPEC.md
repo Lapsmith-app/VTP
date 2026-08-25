@@ -266,7 +266,8 @@ Total: **24 bytes**. All fields little-endian.
 | 8 | `power` | Device reports its own power state (SPEC.md 9.7) **Requires `control`.** |
 | 9 | `gnss_aiding` | Client supplies orbit data to the device's receiver (§14) **Requires `gps`, `control`.** |
 | 10 | `obd` | Device transmits OBD-II diagnostic requests on the bus (§15) **Requires `can`, `control`.** |
-| 11+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+| 11 | `obd_pid_grouping` | Accepts grouped PIDs in OBD_POLL_SET (SPEC.md 15.4.1) **Requires `obd`.** |
+| 12+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:capabilities -->
 
 A client MUST read this characteristic on every connection and MUST NOT cache
@@ -342,6 +343,7 @@ others alone.
 | 8 | `power` | bit 4 (`control`) | — | — |
 | 9 | `gnss_aiding` | bit 0 (`gps`), bit 4 (`control`) | — | — |
 | 10 | `obd` | bit 1 (`can`), bit 4 (`control`) | `obd_poll_slots`, `obd_min_interval_ms` | `obd_poll_slots`, `obd_min_interval_ms` |
+| 11 | `obd_pid_grouping` | bit 10 (`obd`) | — | — |
 <!-- END GENERATED: profile:capabilities -->
 
 **The largest CAN payload follows from the bits and is not a field.** A client
@@ -1075,7 +1077,7 @@ device has, and reaching it at all means the Control characteristic is live.
 | `0x40` | `MONITOR_LIST` | `monitor` | — | `monitor_declaration record` | Every channel this device asks the client to supply, in one response (SPEC.md 13.3) |
 | `0x50` | `GET_POWER` | `power` | — | `power_state record` | What the device knows about its own supply, measured when asked (SPEC.md 9.7) |
 | `0x60` | `OBD_INFO` | `obd` | — | `obd_probe record` | Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2) |
-| `0x61` | `OBD_POLL_SET` | `obd` | `interval_ms:u16, count:u8, pids:u8*` | — | Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4) |
+| `0x61` | `OBD_POLL_SET` | `obd` | `interval_ms:u16, count:u8, pids:u8*` | — | Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4); with capability bit 11, bit 7 of a PID byte groups it with the next (SPEC.md 15.4.1) |
 <!-- END GENERATED: control -->
 
 Opcode values `0x05`, `0x14` and `0x31` were assigned by pre-1.0 drafts and
@@ -2076,8 +2078,9 @@ asked for. There is no keep-alive, no wake-up sequence, and no transmission
 the client did not cause.
 
 Every frame either rule permits is a **single frame**: a classic CAN data
-frame carrying one Mode 01 request for one PID — `[0x02, 0x01, pid]` and
-padding — on the request identifier of §15.2. A device MUST NOT transmit a
+frame carrying one Mode 01 request — `[0x02, 0x01, pid]` and padding for a
+single PID, or `[1+g, 0x01, pid₁ … pid_g]` and padding for a group of *g*
+PIDs (§15.4.1) — on the request identifier of §15.2. A device MUST NOT transmit a
 flow-control frame, which is the ISO 15765-2 primitive that continues a
 multi-frame exchange: a device that cannot send one cannot be drawn into
 another tester's transfer, and cannot complete one of its own (§15.5).
@@ -2094,6 +2097,11 @@ Three bounds hold across the probe and the poll loop together:
   when the next transmission is due is abandoned; the poll loop simply comes
   round again (§15.4), and a probe moves on, or falls back to the other
   addressing — a different request, not the same one again (§15.2).
+
+A group is **one request** under all three: one outstanding at a time, one
+per `interval_ms`, never retried. Grouping therefore does not move any bound
+in this section, and cannot — the request frame is padded to eight bytes
+whether it names one PID or six.
 
 These bounds are what make the role auditable: a device's worst case on the
 bus is one short frame per `obd_min_interval_ms`, stated in a field the
@@ -2276,8 +2284,10 @@ While the set is non-empty the device transmits one Mode 01 request per
 schedule, not a set. **Entries are ordered and MAY repeat**: a client that
 wants engine speed sampled twice as often as coolant temperature sends
 `[0x0C, 0x05, 0x0C, 0x0F]`, and relative rates exist without per-PID rate
-fields. `interval_ms` is the spacing between consecutive requests, so one
-PID in a list of *k* is sampled every *k* × `interval_ms`.
+fields. `interval_ms` is the spacing between consecutive requests, and a
+group (§15.4.1) is one request, so one PID in a schedule of *g* groups is
+sampled every *g* × `interval_ms`. Without grouping every PID is its own
+group and *g* is the list length.
 
 A request the bus did not answer is abandoned when the next transmission is
 due (§15.1); the loop does not stall, retry, or reorder. The client sees the
@@ -2314,6 +2324,87 @@ receive the answers: §15.5 delivers them on the probe's reported response
 identifiers with no subscription required. Subscriptions remain what they
 are everywhere — the client's choice of broadcast traffic, and its means
 of governing the diagnostic identifiers more tightly than `every_frame`.
+
+### 15.4.1 PID grouping
+
+A device declaring capability bit 11 (`obd_pid_grouping`) accepts a poll set
+whose PID bytes carry a `more` flag in bit 7: a byte with bit 7 set is
+grouped with the byte that follows, and a **group** is a maximal such run
+terminated by the first byte with bit 7 clear. PIDs are `0x01`–`0x60`, so
+bit 7 is never set on a conforming request that predates this subsection —
+though note that it is not Appendix A reserved space either: before §15.4.1
+such a byte was **malformed input**, refused by rule 5, and assigning it a
+meaning is a pre-1.0 decision about the encoding rather than the ordinary
+minor-version reserved-bit assignment of §11.2. The device
+transmits one Mode 01 request per group — `[1+g, 0x01, pid₁ … pid_g]` — and
+the schedule walks groups, not PIDs. `count` still counts PID *bytes*, so
+`obd_poll_slots` is unchanged.
+
+`[0x8C, 0x0D, 0x85, 0x8F, 0x04]` is two groups: `(0C, 0D)` and
+`(05, 0F, 04)`.
+
+Grouping exists because `interval_ms` spaces requests: a schedule of sixteen
+PIDs in six groups samples each PID at 1/(6 × `interval_ms`) rather than
+1/(16 × `interval_ms`), for identical airtime — the request frame is padded
+to eight bytes either way (§15.1) — and strictly fewer response frames.
+
+Three rules, continuing §15.4's ordered refusals:
+
+6. A group longer than **6 PIDs** is `bad_params`. Seven would not fit the
+   request frame, which is the only bound on grouping the device checks.
+7. Bit 7 set on the **last** byte of `pids` is `bad_params`: a group that
+   continues into nothing is not a schedule.
+8. On a device that does **not** declare bit 11, any byte with bit 7 set is
+   `bad_params` under rule 5, which needs no amendment — such a byte is a
+   value outside `0x01`–`0x60`. A client therefore never reaches this path:
+   it reads bit 11 first, and declare-verify-use holds as it does for the
+   role itself.
+
+**The cost is one lost error check, and it is stated rather than hidden.**
+On a device declaring bit 11, a PID byte with bit 7 set is a grouped PID and
+not a malformed one. A client that computes a PID wrongly — an `OR` against
+a flag constant, a sign-extended byte, a stale enum — and sends `0x8C` in a
+non-terminal position is answered `ok` and polls `0x0C` grouped with
+whatever follows, where the same request to a device without bit 11 is
+`bad_params` under rule 5. Only the terminal position is still caught, by
+rule 7. This is inherent to the encoding: bit 7 cannot be both a flag and a
+range check, and every alternative that keeps both costs a field in a record
+this major version has closed (§11.3). A client MUST NOT set bit 7 except to
+group deliberately, and a client that validates its own PID values before
+sending them keeps the check the device gave up.
+
+**The device does not check response sizes, and MUST NOT.** Whether a
+group's answer fits a single frame is arithmetic over J1979 response
+lengths, and those tables live in the client (§15.5). A group whose response
+exceeds seven bytes is answered with a first frame, and §15.5 already
+governs it with no special case: the subscription table decides first, and a
+first frame the table does not match, on a probe-reported response
+identifier, while the poll set is non-empty, **is forwarded by §15.5's
+fallback like any other frame there**. The client therefore *receives* the
+first frame — it is not silently dropped — and receives nothing further,
+because the transfer it opens dies for want of a flow control this device
+will not send. The device reassembles nothing and transmits no flow control,
+exactly as §15.1 requires of it.
+
+That the failure is delivered rather than swallowed is the point: a client
+that oversized a group sees a frame whose PCI says a multi-frame answer is
+coming, learns immediately that its own arithmetic was wrong, and regroups.
+A dropped frame would have made the same mistake look like a silent bus.
+
+A client sizing a group counts six bytes of budget: a single-frame response
+is `41` plus one `pid`+`data` pair per PID, and no Mode 01 response in
+`0x01`–`0x60` exceeds four data bytes. Three PIDs per group is therefore the
+practical ceiling and two is common — well under rule 6's six, which bounds
+the request and not the answer.
+
+**A group is functionally addressed like every other request**, so every ECU
+implementing *any* PID in the group answers, each with the subset it
+implements — and each such response is smaller than the group's worst case,
+so a client sizing against "one ECU answers everything" is sizing
+conservatively. The probe reports the *union* of the ECUs' masks and not
+per-ECU masks (§15.3), so a client wanting per-ECU attribution before it
+groups obtains it the way §15.3 already says: poll the PIDs singly, watch
+which response identifiers answer, then install the grouped schedule.
 
 ### 15.5 Delivery — responses are ordinary frames
 
@@ -2384,9 +2475,10 @@ The device performs **no ISO-TP reassembly** and, per §15.1, transmits no
 flow control. Within `0x01`–`0x60` every response to a one-PID request is a
 single frame by J1979's own sizes (§15.3), so there is nothing to
 reassemble; a first frame arriving anyway — another tester's transfer, an
-out-of-spec ECU — is an ordinary frame, forwarded if subscribed and
-otherwise dropped, and the exchange it opens dies for want of a flow
-control this device will not send.
+out-of-spec ECU, a group a client oversized (§15.4.1) — is an ordinary
+frame, governed by the table if it matches one and by the fallback above if
+it does not, and dropped only where neither reaches it; the exchange it
+opens dies for want of a flow control this device will not send.
 
 ### 15.6 The polling flag
 
@@ -2506,7 +2598,7 @@ record tables above.
 | --- | --- | --- |
 | `gps_fix.validity` | bits 12–31 | Validity for fields added in a later minor |
 | `gps_fix.fix_flags` | bits 5–7 | Additional solution-quality flags |
-| `info.capabilities` | bit 7, bits 11–31 | Roles and features added in a later minor |
+| `info.capabilities` | bit 7, bits 12–31 | Roles and features added in a later minor |
 | `can_header.flags` | bits 2–7 | Additional batch-level CAN status |
 | `imu_header.flags` | bits 3–7 | Additional sensor groups |
 | `info.clock_flags` | bits 2–7 | Additional clock properties |

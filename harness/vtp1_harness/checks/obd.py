@@ -548,3 +548,213 @@ async def obd_reset_stops(s):
                             struct.pack("<HB", 0, 0))
         except ControlTimeout:
             pass
+
+
+# --- SPEC.md 15.4.1: PID grouping ------------------------------------------
+#
+# Bit 11 is advertised to clients, so a device claiming it must be held to it
+# by the tool third parties actually run. Without these a device could
+# declare grouping, refuse every grouped request, and pass the suite -- which
+# would make the bit worth nothing, exactly the failure RATIONALE 11.2 says
+# the capability bit exists to prevent.
+
+MORE = 0x80
+
+
+def _supported_pids(probe, n):
+    """The first `n` PIDs the probe's union claims, or fewer."""
+    return [pid for pid in range(0x01, 0x61) if _union_bit(probe, pid)][:n]
+
+
+@check(id="obd.grouping_refusals", section="15.4.1", phase="control",
+       severity="MUST", requires=("obd", "obd_pid_grouping"), adversarial=True,
+       title="A grouped OBD_POLL_SET refuses what §15.4.1 says it must")
+async def obd_grouping_refusals(s):
+    c = _control(s)
+    probe = _probe(s)
+    if s.info is None:
+        raise Skip("Info did not decode")
+    if not probe["probe"]["validity"] & RESPONDED:
+        raise Skip("nothing answered the probe, so nothing is pollable")
+    interval = max(s.info["obd_min_interval_ms"], 1)
+    pids = _supported_pids(probe, 7)
+    if len(pids) < 2:
+        raise Skip("the probe's union claims too few PIDs to group")
+    problems = []
+
+    async def poll_set(payload):
+        return await c.request(
+            refdec.OPCODE["OBD_POLL_SET"],
+            struct.pack("<HB", interval, len(payload)) + bytes(payload))
+
+    # Rule 7 -- a group that continues past the end of the list.
+    r = await poll_set([pids[0], pids[1] | MORE])
+    if r.status != refdec.STATUS_VALUE["bad_params"]:
+        problems.append(
+            f"a set ending with bit 7 set (0x{pids[1] | MORE:02X}) was "
+            f"answered {r.status_name}; §15.4.1 rule 7 -- a group that "
+            f"continues into nothing is not a schedule")
+
+    # Rule 6 -- seven PIDs do not fit `[1+g, 0x01, p1..pg]` in eight bytes.
+    if len(pids) >= 7 and s.info["obd_poll_slots"] >= 7:
+        r = await poll_set([p | MORE for p in pids[:6]] + [pids[6]])
+        if r.status != refdec.STATUS_VALUE["bad_params"]:
+            problems.append(
+                f"a group of seven PIDs was answered {r.status_name}; "
+                f"§15.4.1 rule 6 -- it does not fit the request frame")
+
+    # ...and six, which does, must be accepted. A device refusing the
+    # boundary declares a capacity it will not honour.
+    if len(pids) >= 6 and s.info["obd_poll_slots"] >= 6:
+        r = await poll_set([p | MORE for p in pids[:5]] + [pids[5]])
+        if not r.ok:
+            problems.append(
+                f"a group of exactly six PIDs was answered {r.status_name}; "
+                f"§15.4.1 rule 6 bounds groups at six, and six fits")
+
+    # Rule 5 still tests bits 0-6: an unverified PID inside a group is
+    # refused for being unverified, not accepted for being flagged.
+    unsupported = next((pid for pid in range(0x01, 0x61)
+                        if not _union_bit(probe, pid)), None)
+    if unsupported is not None:
+        r = await poll_set([unsupported | MORE, pids[0]])
+        if r.status != refdec.STATUS_VALUE["bad_params"]:
+            problems.append(
+                f"PID 0x{unsupported:02X}, which the probe's union does not "
+                f"claim, was answered {r.status_name} when carried inside a "
+                f"group; §15.4.1 -- rule 5 tests bits 0-6 and is unamended")
+
+    await c.request(refdec.OPCODE["OBD_POLL_SET"], struct.pack("<HB", 0, 0))
+    if problems:
+        raise Fail("; ".join(problems))
+
+
+@check(id="obd.grouping_is_one_request", section="15.4.1", phase="control",
+       severity="MUST", requires=("obd", "obd_pid_grouping"),
+       title="A group is ONE request, not a schedule of its members")
+async def obd_grouping_is_one_request(s):
+    """The defect this exists for: a device that parses bit 7, answers `ok`,
+    and then walks the PIDs individually anyway. Every refusal check above
+    passes on such a device, and the client gets HALF the rate it asked for
+    with nothing on the wire to say so.
+
+    Observable without per-ECU knowledge, and without a J1979 size table.
+    Every Mode 01 answer echoes the PIDs of the request that caused it in
+    order, so the FIRST echoed PID names which request this is an answer to.
+    With one group `(p0, p1)` at interval I, a conforming device asks for
+    both every I, so p0 leads an answer at about T/I distinct bus instants.
+    A device that scheduled them individually alternates, so p0 leads at
+    about T/(2I). The factor of two is the whole assertion.
+
+    Counted by distinct bus-arrival INSTANT and not by frame: functional
+    addressing means several ECUs answer one request, and counting frames
+    would multiply by however many this car has.
+    """
+    c = _control(s)
+    probe = _probe(s)
+    if s.info is None:
+        raise Skip("Info did not decode")
+    if not probe["probe"]["validity"] & RESPONDED:
+        raise Skip("nothing answered the probe, so nothing is pollable")
+    pids = _supported_pids(probe, 2)
+    if len(pids) < 2:
+        raise Skip("the probe's union claims fewer than two PIDs")
+    ecu_ids = {e["id"] for e in probe["ecus"]}
+    interval = max(s.info["obd_min_interval_ms"], 25)
+    window = max(20 * interval / 1000, 1.0)
+    log = s.streams["can"]
+
+    r = await c.request(refdec.OPCODE["CAN_RESET"])
+    if not r.ok:
+        raise Fail(f"CAN_RESET was answered {r.status_name}")
+    try:
+        r = await c.request(
+            refdec.OPCODE["OBD_POLL_SET"],
+            struct.pack("<HB", interval, 2) + bytes([pids[0] | MORE, pids[1]]))
+        if not r.ok:
+            raise Fail(f"a two-PID group of probed, supported PIDs at "
+                       f"{interval} ms was answered {r.status_name}, on a "
+                       f"device declaring bit 11")
+        await asyncio.sleep(max(3 * interval / 1000, 0.35))
+        t0 = time.monotonic()
+        await asyncio.sleep(window)
+        elapsed = time.monotonic() - t0
+
+        leads = {pids[0]: set(), pids[1]: set()}
+        answers = 0
+        for n in log.since(t0):
+            try:
+                batch = refdec.decode("can_batch", n.payload)
+            except refdec.Reject:
+                continue
+            for rec in batch["records"]:
+                if _identity(rec) not in ecu_ids:
+                    continue
+                payload = bytes.fromhex(rec["payload"])
+                if len(payload) < 3 or payload[0] >> 4 != 0 \
+                        or payload[1] != 0x41:
+                    continue        # a first frame, or not Mode 01 at all
+                answers += 1
+                if payload[2] in leads:
+                    leads[payload[2]].add(rec["t_device_us"])
+        if not answers:
+            raise Skip("the car answered nothing during the window; §15.4 "
+                       "makes an unanswered request the honest outcome and "
+                       "obd.poll_and_flag owns that diagnosis")
+        seen = max(len(leads[pids[0]]), len(leads[pids[1]]))
+        if not seen:
+            raise Skip(f"no answer led with 0x{pids[0]:02X} or "
+                       f"0x{pids[1]:02X}, so which request each answers "
+                       f"cannot be told apart")
+        grouped_expect = elapsed / (interval / 1000)
+        # Generous: shedding, batching latency and a car answering slowly all
+        # pull the count down. The split-schedule defect HALVES it, so 70% of
+        # the grouped expectation is comfortably clear of 50%.
+        if seen < 0.7 * grouped_expect:
+            raise Fail(
+                f"a group of (0x{pids[0]:02X}, 0x{pids[1]:02X}) led answers "
+                f"at {seen} distinct bus instants in {elapsed:.2f} s at "
+                f"interval {interval} ms, against about "
+                f"{grouped_expect:.0f} expected of one request per interval. "
+                f"A device scheduling the group's PIDs individually produces "
+                f"about {grouped_expect / 2:.0f} -- §15.4.1: a group is ONE "
+                f"request, and a device that answers `ok` and then halves "
+                f"the rate has told the client nothing")
+    finally:
+        await c.request(refdec.OPCODE["OBD_POLL_SET"], struct.pack("<HB", 0, 0))
+
+
+@check(id="obd.grouping_undeclared_refused", section="15.4.1", phase="control",
+       severity="MUST", requires=("obd",), adversarial=True,
+       title="A device not declaring bit 11 refuses grouped PID bytes")
+async def obd_grouping_undeclared_refused(s):
+    """§15.4.1 rule 8 -- and it needs no code on a conforming device: a byte
+    with bit 7 set is a value outside 0x01-0x60, which rule 5 already
+    refuses. The check exists because a device that quietly IGNORES bit 7
+    and polls the low seven bits is the failure -- it accepts a request it
+    does not implement, and the client believes it is grouping."""
+    if s.has("obd_pid_grouping"):
+        raise Skip("this device declares bit 11, so grouped bytes are "
+                   "meaningful; obd.grouping_refusals owns it")
+    c = _control(s)
+    probe = _probe(s)
+    if s.info is None:
+        raise Skip("Info did not decode")
+    if not probe["probe"]["validity"] & RESPONDED:
+        raise Skip("nothing answered the probe, so nothing is pollable")
+    pids = _supported_pids(probe, 2)
+    if len(pids) < 2:
+        raise Skip("the probe's union claims fewer than two PIDs")
+    interval = max(s.info["obd_min_interval_ms"], 1)
+    r = await c.request(
+        refdec.OPCODE["OBD_POLL_SET"],
+        struct.pack("<HB", interval, 2) + bytes([pids[0] | MORE, pids[1]]))
+    if r.status != refdec.STATUS_VALUE["bad_params"]:
+        await c.request(refdec.OPCODE["OBD_POLL_SET"],
+                        struct.pack("<HB", 0, 0))
+        raise Fail(
+            f"PID byte 0x{pids[0] | MORE:02X} was answered {r.status_name} "
+            f"on a device that does not declare bit 11. §15.4.1 rule 8 -- "
+            f"without grouping that byte is a value outside 0x01-0x60 and "
+            f"rule 5 refuses it; accepting it means the device is either "
+            f"grouping undeclared or silently polling 0x{pids[0]:02X}")

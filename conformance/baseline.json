@@ -98,6 +98,7 @@
  "info/future-minor-unknown-capability": "e5c0c9518efd312842aba4989250b150b8a6db035a53d0958acf976531bf2baf",
  "info/gps-and-can-device": "561837e537c76fc17123778918f973a15d849e156cd0051046638ca47200eb23",
  "info/gps-only-no-control": "4754f2d057af25a238540a039d249f41bc96af0cd9f59d8ed55c61eb9c0eb250",
+ "info/grouping-without-obd": "ccd64c1bd68baba76a6207dbb938752dfebe22b3d7a551e9c13f4953dee5add3",
  "info/long-payload": "6e5a2ba24892445fface5f213ac7ddeca6382225382e07d4d290b6e655934d7d",
  "info/monitor-without-control": "786d70726ed0c954eab3d73c4ae823ca606d7a1b0d6762e9cd9bebbc890668ce",
  "info/obd-capacity-without-capability": "529e420c69e8d3dad6a9d5e9aa91e6637fd42775e4ff849056e837920b5b9c30",

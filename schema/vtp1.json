@@ -488,9 +488,17 @@
             "control"
           ],
           "desc": "Device transmits OBD-II diagnostic requests on the bus (\u00a715)"
+        },
+        {
+          "bit": 11,
+          "name": "obd_pid_grouping",
+          "implies": [
+            "obd"
+          ],
+          "desc": "Accepts grouped PIDs in OBD_POLL_SET (SPEC.md 15.4.1)"
         }
       ],
-      "reserved_from": 11,
+      "reserved_from": 12,
       "reserved_purpose": "Roles and features added in a later minor"
     },
     "can_flags": {
@@ -1621,7 +1629,7 @@
         "capability": "obd",
         "params": "interval_ms:u16, count:u8, pids:u8*",
         "response": "",
-        "desc": "Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4)"
+        "desc": "Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4); with capability bit 11, bit 7 of a PID byte groups it with the next (SPEC.md 15.4.1)"
       }
     ]
   }
