@@ -130,13 +130,24 @@ def classify(payload):
         return "first_frame", ()
     if payload[0] >> 4 != 0 or len(payload) < 2 or payload[1] != 0x41:
         return "other", ()
-    body, out, i = payload[2:payload[0] + 1], [], 0
+    # PCI is the Mode 01 response length: `41` plus the pairs. A frame whose
+    # PCI runs past the eight bytes it arrived in is not a frame to read.
+    pci = payload[0]
+    if pci < 1 or 1 + pci > len(payload):
+        return "other", ()
+    body, out, i = payload[2:1 + pci], [], 0
     while i < len(body):
         pid = body[i]
-        if pid not in PID_RESPONSE_BYTES:
-            return "other", tuple(out)
+        size = PID_RESPONSE_BYTES.get(pid)
+        # Atomically, and never partially: a walk that stopped mid-body used
+        # to return ("other", pids-so-far) and run() counted those PIDs
+        # anyway, so a frame this parser had REJECTED still moved the rate it
+        # was supposed to be measuring. A pair that runs past the body is the
+        # same failure one byte later.
+        if size is None or i + size > len(body):
+            return "other", ()
         out.append(pid)
-        i += PID_RESPONSE_BYTES[pid]
+        i += size
     return "mode01", tuple(out)
 
 
@@ -159,6 +170,8 @@ def run(car, clock, seconds):
             for record in batch["records"]:
                 kind, pids = classify(bytes.fromhex(record["payload"]))
                 kinds[kind] += 1
+                if kind != "mode01":
+                    continue
                 for pid in pids:
                     samples.add((pid, record["t_device_us"]))
     return Counter(pid for pid, _ in samples), kinds
@@ -187,13 +200,22 @@ def measure(label, pids_payload, groups, seconds, interval_ms):
 
     seen, kinds = run(car, clock, seconds)
     rates = {pid: seen[pid] / seconds for pid in RACE_SET}
-    worst = min(rates.values())
+    worst, best = min(rates.values()), max(rates.values())
+    dead = sum(1 for pid in RACE_SET if not rates[pid])
     note = f"{sum(kinds.values())} CAN records, {kinds['other']} not ours"
     if kinds["first_frame"]:
         note += f", {kinds['first_frame']} DEAD first frames"
+    # min AND max, because the minimum alone hid a real result: under the
+    # overpacked set two PIDs still arrive at full rate -- 0x7E9 implements
+    # only its own subset of each group, and that subset fits a single frame
+    # -- while the other ten get nothing. "0.00 Hz per PID" was true of the
+    # worst PID and false as a description of what the client receives.
+    span = (f"{worst:5.2f} Hz per PID" if worst == best
+            else f"{worst:5.2f}-{best:5.2f} Hz per PID")
+    if dead:
+        span += f", {dead}/{len(RACE_SET)} silent"
     print(f"  {label:<22} {len(groups):>2} groups  "
-          f"cycle {len(groups) * interval_ms:>4} ms  "
-          f"{worst:5.2f} Hz per PID   ({note})")
+          f"cycle {len(groups) * interval_ms:>4} ms  {span:<32} ({note})")
     return worst, rates
 
 
@@ -235,13 +257,15 @@ def main():
                       args.seconds, interval)
     fast, rates = measure("grouped (15.4.1)", encode(grouped), grouped,
                           args.seconds, interval)
-    measure("overpacked (6/group)", encode(overpacked), overpacked,
-            args.seconds, interval)
+    _, over_rates = measure("overpacked (6/group)", encode(overpacked),
+                            overpacked, args.seconds, interval)
 
     print(f"\n  gain: {fast / base:.2f}x  ({base:.2f} Hz -> {fast:.2f} Hz)\n")
-    print("  per-PID, grouped:")
+    print(f"  {'PID':<5}{'grouped':>10}{'overpacked':>13}")
     for pid in RACE_SET:
-        print(f"    {pid:02X}  {rates[pid]:5.2f} Hz")
+        over = over_rates[pid]
+        print(f"    {pid:02X}  {rates[pid]:8.2f} Hz {over:8.2f} Hz"
+              + ("" if over else "   <- silent"))
     print()
 
 

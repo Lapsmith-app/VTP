@@ -213,6 +213,27 @@
       "no_roundtrip": true
     },
     {
+      "name": "grouping-without-obd",
+      "desc": "SPEC.md 4.1 -- `obd_pid_grouping` requires `obd`: bit 11 says how this device reads the PID bytes of an OBD_POLL_SET it would answer `unsupported_opcode` to. It also carries neither OBD capacity, because bit 10 is clear -- so the same record claims a refinement of a role and denies the role. Decodes; the grouping declaration MUST NOT be used.",
+      "record": "info",
+      "hex": "010012080000000000002000a00f00000000000000000000",
+      "expect": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 2066,
+        "gps_rate_hz": 0,
+        "gps_max_rate_hz": 0,
+        "can_subscription_slots": 32,
+        "can_max_frames_per_s": 4000,
+        "imu_rate_hz": 0,
+        "imu_max_rate_hz": 0,
+        "obd_poll_slots": 0,
+        "clock_flags": 0,
+        "obd_min_interval_ms": 0
+      },
+      "no_roundtrip": true
+    },
+    {
       "name": "obd-declared-with-zero-capacity",
       "desc": "SPEC.md 15 -- bit 10 set with both OBD capacities zero: a poll set nothing fits in, and a floor of zero milliseconds, describe a role no conforming exchange can use. Decodes; a client MUST NOT use the role and SHOULD report the contradiction, and a conforming encoder refuses to produce it.",
       "record": "info",

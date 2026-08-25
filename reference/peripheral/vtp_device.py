@@ -1052,14 +1052,31 @@ class VtpDevice:
             return False
         return self._mask_has(self._obd_masks, pid)
 
-    def _obd_pid_data(self, pid, st):
+    def _obd_pid_data(self, pid, st, masks=None):
         """Data bytes of a positive Mode 01 response.
 
         J1979 encodings for the PIDs a lap-timing client actually reads --
         derived from the same motion state as the GPS fix and the IMU sample,
         so a client cross-checking channels finds them consistent -- and a
         deterministic one-byte filler for the rest of the declared set. The
-        device does NOT decode any of this; it is the synthetic CAR."""
+        device does NOT decode any of this; it is the synthetic CAR.
+
+        `masks` is the answering ECU's own supported-PID windows, and is
+        required for the MASK PIDs. 0x20 and 0x40 are inside 0x01..0x60 and
+        the probe's union claims them, so a client may poll them like any
+        other PID -- and their answer is four bytes, and is DIFFERENT PER
+        ECU. The filler below returned one byte for both, identical from
+        every ECU, which made a grouped `(0x20, 0x40)` decode as 0x20 with
+        four bytes of data taken from its neighbour: a plausible wrong value
+        of exactly the kind SPEC.md 1.1 exists to prevent, and the reason
+        this is a parameter rather than a lookup.
+        """
+        if masks is not None and pid in (0x00, 0x20, 0x40):
+            # 0x00 -> window 0, 0x20 -> 1, 0x40 -> 2. NOT `_mask_has`'s
+            # divmod(pid - 1, 32): that maps a PID to the window CONTAINING
+            # it, and a mask PID names the window it DESCRIBES, which is the
+            # next one up. The two disagree for exactly these three values.
+            return _j1979_mask_bytes(masks[pid // 32])
         if pid == 0x04:            # engine load, A*100/255
             return bytes([round(st["throttle"] * 255 / 100)])
         if pid == 0x05:            # coolant temperature, A-40
@@ -1168,7 +1185,7 @@ class VtpDevice:
         asked = self._obd_request_pids(self._obd_request_frame(group))
         for ecu_id in sorted(self.OBD_ECUS):
             masks = self.OBD_ECUS[ecu_id]
-            body = b"".join(bytes([pid]) + self._obd_pid_data(pid, st)
+            body = b"".join(bytes([pid]) + self._obd_pid_data(pid, st, masks)
                             for pid in asked if self._mask_has(masks, pid))
             if not body:
                 # An ECU implementing none of the group says nothing. Real

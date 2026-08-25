@@ -1815,6 +1815,18 @@ def vectors(schema):
              "receive. Decodes; the OBD role MUST NOT be used.",
              refused_by="info-obd-without-can",
              no_roundtrip=True),
+        case(schema, "info", "grouping-without-obd",
+             dict(protocol_major=1, protocol_minor=0,
+                  capabilities=C["can"] | C["control"] | C["obd_pid_grouping"],
+                  can_subscription_slots=32, can_max_frames_per_s=4000),
+             "SPEC.md 4.1 -- `obd_pid_grouping` requires `obd`: bit 11 says "
+             "how this device reads the PID bytes of an OBD_POLL_SET it "
+             "would answer `unsupported_opcode` to. It also carries neither "
+             "OBD capacity, because bit 10 is clear -- so the same record "
+             "claims a refinement of a role and denies the role. Decodes; "
+             "the grouping declaration MUST NOT be used.",
+             refused_by="info-grouping-without-obd",
+             no_roundtrip=True),
         case(schema, "info", "obd-declared-with-zero-capacity",
              dict(protocol_major=1, protocol_minor=0,
                   capabilities=(C["gps"] | C["can"] | C["control"]
@@ -2960,6 +2972,19 @@ def vectors(schema):
          "input": dict(protocol_major=1, protocol_minor=0,
                        capabilities=C["control"] | C["obd"],
                        obd_poll_slots=16, obd_min_interval_ms=20)},
+        {"name": "info-grouping-without-obd",
+         "record": "info", "must_refuse": True,
+         "vector": "grouping-without-obd",
+         "desc": "SPEC.md 4.1 -- `obd_pid_grouping` requires `obd`. Bit 11 "
+                 "refines how OBD_POLL_SET's PID bytes are read on a device "
+                 "that, with bit 10 clear, answers that opcode "
+                 "unsupported_opcode -- a refinement of a role the same "
+                 "record denies.",
+         "input": dict(protocol_major=1, protocol_minor=0,
+                       capabilities=(C["can"] | C["control"]
+                                     | C["obd_pid_grouping"]),
+                       can_subscription_slots=32,
+                       can_max_frames_per_s=4000)},
         {"name": "info-obd-declared-with-zero-capacity",
          "record": "info", "must_refuse": True,
          "vector": "obd-declared-with-zero-capacity",

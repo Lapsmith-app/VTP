@@ -138,9 +138,14 @@ first byte with `more` clear. `count` still counts PID *bytes*, so
 `[0x8C, 0x0D, 0x85, 0x8F, 0x04]` is two groups: `(0C, 0D)` and
 `(05, 0F, 04)`.
 
-This is reserved-space assignment, not repurposing (§11.4). Bit 7 of a PID
-byte is space that is unassigned today and MUST read as zero: every value
-above `0x60` is already `bad_params` under §15.4 rule 5. An old device
+**This is a pre-1.0 fold-in, not a reserved-space assignment**, and review
+was right to insist the difference be stated. Appendix A does not list bit 7
+of a PID byte; before this proposal such a byte was *malformed input*,
+refused by §15.4 rule 5. §11.3's extension policy is closed over three
+places — extension records, Appendix A's reserved space, and new control
+opcodes — and this is none of them. It is valid only because VTP/1 is not
+yet released and the encoding is still open; after 1.0 the same change would
+need a new opcode. An old device
 therefore refuses a grouped set cleanly and leaves its installed set
 unchanged — but no client should ever reach that path, because bit 11 is
 read first. Declare, verify, use, as §15.4 already has it.
@@ -307,9 +312,10 @@ A deliberately unclever first-fit packer groups them
 `(0C 0D) (04 05 11) (0F 10) (42 1F) (0B 33 2F)`.
 
 ```
-  ungrouped (today)      12 groups  cycle  240 ms   4.10 Hz per PID
-  grouped (15.4.1)        5 groups  cycle  100 ms   9.90 Hz per PID
-  overpacked (6/group)    2 groups  cycle   40 ms   0.00 Hz per PID  (744 DEAD first frames)
+  ungrouped (today)      12 groups  cycle  240 ms   4.10- 4.20 Hz per PID
+  grouped (15.4.1)        5 groups  cycle  100 ms   9.90-10.00 Hz per PID
+  overpacked (6/group)    2 groups  cycle   40 ms   0.00-24.80 Hz per PID, 10/12 silent
+                                                    (744 DEAD first frames)
 
   gain: 2.41x  (4.10 Hz -> 9.90 Hz)
 ```
@@ -319,13 +325,25 @@ declared floor of 10 ms, 16.60 → 39.90 Hz at 5 ms. The response budget caps
 a group at three PIDs and not the six the request frame allows, so ~2.4× is
 the realistic figure and 3× the ceiling.
 
-The third row is the failure mode, exercised rather than asserted: a client
-that reads only J1979's "up to six PIDs" and never counts response bytes
-sends a legal poll set — rule 6 passes — and receives **nothing at all**.
-Every answer is a first frame that dies for want of a flow control the
-device will not send. That is the right shape for the failure: total,
-immediate and unmistakable, never a plausible wrong value, and recovered by
-one `OBD_POLL_SET`.
+The third row is the failure mode, exercised rather than asserted — and an
+earlier draft of this section described it wrongly, which review caught.
+A client that reads only J1979's "up to six PIDs" and never counts response
+bytes sends a legal poll set (rule 6 passes) and gets **a partial answer,
+not silence**: ten of the twelve PIDs go dark while `0x42` and `0x2F` arrive
+at 24.8 Hz — *faster than the correctly grouped set* — because `0x7E9`
+implements only those two of its group, and that subset does fit a single
+frame.
+
+That is worse than the "nothing at all" first claimed here, and it is the
+strongest argument in the proposal for the client-side budget check. A
+client watching "is data flowing?" sees data flowing, at a headline rate
+better than the correct configuration, while five sixths of its channels
+are silent. The failure is loud only if you look per-PID.
+
+What is *never* produced is a wrong value: an oversized group answers with a
+first frame, the transfer dies for want of a flow control the device will
+not send, and the frame is delivered rather than dropped (§15.5), so the
+client can see the PCI and diagnose it. Recovery is one `OBD_POLL_SET`.
 
 ### 7.1 Against a direct reader
 

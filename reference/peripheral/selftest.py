@@ -1541,6 +1541,38 @@ def main():
           "0x7E9 MUST answer with 0x0C alone -- an ECU answering for PIDs "
           "outside its own mask is a car this device has misread")
 
+    # SPEC.md 15.3 -- the mask PIDs are pollable like any other (0x20 and
+    # 0x40 are inside 0x01..0x60 and the union claims them), their answer is
+    # FOUR bytes, and it differs per ECU. A car that answered them with the
+    # one-byte filler made a grouped (0x20, 0x40) decode as 0x20 carrying
+    # four bytes taken from its neighbour -- a plausible wrong value, and
+    # identical from both ECUs, which no real bus produces.
+    check(obd_ctl(dev.OBD_POLL_SET, 0x77, struct.pack("<HB", 100, 2)
+                  + bytes([0x20 | MORE, 0x40]))[2] == dev.ST_OK,
+          "the mask PIDs are inside 0x01-0x60 and claimed by the union, so "
+          "a group naming them MUST be accepted")
+    obd_run(0.15)
+    masked = {r["id"]: bytes.fromhex(r["payload"])
+              for b in obd_run(0.6) for r in b["records"]
+              if r["id"] in (0x7E8, 0x7E9)}
+    check(set(masked) == {0x7E8, 0x7E9}, "both ECUs must answer (0x20, 0x40)")
+    check(all(f[0] >> 4 == 1 for f in masked.values()),
+          "0x20 and 0x40 are four data bytes each, so the pair is 11 bytes "
+          "and CANNOT be a single frame; answering one means the car "
+          "returned the wrong width for a mask PID")
+    check(masked[0x7E8] != masked[0x7E9],
+          "supported-PID masks are ECU-specific, so two ECUs MUST NOT "
+          "answer a mask PID with identical bytes")
+    for ecu_id, frame in masked.items():
+        # A first frame is [0x1L, LL, then six data bytes]: 0x41, the PID,
+        # and the first four bytes of its answer.
+        check(frame[2] == 0x41 and frame[3] == 0x20,
+              f"0x{ecu_id:03X}'s first frame MUST open the Mode 01 answer "
+              f"with 41 20")
+        check(frame[4:8] == dev._j1979_mask_bytes(car.OBD_ECUS[ecu_id][1]),
+              f"0x{ecu_id:03X} MUST report ITS OWN 0x21-0x40 window -- the "
+              f"same bytes its probe response for 0x20 carried")
+
     # SPEC.md 15.4.1 rule 8 -- a device WITHOUT bit 11 refuses a grouped set
     # through rule 5, unamended: bit 7 set is a value outside 0x01..0x60.
     plain_clock = [0]

@@ -740,6 +740,20 @@
       }
     },
     {
+      "name": "info-grouping-without-obd",
+      "record": "info",
+      "must_refuse": true,
+      "vector": "grouping-without-obd",
+      "desc": "SPEC.md 4.1 -- `obd_pid_grouping` requires `obd`. Bit 11 refines how OBD_POLL_SET's PID bytes are read on a device that, with bit 10 clear, answers that opcode unsupported_opcode -- a refinement of a role the same record denies.",
+      "input": {
+        "protocol_major": 1,
+        "protocol_minor": 0,
+        "capabilities": 2066,
+        "can_subscription_slots": 32,
+        "can_max_frames_per_s": 4000
+      }
+    },
+    {
       "name": "info-obd-declared-with-zero-capacity",
       "record": "info",
       "must_refuse": true,

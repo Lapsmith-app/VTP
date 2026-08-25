@@ -8,6 +8,33 @@ conformance vector.
 
 ## [Unreleased]
 
+### OBD-II polling gained PID grouping (SPEC §15.4.1)
+
+Capability bit 11 (`obd_pid_grouping`). Bit 7 of a PID byte in
+`OBD_POLL_SET` groups it with the byte that follows, so the device sends one
+Mode 01 request per *group* rather than per PID and the schedule walks
+groups. `interval_ms` spaces requests, so this is the difference between
+sampling a PID every *k* × `interval_ms` and every *g* × `interval_ms`:
+twelve PIDs at a 20 ms floor measured 4.1 Hz each ungrouped and 9.9 Hz
+grouped.
+
+It costs the device nothing it did not already have. The request frame is
+padded to eight bytes either way (§15.1), so the bus worst case — one short
+frame per `obd_min_interval_ms` — does not move, and the response side gets
+strictly smaller. No ISO-TP, no flow control, no reassembly, and no PID
+length table in firmware: the client sizes groups against the six response
+bytes a single frame carries, because §15.5 already puts those tables in the
+client. A group sized too large is answered with a first frame, which §15.5
+already governs and §15.1 already leaves dead.
+
+Two costs, both stated where they are paid. A device declaring bit 11 reads
+a PID byte with bit 7 set as a grouped PID rather than a malformed one, so
+it no longer refuses a value rule 5 used to catch (§15.4.1). And bit 7 of a
+PID byte was previously *malformed input* rather than Appendix A reserved
+space — this is a pre-1.0 fold-in of an encoding decision, not the ordinary
+minor-version reserved-bit assignment §11.3 describes.
+
+
 Everything since 0.1.0, condensed: with zero deployed devices a changelog is
 a record of decisions, not a diary — the pull requests and RATIONALE.md hold
 the detail and the arguments, and git holds the archaeology.
@@ -56,7 +83,8 @@ deliberately not a minor version, which v0.x exists to permit.
   whose device TRANSMITS on the vehicle bus, which is the reason it is a
   declared capability at all: without the bit, the protocol loses the
   ability to say whether a given device transmits. What may be transmitted
-  is a closed enumeration (single-frame Mode 01 requests, one PID each,
+  is a closed enumeration (single-frame Mode 01 requests, one PID each
+  before §15.4.1's grouping and at most six after,
   spaced, never retried, no flow control); responses arrive as ordinary
   `can_record`s — delivered on the probe's reported response identifiers
   while the poll set is non-empty, with the subscription table governing

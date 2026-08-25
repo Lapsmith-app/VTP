@@ -1077,7 +1077,7 @@ device has, and reaching it at all means the Control characteristic is live.
 | `0x40` | `MONITOR_LIST` | `monitor` | — | `monitor_declaration record` | Every channel this device asks the client to supply, in one response (SPEC.md 13.3) |
 | `0x50` | `GET_POWER` | `power` | — | `power_state record` | What the device knows about its own supply, measured when asked (SPEC.md 9.7) |
 | `0x60` | `OBD_INFO` | `obd` | — | `obd_probe record` | Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2) |
-| `0x61` | `OBD_POLL_SET` | `obd` | `interval_ms:u16, count:u8, pids:u8*` | — | Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4) |
+| `0x61` | `OBD_POLL_SET` | `obd` | `interval_ms:u16, count:u8, pids:u8*` | — | Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4); with capability bit 11, bit 7 of a PID byte groups it with the next (SPEC.md 15.4.1) |
 <!-- END GENERATED: control -->
 
 Opcode values `0x05`, `0x14` and `0x31` were assigned by pre-1.0 drafts and
@@ -2331,7 +2331,11 @@ A device declaring capability bit 11 (`obd_pid_grouping`) accepts a poll set
 whose PID bytes carry a `more` flag in bit 7: a byte with bit 7 set is
 grouped with the byte that follows, and a **group** is a maximal such run
 terminated by the first byte with bit 7 clear. PIDs are `0x01`–`0x60`, so
-bit 7 is space that reads zero on a device without the bit. The device
+bit 7 is never set on a conforming request that predates this subsection —
+though note that it is not Appendix A reserved space either: before §15.4.1
+such a byte was **malformed input**, refused by rule 5, and assigning it a
+meaning is a pre-1.0 decision about the encoding rather than the ordinary
+minor-version reserved-bit assignment of §11.2. The device
 transmits one Mode 01 request per group — `[1+g, 0x01, pid₁ … pid_g]` — and
 the schedule walks groups, not PIDs. `count` still counts PID *bytes*, so
 `obd_poll_slots` is unchanged.
@@ -2372,11 +2376,20 @@ sending them keeps the check the device gave up.
 **The device does not check response sizes, and MUST NOT.** Whether a
 group's answer fits a single frame is arithmetic over J1979 response
 lengths, and those tables live in the client (§15.5). A group whose response
-exceeds seven bytes is answered with a first frame, which §15.5 already
-disposes of: it is an ordinary frame, forwarded if subscribed and otherwise
-dropped, and the transfer it opens dies for want of a flow control this
-device will not send. The device reassembles nothing and transmits no flow
-control, exactly as §15.1 requires of it.
+exceeds seven bytes is answered with a first frame, and §15.5 already
+governs it with no special case: the subscription table decides first, and a
+first frame the table does not match, on a probe-reported response
+identifier, while the poll set is non-empty, **is forwarded by §15.5's
+fallback like any other frame there**. The client therefore *receives* the
+first frame — it is not silently dropped — and receives nothing further,
+because the transfer it opens dies for want of a flow control this device
+will not send. The device reassembles nothing and transmits no flow control,
+exactly as §15.1 requires of it.
+
+That the failure is delivered rather than swallowed is the point: a client
+that oversized a group sees a frame whose PCI says a multi-frame answer is
+coming, learns immediately that its own arithmetic was wrong, and regroups.
+A dropped frame would have made the same mistake look like a silent bus.
 
 A client sizing a group counts six bytes of budget: a single-frame response
 is `41` plus one `pid`+`data` pair per PID, and no Mode 01 response in
@@ -2462,9 +2475,10 @@ The device performs **no ISO-TP reassembly** and, per §15.1, transmits no
 flow control. Within `0x01`–`0x60` every response to a one-PID request is a
 single frame by J1979's own sizes (§15.3), so there is nothing to
 reassemble; a first frame arriving anyway — another tester's transfer, an
-out-of-spec ECU — is an ordinary frame, forwarded if subscribed and
-otherwise dropped, and the exchange it opens dies for want of a flow
-control this device will not send.
+out-of-spec ECU, a group a client oversized (§15.4.1) — is an ordinary
+frame, governed by the table if it matches one and by the fallback above if
+it does not, and dropped only where neither reaches it; the exchange it
+opens dies for want of a flow control this device will not send.
 
 ### 15.6 The polling flag
 

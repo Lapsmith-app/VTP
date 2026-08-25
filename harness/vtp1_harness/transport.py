@@ -354,6 +354,9 @@ FAULTS = {
     "obd_delivery_needs_subscription": "SPEC.md §15.5 — poll responses are delivered only through the table, so an unsubscribed polling client transmits on the car and receives nothing",
     "obd_flag_never_set": "SPEC.md §15.6 — the poll set is non-empty and no batch carries the polling flag",
     "obd_accepts_zero_interval": "SPEC.md §15.4 — interval_ms 0 with a non-empty set is accepted as `as fast as legal` instead of refused",
+    "obd_accepts_bad_group": "SPEC.md §15.4.1 — a group of seven PIDs, and a group left open past the end of the list, are both answered ok",
+    "obd_splits_groups": "SPEC.md §15.4.1 — bit 7 is parsed and answered ok, then the group's PIDs are scheduled individually: half the rate the client asked for, with nothing on the wire to say so",
+    "obd_ignores_grouping_bit": "SPEC.md §15.4.1 rule 8 — a device NOT declaring bit 11 strips bit 7 and polls the low seven bits instead of refusing",
     # The two below are SCENARIO seeds, not matrix faults: neither violates a
     # rule any single check can catch on its own. The first is a CONFORMING
     # car whose polled PID nothing answers (§15.4 makes that gap legal, so the
@@ -740,6 +743,38 @@ class LoopbackTransport(Transport):
                      or _load_peripheral().OBD_MIN_INTERVAL_MS)
             request = (request[:2] + struct.pack("<H", max(floor, 1))
                        + request[4:])
+        if {"obd_accepts_bad_group", "obd_splits_groups",
+                "obd_ignores_grouping_bit"} & self.faults and \
+                len(request) >= _OBD_POLL_FIXED and \
+                request[0] == refdec.OPCODE["OBD_POLL_SET"] and \
+                request[_OBD_POLL_FIXED - 1] != 0:
+            # SPEC.md §15.4.1 -- three ways to get grouping wrong, all of
+            # which answer `ok`. Rewriting the REQUEST is how each becomes
+            # reachable: the device below is conforming, so the defect has to
+            # be injected as the request it never should have accepted.
+            head, pids = request[:_OBD_POLL_FIXED], request[_OBD_POLL_FIXED:]
+            MORE = 0x80
+            if "obd_ignores_grouping_bit" in self.faults:
+                # The undeclared case: strip the flag and let the low seven
+                # bits through, so a grouped set is answered ok on a device
+                # that never declared it could group.
+                request = head + bytes(b & ~MORE for b in pids)
+            elif "obd_splits_groups" in self.faults:
+                # Parsed, accepted, then flattened: every PID becomes its own
+                # group. Only a RATE check can see this one.
+                request = head + bytes(b & ~MORE for b in pids)
+            elif any(b & MORE for b in pids):
+                # obd_accepts_bad_group: flatten only what rule 6 or rule 7
+                # would have refused, so the refusal checks see `ok` where
+                # they require bad_params and the legal cases still behave.
+                groups, run_ = [], []
+                for b in pids:
+                    run_.append(b & ~MORE)
+                    if not b & MORE:
+                        groups.append(run_)
+                        run_ = []
+                if run_ or any(len(g) > 6 for g in groups):
+                    request = head + bytes(b & ~MORE for b in pids)
         if "obd_polls_before_probe" in self.faults and \
                 len(request) >= _OBD_POLL_FIXED and \
                 request[0] == refdec.OPCODE["OBD_POLL_SET"] and \

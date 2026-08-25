@@ -804,4 +804,4 @@ control:
     # repeat a PID -- [0C, 0D, 0C, 05] samples 0x0C twice per cycle -- which
     # is how relative rates exist without per-PID rate fields (SPEC.md 15.4).
     - {value: 0x60, name: OBD_INFO,     capability: obd, params: "",                              response: "obd_probe record", desc: "Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2)"}
-    - {value: 0x61, name: OBD_POLL_SET, capability: obd, params: "interval_ms:u16, count:u8, pids:u8*", response: "",                 desc: "Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4)"}
+    - {value: 0x61, name: OBD_POLL_SET, capability: obd, params: "interval_ms:u16, count:u8, pids:u8*", response: "",                 desc: "Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4); with capability bit 11, bit 7 of a PID byte groups it with the next (SPEC.md 15.4.1)"}
