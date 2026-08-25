@@ -1,5 +1,9 @@
 # Proposal: single-frame PID grouping for `OBD_POLL_SET`
 
+> **SUPERSEDED — landed in SPEC §15.4.1.** Capability bit 11 was withdrawn
+when §15 was rewritten: grouping is part of the role, not an option. Kept
+as the record of the argument and the measurement.
+
 **Status**: draft, implemented in the reference peripheral and measured
 **Constraint answered**: per-PID sample rate under a fixed transmit floor (RATIONALE §11.5, §11.6)
 **Wire impact**: one reserved capability bit; one reserved bit per PID byte. No record size changes, no new records, no new opcodes.

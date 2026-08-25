@@ -570,16 +570,28 @@ async def _restore_observation_table(s):
             await c.subscribe_can(can_id, mask=mask)
 
 
+#: ISO 15765-4's diagnostic response range. Traffic here exists only while a
+#: poll set is installed (SPEC.md 15.4), and every governing check below opens
+#: with CAN_RESET -- which clears the poll set along with the table (SPEC.md
+#: 15.7). Choosing one of these as the target measured a baseline of zero and
+#: skipped, reporting "too little traffic" about an identifier the check had
+#: just silenced itself. Broadcast traffic does not stop when the table does.
+_DIAGNOSTIC_IDS = range(0x7E8, 0x7F0)
+
+
 def _busiest_id(s):
     good, _ = _decoded(s, "can")
     counts = {}
     for _, batch in good:
         for r in batch["records"]:
             counts[r["id"]] = counts.get(r["id"], 0) + 1
-    if not counts:
-        raise Skip("no CAN frame was observed, so there is no identifier to "
-                   "test governing against")
-    return max(counts, key=counts.get)
+    broadcast = {cid: n for cid, n in counts.items()
+                 if cid not in _DIAGNOSTIC_IDS}
+    if not broadcast:
+        raise Skip("no broadcast CAN frame was observed, so there is no "
+                   "identifier that survives the CAN_RESET this check opens "
+                   "with (SPEC.md 15.7)")
+    return max(broadcast, key=broadcast.get)
 
 
 @check(id="can.most_specific_governs", section="9.2", phase="streams",

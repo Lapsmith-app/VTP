@@ -1,5 +1,11 @@
 # Proposal: response-paced OBD polling
 
+> **SUPERSEDED — landed in SPEC §15.4.** With no third-party consumers, the
+poll clock was fixed rather than extended: there is no capability bit 12
+and no `OBD_POLL_SET_PACED`, because `OBD_POLL_SET` itself is paced. Kept
+as the record of the argument and the measurement; RATIONALE §11.5a is
+the standing rationale.
+
 **Status**: draft — **measured against a real car; recommend accept**
 **Constraint answered**: `interval_ms` forces one number to decide two
 independent things (SPEC §15.4, RATIONALE §11.6)

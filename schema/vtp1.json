@@ -111,14 +111,12 @@
         "imu_max_rate_hz"
       ],
       "obd": [
-        "obd_poll_slots",
-        "obd_min_interval_ms"
+        "obd_poll_slots"
       ]
     },
     "capacity_required": {
       "obd": [
-        "obd_poll_slots",
-        "obd_min_interval_ms"
+        "obd_poll_slots"
       ]
     }
   },
@@ -488,17 +486,9 @@
             "control"
           ],
           "desc": "Device transmits OBD-II diagnostic requests on the bus (\u00a715)"
-        },
-        {
-          "bit": 11,
-          "name": "obd_pid_grouping",
-          "implies": [
-            "obd"
-          ],
-          "desc": "Accepts grouped PIDs in OBD_POLL_SET (SPEC.md 15.4.1)"
         }
       ],
-      "reserved_from": 12,
+      "reserved_from": 11,
       "reserved_purpose": "Roles and features added in a later minor"
     },
     "can_flags": {
@@ -707,12 +697,12 @@
           "bitmask": "clock_flags"
         },
         {
-          "name": "obd_min_interval_ms",
+          "name": "reserved_22",
           "offset": 22,
           "size": 2,
           "type": "u16",
-          "units": "ms",
-          "desc": "Smallest OBD_POLL_SET interval_ms this device accepts (SPEC.md 15.4); 0 if no OBD"
+          "reserved": true,
+          "desc": "Was obd_min_interval_ms; withdrawn with the fixed poll clock (SPEC.md 15.4)"
         }
       ]
     },
@@ -1627,9 +1617,9 @@
         "value": 97,
         "name": "OBD_POLL_SET",
         "capability": "obd",
-        "params": "interval_ms:u16, count:u8, pids:u8*",
+        "params": "interval_ms:u16, count:u8, schedule:u8*",
         "response": "",
-        "desc": "Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4); with capability bit 11, bit 7 of a PID byte groups it with the next (SPEC.md 15.4.1)"
+        "desc": "Replace the whole poll set; count 0 stops transmitting. Response-paced: interval_ms is a MINIMUM spacing and 0 means none (SPEC.md 15.4). Bit 7 of a PID byte groups it with the next and each group carries a rate divisor (SPEC.md 15.4.1, 15.4.2)"
       }
     ]
   }

@@ -314,7 +314,6 @@ int vtp_encode_info(const vtp_info_t *v, uint8_t *out, size_t cap) {
     tmp[VTP_INFO_OFF_OBD_POLL_SLOTS] = v->obd_poll_slots;
     tmp[VTP_INFO_OFF_CLOCK_FLAGS] =
         (uint8_t)KNOWN_BITS(v->clock_flags, VTP_CLOCK_FLAGS_KNOWN);
-    wr16(tmp + VTP_INFO_OFF_OBD_MIN_INTERVAL_MS, v->obd_min_interval_ms);
 
     /* SPEC.md 4.1 -- a capacity behind a cleared bit is a role the device
      * does not have (sharpest for OBD, where it advertises transmitting on

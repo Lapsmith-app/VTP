@@ -46,7 +46,6 @@ CAP_MASKED_SUBS = _CAP["masked_subscriptions"]
 CAP_POWER = _CAP["power"]
 CAP_GNSS_AIDING = _CAP["gnss_aiding"]
 CAP_OBD = _CAP["obd"]
-CAP_OBD_PID_GROUPING = _CAP["obd_pid_grouping"]
 
 V_T_UTC, V_T_UTC_RESOLVED, V_POSITION = 1 << 0, 1 << 1, 1 << 2
 V_ALT_MSL, V_ALT_ELLIPSOID, V_VELOCITY = 1 << 3, 1 << 4, 1 << 5
@@ -193,9 +192,16 @@ SUB_EVERY_FRAME, SUB_PERIODIC = 0, 1
 CAN_SUBSCRIPTION_SLOTS = 32
 CAN_MAX_FRAMES_PER_S = 4000
 
-# SPEC.md 15.4 -- the two OBD capacities this build declares in Info.
+# SPEC.md 15.4 -- the one OBD capacity this build declares in Info. There is
+# no declared rate: polling is response-paced, so what bounds the request rate
+# is the car, and a device publishing a "safe" interval would be guessing about
+# a vehicle it has never met.
 OBD_POLL_SLOTS = 16
-OBD_MIN_INTERVAL_MS = 20
+# SPEC.md 15.1 -- an unanswered request is abandoned after this long, so a PID
+# nothing answers cannot stall the schedule. Deliberately generous rather than
+# ISO 15765-4's P2max of 50 ms: a logger that gives up on a slow gatewayed ECU
+# has lost the reading a tester would have waited for.
+OBD_RESPONSE_TIMEOUT_US = 100_000
 # SPEC.md 15.4.1 -- bit 7 of a PID byte groups it with the byte that follows.
 # PIDs are 0x01..0x60, so bit 7 is space that reads zero on a device without
 # capability bit 11 and is refused there by rule 5 as a value out of range.
@@ -336,8 +342,7 @@ class VtpDevice:
     # rule. selftest.py builds a device without them to check the other.
     DEFAULT_CAPABILITIES = (CAP_GPS | CAP_CAN | CAP_IMU | CAP_CONTROL
                             | CAP_MONITOR | CAP_MASKED_SUBS
-                            | CAP_POWER | CAP_GNSS_AIDING | CAP_OBD
-                            | CAP_OBD_PID_GROUPING)
+                            | CAP_POWER | CAP_GNSS_AIDING | CAP_OBD)
 
     #: SPEC.md §14 — what this device declares in gnss_aid_caps. Named on the
     #: class so the conformance harness can seed a fault against the device's
@@ -364,9 +369,19 @@ class VtpDevice:
                 _pid_mask(0x41, [0x42, 0x51])),
     }
 
+    #: How long this synthetic car takes to answer, in microseconds. Zero --
+    #: answering in the same tick the request went out -- is what the model did
+    #: before SPEC.md 15.4 was response-paced, and it makes pacing invisible:
+    #: with an instant car the next request is due immediately and `interval_ms`
+    #: is the only thing left pacing the loop. Set it to model a real bus.
+    OBD_ECU_LATENCY_US = 0
+
     def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
-                 circuit=None, monitor_channels=None, capabilities=None):
+                 circuit=None, monitor_channels=None, capabilities=None,
+                 obd_latency_us=None):
         self._clock = now_us or self._monotonic_us
+        self.obd_latency_us = (self.OBD_ECU_LATENCY_US if obd_latency_us is None
+                               else obd_latency_us)
         self._origin_ns = time.monotonic_ns()
         self._wall_origin_ms = int(time.time() * 1000)
 
@@ -473,6 +488,23 @@ class VtpDevice:
         # had just sent. It survives every edge short of construction,
         # because the bus does not care why two frames were close together.
         self._obd_last_tx_us = None
+        # SPEC.md 15.4 -- response pacing needs one more fact than the fixed
+        # clock did: whether the request already sent is still outstanding.
+        # None means nothing is in flight and the next group may go as soon as
+        # `interval_ms` allows.
+        self._obd_outstanding_since = None
+        # How many frames on probe-reported response identifiers have been
+        # admitted, and the value that counter held when the outstanding
+        # request went out. A COUNTER and not a timestamp: with a car that
+        # answers within one tick the answer's bus-arrival time equals the
+        # transmit time, and any comparison of instants then reads a request's
+        # own tick as having answered it -- which measured as 193 Hz on a car
+        # physically capable of 50. Counting cannot tie.
+        self._obd_answers = 0
+        self._obd_answer_mark = None
+        # Pass counter for SPEC.md 15.4.2's divisors. Counts passes of the
+        # whole schedule, not requests, so a divisor means what it says.
+        self._obd_pass = 0
         self._obd_clear()
 
     # -- clock ------------------------------------------------------------
@@ -662,7 +694,7 @@ class VtpDevice:
             "imu_rate_hz": self.imu_hz if imu else 0,
             "imu_max_rate_hz": 833 if imu else 0,
             "obd_poll_slots": OBD_POLL_SLOTS if obd else 0,
-            "obd_min_interval_ms": OBD_MIN_INTERVAL_MS if obd else 0,
+            "reserved_22": 0,
             "clock_flags": 0b10,      # survives reconnect; not GNSS-disciplined
         })
 
@@ -883,26 +915,61 @@ class VtpDevice:
         # NEW list divides by zero. Every mutation of the pair rebinds
         # rather than mutating in place, so a local reference stays a
         # consistent pre- or post-write view.
+        # SPEC.md 15.4 -- answers are admitted BEFORE the transmit decision,
+        # and the order is load-bearing. Taken afterwards, an answer arriving
+        # in the same tick as a transmission counts against the request that
+        # transmission just sent, and the loop fires again one tick later: the
+        # spacing measured as an alternating 5 ms / 20 ms on a car whose
+        # latency is a flat 20. Deliver first, then decide.
+        obd_frames = (list(self._due_obd_frames(now))
+                      if caps & CAP_CAN else [])
+
         obd_poll = self._obd_poll
         obd_interval_us = self._obd_interval_ms * 1000
-        if caps & CAP_OBD and obd_poll and (
-                self._obd_last_tx_us is None
-                or now - self._obd_last_tx_us >= obd_interval_us):
-            # SPEC.md 15.4.1 -- the schedule walks GROUPS. A group is one
-            # request, so this test against `_obd_last_tx_us` is untouched by
-            # grouping, and that is the whole proof that SPEC.md 15.1's bound
-            # still holds: one frame per interval whatever a group contains,
-            # and the frame is padded to eight bytes either way.
-            group = obd_poll[self._obd_index % len(obd_poll)]
-            self._obd_index += 1
-            self._obd_last_tx_us = now
-            self._obd_transmit(group, now)
+        if caps & CAP_OBD and obd_poll:
+            # SPEC.md 15.4 -- "answered" is a frame on a probe-reported
+            # response identifier at or after the outstanding request went
+            # out. The device does not correlate a response to a request
+            # (SPEC.md 15.5 is why it never needs to), so this is the only
+            # signal available.
+            #
+            # This runs BEFORE the transmit decision, and must: functional
+            # addressing means several ECUs answer one request, and if the
+            # queue were walked afterwards the SECOND ECU's answer would clear
+            # the state belonging to the request just sent. That defect
+            # measured as 78 requests/s where the car's 20 ms latency allows
+            # 50 -- pacing off a car that had not answered yet.
+            if (self._obd_outstanding_since is not None
+                    and self._obd_answer_mark is not None
+                    and self._obd_answers > self._obd_answer_mark):
+                self._obd_outstanding_since = None
+            # SPEC.md 15.1 -- an unanswered request is abandoned, not retried.
+            # Abandoning is what clears the way for the next group; the ECU may
+            # still answer afterwards and SPEC.md 15.5 delivers that frame like
+            # any other.
+            if (self._obd_outstanding_since is not None
+                    and now - self._obd_outstanding_since
+                    >= OBD_RESPONSE_TIMEOUT_US):
+                self._obd_outstanding_since = None
+            # SPEC.md 15.4 -- both conditions, and `interval_ms` is a MINIMUM
+            # rather than a period. With interval 0 the car is the only pacing
+            # there is, which is safe precisely because the first condition
+            # waits for it.
+            answered = self._obd_outstanding_since is None
+            spaced = (self._obd_last_tx_us is None
+                      or now - self._obd_last_tx_us >= obd_interval_us)
+            if answered and spaced:
+                group = self._obd_next_group()
+                if group is not None:
+                    self._obd_last_tx_us = now
+                    self._obd_outstanding_since = now
+                    self._obd_answer_mark = self._obd_answers
+                    self._obd_transmit(group, now)
 
         # OBD responses first: anything a probe put on the synthetic bus
         # between polls carries an older bus-arrival time than the broadcast
         # frames generated at `now`, and records within a batch must not run
-        # backwards.
-        obd_frames = (self._due_obd_frames(now) if caps & CAP_CAN else ())
+        # backwards. Collected above, before the transmitter ran.
         # The CAN branch is already gated by `_subscriptions`, which stays
         # empty on a device whose CAN opcodes all answer unsupported_opcode --
         # but relying on a side effect of the control plane to enforce a
@@ -1019,7 +1086,9 @@ class VtpDevice:
             batch = self._flush_can(now)
             if batch is not None:
                 self._deferred.append(("can", batch))
-        self._obd_poll, self._obd_interval_ms, self._obd_index = [], 0, 0
+        self._obd_poll, self._obd_interval_ms = [], 0
+        self._obd_index = self._obd_pass = 0
+        self._obd_outstanding_since = self._obd_answer_mark = None
         self._obd_rx = []
 
     def _obd_clear(self, *, flush=False):
@@ -1194,7 +1263,26 @@ class VtpDevice:
                 # the reason SPEC.md 15.4.1 tells a client to learn per-ECU
                 # attribution by polling singly first.
                 continue
-            self._obd_rx.append((now, ecu_id, self._obd_mode01_frame(body)))
+            self._obd_rx.append((now + self.obd_latency_us, ecu_id,
+                                 self._obd_mode01_frame(body)))
+
+    def _obd_next_group(self):
+        """SPEC.md 15.4.2 -- the next group due, or None if this pass has none.
+
+        A skipped group advances the cursor without transmitting and does not
+        consume a pass, so a divisor of `d` means one pass in `d` and nothing
+        else. Bounded by the schedule length: a pass in which every group is
+        skipped returns None rather than spinning, and the caller simply tries
+        again on the next tick with the pass counter advanced.
+        """
+        for _ in range(len(self._obd_poll)):
+            group, divisor = self._obd_poll[self._obd_index % len(self._obd_poll)]
+            self._obd_index += 1
+            if self._obd_index % len(self._obd_poll) == 0:
+                self._obd_pass += 1
+            if self._obd_pass % divisor == 0:
+                return group
+        return None
 
     def _obd_fallback_delivers(self, cid):
         """SPEC.md 15.5 -- the one delivery rule beside the table: while the
@@ -1222,6 +1310,8 @@ class VtpDevice:
             if t > now:
                 hold.append((t, cid, payload))
                 continue
+            if cid in self._obd_ecu_ids:
+                self._obd_answers += 1
             sub = self._governing(cid)
             if sub is None:
                 if self._obd_fallback_delivers(cid):
@@ -1264,7 +1354,10 @@ class VtpDevice:
         # verified against, so the set clears first, flushing what it had
         # already accepted (§15.7).
         self._obd_stop(flush=True)
-        step_us = max(50, OBD_MIN_INTERVAL_MS) * 1000
+        # SPEC.md 15.2 -- the probe stays clock-paced: it has its own
+        # fallback-addressing logic, runs once, and has no schedule to
+        # pace against. 50 ms is a collection window, not a rate bound.
+        step_us = 50_000
         t = now
         if self._obd_last_tx_us is not None:
             t = max(t, self._obd_last_tx_us + step_us)
@@ -1573,16 +1666,12 @@ class VtpDevice:
 
         if opcode == OBD_POLL_SET:
             # SPEC.md 15.4 -- refusals in the stated order: shape, capacity,
-            # the empty-set stop, the interval floor, then the PIDs. A
+            # the empty-set stop, then the PIDs and the group bounds. A
             # refused request leaves the installed poll set unchanged.
             if len(params) < 3:
                 return reply(ST_BAD_PARAMS)
             interval_ms, count = struct.unpack("<HB", params[:3])
-            pids = params[3:]
-            if len(pids) != count:
-                return reply(ST_BAD_PARAMS)
-            # Capacity second: the answer is a fact the client could have
-            # read in Info, which is §9.6's argument for a typed refusal.
+            body = params[3:]
             if count > OBD_POLL_SLOTS:
                 return reply(ST_TABLE_FULL)
             if count == 0:
@@ -1590,59 +1679,54 @@ class VtpDevice:
                 # interval MUST be 0 -- there is no schedule for it to pace.
                 # flush=True: frames already accepted while polling are
                 # delivered now rather than stranded until some later
-                # subscription surfaces them with a stale t_base (§15.7).
-                if interval_ms != 0:
+                # subscription surfaces them with a stale t_base (SPEC.md 15.7).
+                if interval_ms != 0 or body:
                     return reply(ST_BAD_PARAMS)
                 self._obd_stop(flush=True)
                 return reply(ST_OK)
-            # SPEC.md 15.4 -- zero is NOT "no limit" here: the device would
-            # be generating unbounded traffic, not filtering existing
-            # traffic, so the floor applies and covers zero.
-            if interval_ms < OBD_MIN_INTERVAL_MS:
-                return reply(ST_BAD_PARAMS)
-            # SPEC.md 15.4.1 -- split on bit 7 BEFORE rule 5, because rule
-            # 5 tests bits 0-6 on a device that groups. On a device that does
-            # not, the raw byte goes to rule 5 and a grouped set is refused
-            # there as a PID outside 0x01..0x60 -- rule 5 unamended, which is
-            # what makes an old device's refusal automatic rather than a
-            # second rule someone has to remember to write.
-            if self.capabilities & CAP_OBD_PID_GROUPING:
-                groups, run = [], []
-                for byte in pids:
-                    run.append(byte & ~OBD_PID_MORE)
-                    if not byte & OBD_PID_MORE:
-                        groups.append(tuple(run))
-                        run = []
-                trailing_more = bool(run)
-            else:
-                groups, run = [(pid,) for pid in pids], []
-                trailing_more = False
-            # `run` holds a trailing group bit 7 left open, which rule 7
-            # refuses below -- but its PIDs are validated first, so a set that
-            # is wrong in both ways is refused for either reason and never
-            # slips past rule 5 on the strength of rule 7 catching it.
-            flat = [pid for group in groups for pid in group] + run
 
-            # SPEC.md 15.4 rule 5 -- pollable means declared supported by the
+            # SPEC.md 15.4.1 -- one pass: PID bytes until one without `more`,
+            # then that group's divisor byte. The parse is its own length
+            # check, which is why rule 1 is "the payload the parse does not
+            # consume exactly" rather than an arithmetic on `count`: the
+            # number of groups is not known until the walk finds them.
+            groups, run, i = [], [], 0
+            while i < len(body):
+                byte = body[i]
+                i += 1
+                run.append(byte & ~OBD_PID_MORE)
+                if byte & OBD_PID_MORE:
+                    continue
+                if i >= len(body):
+                    return reply(ST_BAD_PARAMS)   # group with no divisor
+                groups.append((tuple(run), body[i]))
+                run, i = [], i + 1
+            if run:
+                # SPEC.md 15.4.1 -- bit 7 left set on the last byte: a group
+                # that continues into nothing is not a schedule.
+                return reply(ST_BAD_PARAMS)
+            if sum(len(g) for g, _ in groups) != count:
+                return reply(ST_BAD_PARAMS)
+
+            # SPEC.md 15.4 rule 4 -- pollable means declared supported by the
             # most recent probe of this connection. With no probe, nothing is,
             # which is what makes declare-verify-use structural.
-            if any(not self._obd_pid_supported(pid) for pid in flat):
+            if any(not self._obd_pid_supported(pid)
+                   for group, _ in groups for pid in group):
                 return reply(ST_BAD_PARAMS)
-            # SPEC.md 15.4.1 rule 6 -- seven PIDs do not fit the request
-            # frame. The device checks the REQUEST bound and not the response
-            # bound; see OBD_MAX_GROUP.
-            if any(len(group) > OBD_MAX_GROUP for group in groups):
+            # SPEC.md 15.4 rule 5 -- seven PIDs do not fit the request frame,
+            # and a divisor of 0 names a group that never transmits.
+            if any(len(group) > OBD_MAX_GROUP or divisor == 0
+                   for group, divisor in groups):
                 return reply(ST_BAD_PARAMS)
-            # SPEC.md 15.4.1 rule 7 -- a group that continues into nothing.
-            if trailing_more:
-                return reply(ST_BAD_PARAMS)
+
             # The schedule is NOT reset: spacing is measured from the last
-            # transmission (§15.1), so a replacement mid-interval waits out
-            # the remainder instead of transmitting immediately, and a first
-            # set transmits at the next poll() tick.
+            # transmission (SPEC.md 15.1), so a replacement mid-interval waits
+            # out the remainder instead of transmitting immediately.
             self._obd_poll = groups
             self._obd_interval_ms = interval_ms
             self._obd_index = 0
+            self._obd_pass = 0
             return reply(ST_OK)
 
         if opcode == MONITOR_LIST:

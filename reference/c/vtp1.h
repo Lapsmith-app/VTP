@@ -117,7 +117,11 @@ typedef struct {
     uint16_t imu_rate_hz, imu_max_rate_hz;
     uint8_t  obd_poll_slots;      /* SPEC.md 15.4; byte 20, assigned per 11.2 */
     uint8_t  clock_flags;
-    uint16_t obd_min_interval_ms; /* SPEC.md 15.4; bytes 22-23, ditto */
+    /* Bytes 22-23 held obd_min_interval_ms and are reserved again:
+       SPEC.md 15.4 is response-paced, so there is no declared rate. Still
+       decoded, because SPEC.md 2 requires a receiver to carry reserved
+       bytes through rather than assume them zero. */
+    uint16_t reserved_22;
 } vtp_info_t;
 
 int vtp_decode_info(const uint8_t *buf, size_t len,

@@ -290,8 +290,8 @@ int vtp_decode_info(const uint8_t *b, size_t len,
     o->imu_rate_hz            = rd16(b + VTP_INFO_OFF_IMU_RATE_HZ);
     o->imu_max_rate_hz        = rd16(b + VTP_INFO_OFF_IMU_MAX_RATE_HZ);
     o->obd_poll_slots         = b[VTP_INFO_OFF_OBD_POLL_SLOTS];
+    o->reserved_22            = rd16(b + VTP_INFO_OFF_RESERVED_22);
     o->clock_flags            = b[VTP_INFO_OFF_CLOCK_FLAGS];
-    o->obd_min_interval_ms    = rd16(b + VTP_INFO_OFF_OBD_MIN_INTERVAL_MS);
     return 0;
 }
 

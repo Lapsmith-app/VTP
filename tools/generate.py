@@ -975,7 +975,7 @@ def _reserved_case(schema, record, field, value):
             # SPEC.md 15 requires both OBD capacities non-zero beside it --
             # a baseline the encoder must refuse for another reason tests
             # nothing about the reserved bits.
-            clean.update(obd_poll_slots=16, obd_min_interval_ms=20)
+            clean.update(obd_poll_slots=16)
         return (dict(clean, **{field: value}),
                 encode(schema, "info", dict(clean, **{field: value})))
     if record == "monitor_value":
@@ -1799,7 +1799,7 @@ def vectors(schema):
                                 | C["masked_subscriptions"] | C["obd"]),
                   gps_rate_hz=25, gps_max_rate_hz=25, can_subscription_slots=32,
                   can_max_frames_per_s=4000, obd_poll_slots=16,
-                  obd_min_interval_ms=20, clock_flags=0b01),
+                  clock_flags=0b01),
              "An OBD-port dongle: GPS, CAN and the OBD role. Bit 10 is the "
              "declaration that this device TRANSMITS on the vehicle bus "
              "(SPEC.md 15), and the two capacities say how much a client may "
@@ -1808,24 +1808,12 @@ def vectors(schema):
         case(schema, "info", "obd-without-can",
              dict(protocol_major=1, protocol_minor=0,
                   capabilities=C["control"] | C["obd"],
-                  obd_poll_slots=16, obd_min_interval_ms=20),
+                  obd_poll_slots=16),
              "SPEC.md 4.1 -- `obd` requires `can`: poll responses are "
              "delivered as ordinary CAN frames, so an OBD device without the "
              "CAN role transmits questions whose answers no client can "
              "receive. Decodes; the OBD role MUST NOT be used.",
              refused_by="info-obd-without-can",
-             no_roundtrip=True),
-        case(schema, "info", "grouping-without-obd",
-             dict(protocol_major=1, protocol_minor=0,
-                  capabilities=C["can"] | C["control"] | C["obd_pid_grouping"],
-                  can_subscription_slots=32, can_max_frames_per_s=4000),
-             "SPEC.md 4.1 -- `obd_pid_grouping` requires `obd`: bit 11 says "
-             "how this device reads the PID bytes of an OBD_POLL_SET it "
-             "would answer `unsupported_opcode` to. It also carries neither "
-             "OBD capacity, because bit 10 is clear -- so the same record "
-             "claims a refinement of a role and denies the role. Decodes; "
-             "the grouping declaration MUST NOT be used.",
-             refused_by="info-grouping-without-obd",
              no_roundtrip=True),
         case(schema, "info", "obd-declared-with-zero-capacity",
              dict(protocol_major=1, protocol_minor=0,
@@ -1848,7 +1836,7 @@ def vectors(schema):
         case(schema, "info", "obd-capacity-without-capability",
              dict(protocol_major=1, protocol_minor=0, capabilities=C["gps"],
                   gps_rate_hz=10, gps_max_rate_hz=10,
-                  obd_poll_slots=16, obd_min_interval_ms=20),
+                  obd_poll_slots=16),
              "SPEC.md 4.1 -- both OBD capacities MUST be zero while bit 10 "
              "is clear. Sharper here than for any other role: a non-zero "
              "poll capacity behind a cleared bit is a device advertising "
@@ -2971,25 +2959,12 @@ def vectors(schema):
                  "answers no client can receive.",
          "input": dict(protocol_major=1, protocol_minor=0,
                        capabilities=C["control"] | C["obd"],
-                       obd_poll_slots=16, obd_min_interval_ms=20)},
-        {"name": "info-grouping-without-obd",
-         "record": "info", "must_refuse": True,
-         "vector": "grouping-without-obd",
-         "desc": "SPEC.md 4.1 -- `obd_pid_grouping` requires `obd`. Bit 11 "
-                 "refines how OBD_POLL_SET's PID bytes are read on a device "
-                 "that, with bit 10 clear, answers that opcode "
-                 "unsupported_opcode -- a refinement of a role the same "
-                 "record denies.",
-         "input": dict(protocol_major=1, protocol_minor=0,
-                       capabilities=(C["can"] | C["control"]
-                                     | C["obd_pid_grouping"]),
-                       can_subscription_slots=32,
-                       can_max_frames_per_s=4000)},
+                       obd_poll_slots=16)},
         {"name": "info-obd-declared-with-zero-capacity",
          "record": "info", "must_refuse": True,
          "vector": "obd-declared-with-zero-capacity",
          "desc": "SPEC.md 15 -- the `obd` bit set with obd_poll_slots and "
-                 "obd_min_interval_ms zero. The declared role admits no "
+                 "zero. The declared role admits no "
                  "conforming exchange, so the device-side half refuses.",
          "input": dict(protocol_major=1, protocol_minor=0,
                        capabilities=(C["gps"] | C["can"] | C["control"]
@@ -3007,7 +2982,7 @@ def vectors(schema):
          "input": dict(protocol_major=1, protocol_minor=0,
                        capabilities=C["gps"], gps_rate_hz=10,
                        gps_max_rate_hz=10, obd_poll_slots=16,
-                       obd_min_interval_ms=20)},
+                       )},
         # SPEC.md 15.2, in the producer direction. The five content rules
         # of the probe record: each is the device-side half of a no_roundtrip
         # vector above, held together by the pairing gate.

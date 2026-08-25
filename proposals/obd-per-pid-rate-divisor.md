@@ -1,5 +1,9 @@
 # Proposal: per-entry rate divisors for the OBD poll set
 
+> **SUPERSEDED — landed in SPEC §15.4.2.** Shape A was taken, with the
+divisor byte following each group's terminating PID byte. Kept as the
+record of the argument; RATIONALE §11.6 is the standing rationale.
+
 **Status**: draft
 **Constraint answered**: a PID can be made faster than the cycle and never
 slower (SPEC §15.4, RATIONALE §11.6)

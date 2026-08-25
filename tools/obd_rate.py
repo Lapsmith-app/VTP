@@ -24,7 +24,8 @@ sys.path.insert(0, os.path.join(_HERE, os.pardir, "reference", "python"))
 import vtp_device as dev            # noqa: E402
 import vtp1                         # noqa: E402
 
-TICK_US = 5_000                     # the peripheral's own 200 Hz service rate
+TICK_US = 5_000
+LATENCY_US = [0]                     # the peripheral's own 200 Hz service rate
 
 #: A representative lap-timing set: four two-byte PIDs and eight one-byte,
 #: every one of them inside the synthetic car's supported union so the two
@@ -99,12 +100,14 @@ def pack_greedily(pids):
     return groups
 
 
-def encode(groups):
-    """SPEC.md 15.4.1 -- bit 7 set on every PID but the last of its group."""
+def encode(groups, divisor=1):
+    """SPEC.md 15.4.1 -- bit 7 set on every PID but the last of its group,
+    then that group's divisor byte."""
     out = bytearray()
     for group in groups:
         for i, pid in enumerate(group):
             out.append(pid | (dev.OBD_PID_MORE if i < len(group) - 1 else 0))
+        out.append(divisor)
     return bytes(out)
 
 
@@ -178,8 +181,10 @@ def run(car, clock, seconds):
 
 
 def measure(label, pids_payload, groups, seconds, interval_ms):
+    n_pids = sum(len(g) for g in groups)
     clock = [0]
-    car = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=0, imu_hz=0)
+    car = dev.VtpDevice(now_us=lambda: clock[0], mtu=247, gps_hz=0,
+                        imu_hz=0, obd_latency_us=LATENCY_US[0])
     car.on_connect()
 
     # Declare, verify, use: nothing is pollable until a probe has answered.
@@ -192,7 +197,7 @@ def measure(label, pids_payload, groups, seconds, interval_ms):
         raise SystemExit("the probe never completed")
 
     request = (bytes([dev.OBD_POLL_SET, 0x02])
-               + struct.pack("<HB", interval_ms, len(pids_payload))
+               + struct.pack("<HB", interval_ms, n_pids)
                + pids_payload)
     status = car.handle_control(request)[2]
     if status != dev.ST_OK:
@@ -214,8 +219,12 @@ def measure(label, pids_payload, groups, seconds, interval_ms):
             else f"{worst:5.2f}-{best:5.2f} Hz per PID")
     if dead:
         span += f", {dead}/{len(RACE_SET)} silent"
+    # Under SPEC.md 15.4 the spacing is max(interval_ms, the car), so the
+    # cycle is not `groups x interval_ms` -- with interval 0 that reads 0 ms
+    # for a loop plainly doing real work. Reported from what arrived.
+    cycle = 1000.0 / best if best else float("inf")
     print(f"  {label:<22} {len(groups):>2} groups  "
-          f"cycle {len(groups) * interval_ms:>4} ms  {span:<32} ({note})")
+          f"cycle {cycle:>5.0f} ms  {span:<32} ({note})")
     return worst, rates
 
 
@@ -223,17 +232,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--interval-ms", type=int, default=None)
-    ap.add_argument("--min-interval-ms", type=int, default=None,
-                    help="Override the device's declared floor, to size what "
-                         "hardware answering faster than the reference "
-                         "peripheral could offer. 20 ms is this build's "
-                         "declaration, not a constant of the specification.")
+    ap.add_argument("--latency-ms", type=float, default=0.0,
+                    help="How long the synthetic car takes to answer. Zero "
+                         "answers in the same tick, which makes SPEC.md "
+                         "15.4's response pacing invisible: interval_ms is "
+                         "then the only thing pacing the loop.")
     args = ap.parse_args()
 
-    if args.min_interval_ms is not None:
-        dev.OBD_MIN_INTERVAL_MS = args.min_interval_ms
-    interval = (args.interval_ms if args.interval_ms is not None
-                else dev.OBD_MIN_INTERVAL_MS)
+    interval = args.interval_ms if args.interval_ms is not None else 0
+    LATENCY_US[0] = int(args.latency_ms * 1000)
 
     # Before anything is measured, and before the packer reads the table.
     probe_car = dev.VtpDevice(now_us=lambda: 0, mtu=247, gps_hz=0, imu_hz=0)
@@ -246,14 +253,14 @@ def main():
     # exactly the mistake SPEC.md 15.4.1 leaves the client free to make.
     overpacked = [RACE_SET[i:i + 6] for i in range(0, len(RACE_SET), 6)]
 
-    print(f"\n{len(RACE_SET)} PIDs, interval_ms={interval}, "
-          f"{args.seconds:g}s of device time, "
-          f"obd_min_interval_ms={dev.OBD_MIN_INTERVAL_MS}\n")
+    print(f"\n{len(RACE_SET)} PIDs, interval_ms={interval} (a MINIMUM; "
+          f"0 = none), car answers in {args.latency_ms:g} ms, "
+          f"{args.seconds:g}s of device time\n")
     print("  grouping: "
           + "  ".join("(" + " ".join(f"{p:02X}" for p in g) + ")"
                       for g in grouped) + "\n")
 
-    base, _ = measure("ungrouped (today)", bytes(RACE_SET), single,
+    base, _ = measure("ungrouped", encode(single), single,
                       args.seconds, interval)
     fast, rates = measure("grouped (15.4.1)", encode(grouped), grouped,
                           args.seconds, interval)

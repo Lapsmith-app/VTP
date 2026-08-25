@@ -8,36 +8,46 @@ conformance vector.
 
 ## [Unreleased]
 
-### OBD-II polling gained PID grouping (SPEC §15.4.1)
+### §15 rewritten: response-paced, grouped, divided
 
-Capability bit 11 (`obd_pid_grouping`). Bit 7 of a PID byte in
-`OBD_POLL_SET` groups it with the byte that follows, so the device sends one
-Mode 01 request per *group* rather than per PID and the schedule walks
-groups. `interval_ms` spaces requests, so this is the difference between
-sampling a PID every *k* × `interval_ms` and every *g* × `interval_ms`:
-twelve PIDs at a 20 ms floor measured 4.1 Hz each ungrouped and 9.9 Hz
-grouped.
+Pre-1.0 and with no third-party consumers, so the poll loop was fixed rather
+than extended. What was three layered proposals — grouping behind a
+capability bit, pacing behind a second bit and a second opcode, divisors
+behind a third — is one rule on the opcode that already existed.
 
-It costs the device nothing it did not already have. The request frame is
-padded to eight bytes either way (§15.1), so the bus worst case — one short
-frame per `obd_min_interval_ms` — does not move, and the response side gets
-strictly smaller. No ISO-TP, no flow control, no reassembly, and no PID
-length table in firmware: the client sizes groups against the six response
-bytes a single frame carries, because §15.5 already puts those tables in the
-client. A group sized too large is answered with a first frame, which §15.5
-already governs and §15.1 already leaves dead.
+**Polling is response-paced (§15.4).** The device transmits the next group
+when the previous request has been answered, or `OBD_RESPONSE_TIMEOUT_MS`
+(100) has passed, and no sooner than `interval_ms` after the last
+transmission. `interval_ms` is a **minimum spacing, not a period**, and 0
+means the client imposes none — the car is then the only pacing there is,
+which is safe precisely because the device waits for it. Zero is admissible
+where a `periodic` subscription's `arg` could not be, because waiting for an
+answer cannot generate traffic faster than the car produces it.
 
-Two costs, both stated where they are paid. A device declaring bit 11 reads
-a PID byte with bit 7 set as a grouped PID rather than a malformed one, so
-it no longer refuses a value rule 5 used to catch (§15.4.1). And bit 7 of a
-PID byte was previously *malformed input* rather than Appendix A reserved
-space — this is a pre-1.0 fold-in of an encoding decision, not the ordinary
-minor-version reserved-bit assignment §11.3 describes.
+**`obd_min_interval_ms` is withdrawn** and Info bytes 22–23 are reserved
+again. A device is plugged into a car it has never met, so a rate it
+publishes as safe is a guess about a vehicle it cannot see. §15.1's audit
+claim is now a discipline rather than a number: one request outstanding,
+waits for its answer, never retries, transmits nothing the client did not ask
+for. The cost — no rate readable from Info before anything is transmitted —
+is stated in RATIONALE §11.5a rather than glossed.
 
+**Grouping is part of the role (§15.4.1)**, not capability bit 11, which is
+withdrawn and reserved again. Bit 7 of a PID byte groups it with the byte
+that follows; a group is one Mode 01 request and costs the bus nothing,
+because the request frame is padded to eight bytes whether it names one PID
+or six. A group of one is the old behaviour, so mandating it costs a device
+only the parse.
 
-Everything since 0.1.0, condensed: with zero deployed devices a changelog is
-a record of decisions, not a diary — the pull requests and RATIONALE.md hold
-the detail and the arguments, and git holds the archaeology.
+**Every group carries a rate divisor (§15.4.2).** A group with divisor *d* is
+transmitted one pass in *d*. Repetition could already make a PID faster than
+the cycle and could never make one slower; divisors close that, and they are
+admissible where per-PID rates were not because a divisor can only ever
+remove a request.
+
+Measured against the reference peripheral, twelve PIDs on a car answering in
+10 ms: 8.0 Hz each ungrouped, **19.8 Hz grouped**, with the schedule paced by
+the car rather than by a number the client guessed.
 
 ### Reviewed as what it is, and slimmed
 

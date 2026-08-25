@@ -1161,9 +1161,40 @@ grouping under capability bit 11 without giving the device ISO-TP, flow
 control, reassembly, or a PID length table — none of the complexity this
 paragraph correctly refused to buy.
 
+### 11.5a Why the poll clock became response-paced
+
+The fixed clock made `interval_ms` do two unrelated jobs — how fast do I
+sample, and how long will I wait before abandoning a request — and gave the
+client nothing to choose between them with, because the protocol never told
+it the car's latency. Every value is wrong for one of the two, and LapSmith,
+the only client, picked a constant blind.
+
+SPEC §15.4 now waits for the answer, floors nothing, and treats `interval_ms`
+as a minimum the client may set to zero. Zero is admissible here where a
+`periodic` subscription's `arg` (SPEC §6.8) could not be, and the difference is
+exactly the pacing: a device that waits for an answer before transmitting
+cannot generate traffic faster than the car produces it, so "no client
+throttle" is bounded where "no limit" would not have been.
+
+**`obd_min_interval_ms` was withdrawn with the clock it governed.** A device
+is plugged into a car it has never met, so a rate it publishes as *safe* is a
+guess about a vehicle it cannot see — the same guess a client makes when it
+hard-codes an interval, relocated to the party with strictly less
+information. Under pacing it also governs nothing the car is not already
+governing. What replaces it is a discipline rather than a number: at most one
+request outstanding, waits for its answer, never retries, transmits nothing a
+client did not ask for. That is checkable by inspection and true on every
+car, which a published interval never was.
+
+The cost is stated where it is paid: SPEC §15.1's worst case is no longer a rate
+a client can read out of Info before anything is transmitted. That property
+was real, and it is gone. It bought a number no vendor could fill in
+honestly, and this repository's own standard is that a field whose correct
+answer nobody knows is worse than no field.
+
 ### 11.6 Why the rate is aggregate
 
-Per-PID rates were considered for consistency with `periodic`
+Per-PID *rates* were considered for consistency with `periodic`
 subscriptions and rejected on a difference that matters more than the
 symmetry: a subscription's interval *filters traffic that exists anyway*,
 so N of them cannot add a frame to the bus, while a poll interval
@@ -1175,10 +1206,21 @@ rates survive as list composition: entries are ordered and may repeat, so
 `[0C, 0D, 0C, 05]` samples engine speed twice per cycle. A schedule
 expressed as data, not as a scheduler expressed as parameters.
 
-`interval_ms` zero meaning "no limit", as `periodic`'s `arg` has it, is
-refused for the same reason: unbounded generation is the one thing this
-role must never do, so the floor is a fact in Info and zero is
-`bad_params`.
+**This argument holds for rates and not for divisors, and SPEC §15.4.2 is
+the line between them.** N independent intervals make the bus load a sum
+only the client knows; N divisors can only ever subtract from a load already
+bounded, because a divisor causes a request to be *skipped* and never adds
+one. The load-bearing sentence — at most one request per pass of the
+schedule, ever — survives a divisor verbatim, which is the same test SPEC §15.4.1
+had to pass. Refusing the mechanism that only reduces traffic while
+permitting the one that increases it was backwards, and repetition alone left
+a client no way to make a channel slower than the cycle: the only currency
+for buying a ratio was `obd_poll_slots`, so a client wanting one channel
+slower paid in channels it could no longer read at all.
+
+`interval_ms` zero was refused here in the same breath, on the same
+reasoning, and §11.5a is why that no longer holds: under response pacing zero
+is not unbounded.
 
 ### 11.7 What it costs, and what was declined
 

@@ -735,22 +735,7 @@
         "protocol_major": 1,
         "protocol_minor": 0,
         "capabilities": 1040,
-        "obd_poll_slots": 16,
-        "obd_min_interval_ms": 20
-      }
-    },
-    {
-      "name": "info-grouping-without-obd",
-      "record": "info",
-      "must_refuse": true,
-      "vector": "grouping-without-obd",
-      "desc": "SPEC.md 4.1 -- `obd_pid_grouping` requires `obd`. Bit 11 refines how OBD_POLL_SET's PID bytes are read on a device that, with bit 10 clear, answers that opcode unsupported_opcode -- a refinement of a role the same record denies.",
-      "input": {
-        "protocol_major": 1,
-        "protocol_minor": 0,
-        "capabilities": 2066,
-        "can_subscription_slots": 32,
-        "can_max_frames_per_s": 4000
+        "obd_poll_slots": 16
       }
     },
     {
@@ -758,7 +743,7 @@
       "record": "info",
       "must_refuse": true,
       "vector": "obd-declared-with-zero-capacity",
-      "desc": "SPEC.md 15 -- the `obd` bit set with obd_poll_slots and obd_min_interval_ms zero. The declared role admits no conforming exchange, so the device-side half refuses.",
+      "desc": "SPEC.md 15 -- the `obd` bit set with obd_poll_slots and zero. The declared role admits no conforming exchange, so the device-side half refuses.",
       "input": {
         "protocol_major": 1,
         "protocol_minor": 0,
@@ -781,8 +766,7 @@
         "capabilities": 1,
         "gps_rate_hz": 10,
         "gps_max_rate_hz": 10,
-        "obd_poll_slots": 16,
-        "obd_min_interval_ms": 20
+        "obd_poll_slots": 16
       }
     },
     {
@@ -1048,17 +1032,16 @@
       "name": "reserved-bits-info-capabilities",
       "record": "info",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- info.capabilities bits 12-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "desc": "SPEC.md 2 -- info.capabilities bits 11-31 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 31 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
         "protocol_major": 1,
         "protocol_minor": 0,
-        "capabilities": 2147487615,
+        "capabilities": 2147485567,
         "gps_rate_hz": 10,
         "gps_max_rate_hz": 10,
-        "obd_poll_slots": 16,
-        "obd_min_interval_ms": 20
+        "obd_poll_slots": 16
       },
-      "expect_hex": "01007f0f00000a000a000000000000000000000010001400"
+      "expect_hex": "01007f0700000a000a000000000000000000000010000000"
     },
     {
       "name": "reserved-bits-info-clock-flags",

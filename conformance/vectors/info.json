@@ -19,7 +19,7 @@
         "imu_max_rate_hz": 0,
         "obd_poll_slots": 0,
         "clock_flags": 1,
-        "obd_min_interval_ms": 0
+        "reserved_22": 0
       }
     },
     {
@@ -39,7 +39,7 @@
         "imu_max_rate_hz": 0,
         "obd_poll_slots": 0,
         "clock_flags": 0,
-        "obd_min_interval_ms": 0
+        "reserved_22": 0
       }
     },
     {
@@ -59,7 +59,7 @@
         "imu_max_rate_hz": 833,
         "obd_poll_slots": 0,
         "clock_flags": 3,
-        "obd_min_interval_ms": 0
+        "reserved_22": 0
       },
       "note": "This vector used to declare CAN with no Control bit, which SPEC.md 4.1 now forbids and which conformance/run.py had been quietly assuming the opposite of. `can_fd` requires `can` and `can` requires `control`, so the whole chain is present here.",
       "canonical": false,
@@ -82,7 +82,7 @@
         "imu_max_rate_hz": 833,
         "obd_poll_slots": 0,
         "clock_flags": 0,
-        "obd_min_interval_ms": 0
+        "reserved_22": 0
       },
       "note": "The only vector where the current and maximum rates differ. Without it a decoder can read gps_rate_hz from gps_max_rate_hz's offset and pass the whole corpus -- found by tools/mutate.py, not by review."
     },
@@ -103,7 +103,7 @@
         "imu_max_rate_hz": 0,
         "obd_poll_slots": 0,
         "clock_flags": 0,
-        "obd_min_interval_ms": 0
+        "reserved_22": 0
       },
       "note": "No round-trip: the decode is required and the re-encode is forbidden, because a conforming encoder refuses to publish an Info that breaks the matrix.",
       "no_roundtrip": true
@@ -125,7 +125,7 @@
         "imu_max_rate_hz": 0,
         "obd_poll_slots": 0,
         "clock_flags": 0,
-        "obd_min_interval_ms": 0
+        "reserved_22": 0
       },
       "no_roundtrip": true
     },
@@ -146,7 +146,7 @@
         "imu_max_rate_hz": 0,
         "obd_poll_slots": 0,
         "clock_flags": 0,
-        "obd_min_interval_ms": 0
+        "reserved_22": 0
       },
       "no_roundtrip": true
     },
@@ -167,7 +167,7 @@
         "imu_max_rate_hz": 0,
         "obd_poll_slots": 0,
         "clock_flags": 0,
-        "obd_min_interval_ms": 0
+        "reserved_22": 0
       },
       "no_roundtrip": true
     },
@@ -175,7 +175,7 @@
       "name": "obd-dongle",
       "desc": "An OBD-port dongle: GPS, CAN and the OBD role. Bit 10 is the declaration that this device TRANSMITS on the vehicle bus (SPEC.md 15), and the two capacities say how much a client may ask of it: at most 16 PIDs in a poll set, no interval below 20 ms.",
       "record": "info",
-      "hex": "010053040000190019002000a00f00000000000010011400",
+      "hex": "010053040000190019002000a00f00000000000010010000",
       "expect": {
         "protocol_major": 1,
         "protocol_minor": 0,
@@ -188,14 +188,14 @@
         "imu_max_rate_hz": 0,
         "obd_poll_slots": 16,
         "clock_flags": 1,
-        "obd_min_interval_ms": 20
+        "reserved_22": 0
       }
     },
     {
       "name": "obd-without-can",
       "desc": "SPEC.md 4.1 -- `obd` requires `can`: poll responses are delivered as ordinary CAN frames, so an OBD device without the CAN role transmits questions whose answers no client can receive. Decodes; the OBD role MUST NOT be used.",
       "record": "info",
-      "hex": "010010040000000000000000000000000000000010001400",
+      "hex": "010010040000000000000000000000000000000010000000",
       "expect": {
         "protocol_major": 1,
         "protocol_minor": 0,
@@ -208,28 +208,7 @@
         "imu_max_rate_hz": 0,
         "obd_poll_slots": 16,
         "clock_flags": 0,
-        "obd_min_interval_ms": 20
-      },
-      "no_roundtrip": true
-    },
-    {
-      "name": "grouping-without-obd",
-      "desc": "SPEC.md 4.1 -- `obd_pid_grouping` requires `obd`: bit 11 says how this device reads the PID bytes of an OBD_POLL_SET it would answer `unsupported_opcode` to. It also carries neither OBD capacity, because bit 10 is clear -- so the same record claims a refinement of a role and denies the role. Decodes; the grouping declaration MUST NOT be used.",
-      "record": "info",
-      "hex": "010012080000000000002000a00f00000000000000000000",
-      "expect": {
-        "protocol_major": 1,
-        "protocol_minor": 0,
-        "capabilities": 2066,
-        "gps_rate_hz": 0,
-        "gps_max_rate_hz": 0,
-        "can_subscription_slots": 32,
-        "can_max_frames_per_s": 4000,
-        "imu_rate_hz": 0,
-        "imu_max_rate_hz": 0,
-        "obd_poll_slots": 0,
-        "clock_flags": 0,
-        "obd_min_interval_ms": 0
+        "reserved_22": 0
       },
       "no_roundtrip": true
     },
@@ -250,7 +229,7 @@
         "imu_max_rate_hz": 0,
         "obd_poll_slots": 0,
         "clock_flags": 0,
-        "obd_min_interval_ms": 0
+        "reserved_22": 0
       },
       "note": "The non-zero-when-set column of the 4.1 table, generated from profile.capacity_required. gps_rate_hz zero with the gps bit set is a STOPPED stream and stays legal, which is why this is a second table rather than a general rule.",
       "no_roundtrip": true
@@ -259,7 +238,7 @@
       "name": "obd-capacity-without-capability",
       "desc": "SPEC.md 4.1 -- both OBD capacities MUST be zero while bit 10 is clear. Sharper here than for any other role: a non-zero poll capacity behind a cleared bit is a device advertising that it transmits on a vehicle bus while declaring that it does not. Decodes; a client MUST NOT use either figure and SHOULD report the contradiction.",
       "record": "info",
-      "hex": "0100010000000a000a000000000000000000000010001400",
+      "hex": "0100010000000a000a000000000000000000000010000000",
       "expect": {
         "protocol_major": 1,
         "protocol_minor": 0,
@@ -272,7 +251,7 @@
         "imu_max_rate_hz": 0,
         "obd_poll_slots": 16,
         "clock_flags": 0,
-        "obd_min_interval_ms": 20
+        "reserved_22": 0
       },
       "no_roundtrip": true
     },

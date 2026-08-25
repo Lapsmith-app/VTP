@@ -85,15 +85,18 @@ def main():
     # ---- Info -----------------------------------------------------------
     info = vtp1.decode_info(device.info())
     check(info["protocol_major"] == 1, "info: protocol_major must be 1")
-    # Bytes 20 and 22-23 stopped being reserved when SPEC.md 15 assigned
-    # them; a device declaring bit 10 MUST NOT declare either capacity zero.
+    # Byte 20 stopped being reserved when SPEC.md 15 assigned it; a device
+    # declaring bit 10 MUST NOT declare its one capacity zero. Bytes 22-23
+    # went BACK to reserved when SPEC.md 15.4 became response-paced: there is
+    # no declared rate, because a device cannot honestly publish one for a car
+    # it has never met.
     check(info["obd_poll_slots"] == dev.OBD_POLL_SLOTS,
           "info: obd_poll_slots must carry the declared capacity")
-    check(info["obd_min_interval_ms"] == dev.OBD_MIN_INTERVAL_MS,
-          "info: obd_min_interval_ms must carry the declared floor")
-    check(info["obd_poll_slots"] and info["obd_min_interval_ms"],
-          "info: a device declaring `obd` MUST NOT declare either capacity "
+    check(info["obd_poll_slots"],
+          "info: a device declaring `obd` MUST NOT declare its capacity "
           "zero (SPEC.md 15)")
+    check(info["reserved_22"] == 0,
+          "info: bytes 22-23 are reserved again and MUST read zero")
     check(info["gps_rate_hz"] <= info["gps_max_rate_hz"],
           "info: current GPS rate exceeds the declared ceiling")
     check(info["imu_rate_hz"] <= info["imu_max_rate_hz"],
@@ -1107,10 +1110,8 @@ def main():
     nocan = dev.VtpDevice(now_us=lambda: 0, capabilities=dev.CAP_GPS)
     check(payload_ceiling(vtp1.decode_info(nocan.info())) == 0,
           "a device with no CAN carries none")
-    check(vtp1.decode_info(nocan.info())["obd_poll_slots"] == 0
-          and vtp1.decode_info(nocan.info())["obd_min_interval_ms"] == 0,
-          "both OBD capacities MUST be zero while bit 10 is clear "
-          "(SPEC.md 4.1)")
+    check(vtp1.decode_info(nocan.info())["obd_poll_slots"] == 0,
+          "the OBD capacity MUST be zero while bit 10 is clear (SPEC.md 4.1)")
 
     # SPEC.md 13.4 -- a device asking for more channels than fit in one
     # complete write is refused where the mistake is, not at the first
@@ -1207,6 +1208,7 @@ def main():
     # about the boundary between the transmitter (the poll set) and the
     # receiver (subscriptions): the two are controlled separately, and no
     # response reaches the client except through an ordinary subscription.
+    MORE = dev.OBD_PID_MORE
     obd_clock = [0]
     car = dev.VtpDevice(now_us=lambda: obd_clock[0], mtu=247,
                         gps_hz=0, imu_hz=0)
@@ -1214,6 +1216,30 @@ def main():
 
     def obd_ctl(op, tag, params=b""):
         return car.handle_control(bytes([op, tag]) + params)
+
+    def schedule(*groups, divisor=1):
+        """SPEC.md 15.4.1's layout: PID bytes with `more` set on all but the
+        last of a group, then that group's divisor byte.
+
+        Groups may be given as a bare PID, a tuple of PIDs, or a
+        (tuple, divisor) pair."""
+        out, count = bytearray(), 0
+        for g in groups:
+            d = divisor
+            if isinstance(g, tuple) and len(g) == 2 and isinstance(g[0], tuple):
+                g, d = g
+            pids = g if isinstance(g, tuple) else (g,)
+            for i, pid in enumerate(pids):
+                out.append(pid | (MORE if i < len(pids) - 1 else 0))
+                count += 1
+            out.append(d)
+        return count, bytes(out)
+
+    def poll_set(tag, interval_ms, *groups, divisor=1, count=None):
+        n, body = schedule(*groups, divisor=divisor)
+        return obd_ctl(dev.OBD_POLL_SET, tag,
+                       struct.pack("<HB", interval_ms,
+                                   n if count is None else count) + body)
 
     def obd_run(seconds):
         """Advance the clock and return every decoded CAN batch."""
@@ -1259,8 +1285,7 @@ def main():
 
     # SPEC.md 15.4 -- nothing is pollable before a probe: declare-verify-use
     # is structural, not convention.
-    early = obd_ctl(dev.OBD_POLL_SET, 0x60,
-                    struct.pack("<HB", 25, 1) + bytes([0x0C]))
+    early = poll_set(0x60, 25, 0x0C)
     check(early[2] == dev.ST_BAD_PARAMS,
           "OBD_POLL_SET before OBD_INFO MUST answer bad_params (SPEC.md 15.4)")
     # ...but the stop is always available, whatever the probe state.
@@ -1300,8 +1325,7 @@ def main():
     # SPEC.md 15.4, 15.5 -- an accepted poll set is the WHOLE of what a
     # client must do to receive the answers: nothing is subscribed here, and
     # the fallback delivers on the probe's reported response identifiers.
-    check(obd_ctl(dev.OBD_POLL_SET, 0x63,
-                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+    check(poll_set(0x63, 25, 0x0C)[2] == dev.ST_OK,
           "a probed, supported PID at a legal interval MUST be accepted")
     batches = obd_run(1.0)
     frames = [r for b in batches for r in b["records"]]
@@ -1343,8 +1367,7 @@ def main():
     # requests, across the boundary included, may be closer than the
     # interval. Observed through the response timestamps, which are the
     # request ticks in this model.
-    check(obd_ctl(dev.OBD_POLL_SET, 0x76,
-                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+    check(poll_set(0x76, 25, 0x0C)[2] == dev.ST_OK,
           "replacing the poll set with itself must answer ok")
     spaced = [r for b in obd_run(0.6) for r in b["records"]]
     ticks = sorted({r["t_device_us"] for r in spaced
@@ -1365,8 +1388,7 @@ def main():
           "an ANSWERED re-probe MUST clear the poll set too: after its own "
           "flush, nothing may be transmitted until a new OBD_POLL_SET "
           "(SPEC.md 15.2)")
-    check(obd_ctl(dev.OBD_POLL_SET, 0x7A,
-                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+    check(poll_set(0x7A, 25, 0x0C)[2] == dev.ST_OK,
           "re-arming against the fresh probe result must succeed")
 
     # SPEC.md 15.5 -- the fallback is not an entry in the table: it holds no
@@ -1399,94 +1421,89 @@ def main():
           "removing the periodic subscription must succeed")
 
     # SPEC.md 15.4 -- a refused request leaves the installed set unchanged.
-    check(obd_ctl(dev.OBD_POLL_SET, 0x65,
-                  struct.pack("<HB", dev.OBD_MIN_INTERVAL_MS - 1, 1)
-                  + bytes([0x0C]))[2] == dev.ST_BAD_PARAMS,
-          "an interval below obd_min_interval_ms MUST answer bad_params")
+    check(poll_set(0x65, 25, 0x02)[2] == dev.ST_BAD_PARAMS,
+          "a PID the probe's union does not claim MUST answer bad_params")
     check(obd_run(0.2),
           "a refused OBD_POLL_SET MUST leave the previous set polling")
+    # ...and interval_ms 0 is NOT an error any more: response pacing makes it
+    # bounded by the car, so it is a client declining to throttle rather than
+    # a request for unbounded generation (SPEC.md 15.4).
+    check(poll_set(0x64, 0, 0x0C)[2] == dev.ST_OK,
+          "interval_ms 0 with a non-empty set MUST be accepted: pacing waits "
+          "for the answer, so zero is not unbounded (SPEC.md 15.4)")
 
     # SPEC.md 15.4 -- the rest of the refusal table.
-    check(obd_ctl(dev.OBD_POLL_SET, 0x66,
-                  struct.pack("<HB", 25, dev.OBD_POLL_SLOTS + 1)
-                  + bytes([0x0C]) * (dev.OBD_POLL_SLOTS + 1))[2]
+    check(poll_set(0x66, 25, *([0x0C] * (dev.OBD_POLL_SLOTS + 1)))[2]
           == dev.ST_TABLE_FULL,
           "more PIDs than obd_poll_slots MUST answer table_full")
-    check(obd_ctl(dev.OBD_POLL_SET, 0x67,
-                  struct.pack("<HB", 25, 1) + bytes([0x02]))[2]
+    check(poll_set(0x67, 25, 0x02)[2]
           == dev.ST_BAD_PARAMS,
           "a PID the probe's union does not claim MUST answer bad_params")
-    check(obd_ctl(dev.OBD_POLL_SET, 0x68,
-                  struct.pack("<HB", 25, 1) + bytes([0x7F]))[2]
+    check(poll_set(0x68, 25, 0x7F)[2]
           == dev.ST_BAD_PARAMS,
           "a PID above 0x60 MUST answer bad_params (SPEC.md 15.4)")
-    check(obd_ctl(dev.OBD_POLL_SET, 0x69,
-                  struct.pack("<HB", 25, 2) + bytes([0x0C]))[2]
-          == dev.ST_BAD_PARAMS,
+    check(poll_set(0x69, 25, 0x0C, count=2)[2] == dev.ST_BAD_PARAMS,
           "a count disagreeing with the PID bytes present MUST answer "
           "bad_params")
     check(obd_ctl(dev.OBD_POLL_SET, 0x6A, struct.pack("<HB", 25, 0))[2]
           == dev.ST_BAD_PARAMS,
           "the empty set MUST carry interval_ms 0 (SPEC.md 15.4)")
 
-    # ---- SPEC.md 15.4.1: PID grouping ----------------------------------
-    # The bound the role is auditable on is "one short frame per
-    # obd_min_interval_ms" (SPEC.md 15.1), and grouping must not move it.
-    # Everything here is about that: a group is ONE request.
-    MORE = dev.OBD_PID_MORE
-
-    check(obd_ctl(dev.OBD_POLL_SET, 0x70, struct.pack("<HB", 25, 7)
-                  + bytes([0x0C | MORE] * 6 + [0x0D]))[2]
-          == dev.ST_BAD_PARAMS,
+    # ---- SPEC.md 15.4.1 / 15.4.2: the schedule layout -------------------
+    # A group is ONE request, and SPEC.md 15.1's bounds are stated over
+    # requests, so nothing here may make the device transmit more often than
+    # the car answers.
+    check(poll_set(0x70, 25, (0x0C,) * 7)[2] == dev.ST_BAD_PARAMS,
           "a group of seven PIDs does not fit the request frame and MUST "
-          "answer bad_params (SPEC.md 15.4.1 rule 6)")
-    check(obd_ctl(dev.OBD_POLL_SET, 0x71, struct.pack("<HB", 25, 2)
-                  + bytes([0x0C, 0x0D | MORE]))[2] == dev.ST_BAD_PARAMS,
-          "a group continuing past the end of the list MUST answer "
-          "bad_params (SPEC.md 15.4.1 rule 7)")
-    check(obd_ctl(dev.OBD_POLL_SET, 0x72, struct.pack("<HB", 25, 2)
-                  + bytes([0x02 | MORE, 0x0D]))[2] == dev.ST_BAD_PARAMS,
-          "rule 5 tests bits 0-6: an unsupported PID inside a group MUST "
-          "answer bad_params")
-    check(obd_ctl(dev.OBD_POLL_SET, 0x73, struct.pack("<HB", 25, 6)
-                  + bytes([0x0C | MORE] * 5 + [0x0D]))[2] == dev.ST_OK,
+          "answer bad_params (SPEC.md 15.4 rule 5)")
+    check(poll_set(0x73, 25, (0x0C,) * 6)[2] == dev.ST_OK,
           "a group of exactly six PIDs fits the request frame and MUST be "
-          "accepted (SPEC.md 15.4.1 rule 6)")
+          "accepted")
+    check(poll_set(0x71, 25, 0x0C, divisor=0)[2] == dev.ST_BAD_PARAMS,
+          "a divisor of 0 names a group that never transmits and MUST answer "
+          "bad_params (SPEC.md 15.4.2)")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x72, struct.pack("<HB", 25, 2)
+                  + bytes([0x0C | MORE, 0x0D | MORE]))[2] == dev.ST_BAD_PARAMS,
+          "bit 7 left set on the last byte is a group continuing into "
+          "nothing and MUST answer bad_params (SPEC.md 15.4.1)")
+    check(obd_ctl(dev.OBD_POLL_SET, 0x78, struct.pack("<HB", 25, 1)
+                  + bytes([0x0C]))[2] == dev.ST_BAD_PARAMS,
+          "a group with no divisor byte after it MUST answer bad_params: the "
+          "parse is the length check (SPEC.md 15.4 rule 1)")
+    check(poll_set(0x79, 25, 0x0C, count=2)[2] == dev.ST_BAD_PARAMS,
+          "a count disagreeing with the PIDs the schedule names MUST answer "
+          "bad_params")
+    check(poll_set(0x7A, 25, (0x02, 0x0C))[2] == dev.ST_BAD_PARAMS,
+          "rule 4 tests bits 0-6: an unsupported PID inside a group MUST "
+          "answer bad_params")
 
-    # A group is one request: two PIDs, one interval, and both answers carry
-    # the SAME bus-arrival time because one frame asked for both.
-    check(obd_ctl(dev.OBD_POLL_SET, 0x74, struct.pack("<HB", 100, 2)
-                  + bytes([0x0C | MORE, 0x0D]))[2] == dev.ST_OK,
-          "a two-PID group MUST be accepted on a device declaring bit 11")
+    # SPEC.md 15.4 -- a group is one request, and its answer carries every
+    # PID that ECU implements at ONE bus-arrival instant.
+    check(poll_set(0x74, 100, (0x0C, 0x0D))[2] == dev.ST_OK,
+          "a two-PID group MUST be accepted")
     obd_run(0.15)
-    paired = [r for b in obd_run(1.0) for r in b["records"]
-              if r["id"] == 0x7E8]
+    paired = [r for b in obd_run(1.0) for r in b["records"] if r["id"] == 0x7E8]
     check(paired, "a grouped poll set must produce answers")
-    instants = {r["t_device_us"] for r in paired}
     check(len(paired) <= 11,
           f"at interval_ms 100 a two-PID group is ONE request per 100 ms, so "
           f"at most 11 answers may arrive from one ECU in 1 s; {len(paired)} "
-          f"did -- grouping MUST NOT move SPEC.md 15.1's bus bound")
-    check(len(instants) == len(paired),
+          f"did -- grouping MUST NOT make the device transmit more often")
+    check(len({r["t_device_us"] for r in paired}) == len(paired),
           "each grouped request produces one answer per ECU, so no two "
           "answers from one ECU may share a bus-arrival instant")
     check(all(bytes.fromhex(r["payload"])[:3] == bytes([0x06, 0x41, 0x0C])
-              and bytes.fromhex(r["payload"])[5] == 0x0D
-              for r in paired),
+              and bytes.fromhex(r["payload"])[5] == 0x0D for r in paired),
           "the answer to a (0C, 0D) group MUST be one single frame carrying "
           "both pairs: PCI 06, 41, then 0C hi lo and 0D speed")
 
-    # SPEC.md 15.1 -- the request frame, asserted directly. Grouping's whole
-    # safety claim is that a six-PID request occupies the same eight bytes a
-    # one-PID request occupies, so the worst case on the bus does not move.
-    # That is arithmetic, and arithmetic in a specification is checked.
+    # SPEC.md 15.1 -- the request frame, asserted directly. A six-PID request
+    # occupies the same eight bytes a one-PID request occupies, which is why
+    # grouping costs the bus nothing.
     for g in range(1, dev.OBD_MAX_GROUP + 1):
         frame = dev.VtpDevice._obd_request_frame(tuple(range(1, g + 1)))
-        check(len(frame) == 8,
-              f"a {g}-PID request MUST occupy a full classic CAN frame; "
-              f"grouping is free exactly because this length never changes")
-        check(frame[0] == 1 + g and frame[1] == 0x01,
-              f"a {g}-PID request MUST carry PCI {1 + g} and mode 01")
+        check(len(frame) == 8 and frame[0] == 1 + g and frame[1] == 0x01,
+              f"a {g}-PID request MUST be a full 8-byte frame with PCI "
+              f"{1 + g} and mode 01")
         check(dev.VtpDevice._obd_request_pids(frame) == tuple(range(1, g + 1)),
               f"an ECU reading a {g}-PID request off the bus MUST see exactly "
               f"the PIDs it names")
@@ -1496,59 +1513,46 @@ def main():
     try:
         dev.VtpDevice._obd_request_frame(tuple(range(1, dev.OBD_MAX_GROUP + 2)))
         check(False, "a group of seven does not fit a classic CAN frame and "
-                     "MUST NOT be buildable (SPEC.md 15.4.1 rule 6)")
+                     "MUST NOT be buildable")
     except ValueError:
         pass
 
-    # SPEC.md 15.4.1 -- the device does NOT check response sizes, and the
-    # failure when a client oversizes a group is a first frame that dies for
-    # want of a flow control SPEC.md 15.1 forbids. Loud, immediate, and never
-    # a wrong value.
-    check(obd_ctl(dev.OBD_POLL_SET, 0x75, struct.pack("<HB", 100, 3)
-                  + bytes([0x0C | MORE, 0x10 | MORE, 0x1F]))[2] == dev.ST_OK,
+    # SPEC.md 15.4.1 -- the device does NOT check response sizes. A group
+    # whose answer overflows arrives as a first frame and dies for want of a
+    # flow control SPEC.md 15.1 forbids -- and SPEC.md 15.5's fallback
+    # DELIVERS it, so the client sees the failure rather than a silent bus.
+    check(poll_set(0x75, 100, (0x0C, 0x10, 0x1F))[2] == dev.ST_OK,
           "an oversize group is ACCEPTED: response sizes are the client's "
           "arithmetic, and a PID length table in firmware is what SPEC.md "
           "15.9 excludes")
     obd_run(0.15)
-    oversize = [bytes.fromhex(r["payload"])
-                for b in obd_run(0.6) for r in b["records"]
-                if r["id"] == 0x7E8]
+    over_batches = obd_run(0.6)
+    oversize = [bytes.fromhex(r["payload"]) for b in over_batches
+                for r in b["records"] if r["id"] == 0x7E8]
     check(oversize and all(f[0] >> 4 == 1 for f in oversize),
           "a group whose answer exceeds seven bytes MUST arrive as a first "
           "frame (SPEC.md 15.5)")
     check(all(f[0] >> 4 != 2 for f in oversize),
           "no consecutive frame may ever follow: the device sends no flow "
           "control, so the transfer it opened is dead (SPEC.md 15.1)")
-
-    # SPEC.md 15.4.1 -- the same request, the other ECU. 0x7E9's mask covers
-    # 0x0C and neither 0x10 nor 0x1F, so it answers the group it was NOT
-    # fully asked with a single frame carrying only its own subset -- which
-    # is why a client sizing against "one ECU answers everything" is sizing
-    # conservatively, and is the behaviour most likely to differ on a real
-    # gatewayed car. Untested, it was the largest unasserted claim in the
-    # role.
-    partial = [bytes.fromhex(r["payload"])
-               for b in obd_run(0.6) for r in b["records"]
-               if r["id"] == 0x7E9]
+    # ...and the OTHER ECU answers the same request with only its own subset,
+    # which fits a single frame. The likeliest thing to differ on a real
+    # gatewayed car, so it is asserted rather than assumed.
+    partial = [bytes.fromhex(r["payload"]) for b in over_batches
+               for r in b["records"] if r["id"] == 0x7E9]
     check(partial,
           "an ECU implementing PART of a group MUST still answer with the "
           "subset it implements (SPEC.md 15.4.1)")
-    check(all(f[0] >> 4 == 0 for f in partial),
-          "0x7E9's subset of (0C, 10, 1F) is one pair and fits a single "
-          "frame; it MUST NOT arrive as a first frame just because the "
-          "group overflowed on the OTHER ECU")
-    check(all(f[:3] == bytes([0x04, 0x41, 0x0C]) for f in partial),
-          "0x7E9 MUST answer with 0x0C alone -- an ECU answering for PIDs "
+    check(all(f[0] >> 4 == 0 and f[:3] == bytes([0x04, 0x41, 0x0C])
+              for f in partial),
+          "0x7E9 implements only 0x0C of (0C, 10, 1F), so it MUST answer a "
+          "single frame carrying 0x0C alone -- an ECU answering for PIDs "
           "outside its own mask is a car this device has misread")
 
-    # SPEC.md 15.3 -- the mask PIDs are pollable like any other (0x20 and
-    # 0x40 are inside 0x01..0x60 and the union claims them), their answer is
-    # FOUR bytes, and it differs per ECU. A car that answered them with the
-    # one-byte filler made a grouped (0x20, 0x40) decode as 0x20 carrying
-    # four bytes taken from its neighbour -- a plausible wrong value, and
-    # identical from both ECUs, which no real bus produces.
-    check(obd_ctl(dev.OBD_POLL_SET, 0x77, struct.pack("<HB", 100, 2)
-                  + bytes([0x20 | MORE, 0x40]))[2] == dev.ST_OK,
+    # SPEC.md 15.3 -- the mask PIDs are pollable, four bytes wide, and differ
+    # per ECU. A car answering them with a one-byte filler made a grouped
+    # (0x20, 0x40) decode as 0x20 carrying its neighbour's bytes.
+    check(poll_set(0x77, 100, (0x20, 0x40))[2] == dev.ST_OK,
           "the mask PIDs are inside 0x01-0x60 and claimed by the union, so "
           "a group naming them MUST be accepted")
     obd_run(0.15)
@@ -1558,55 +1562,83 @@ def main():
     check(set(masked) == {0x7E8, 0x7E9}, "both ECUs must answer (0x20, 0x40)")
     check(all(f[0] >> 4 == 1 for f in masked.values()),
           "0x20 and 0x40 are four data bytes each, so the pair is 11 bytes "
-          "and CANNOT be a single frame; answering one means the car "
-          "returned the wrong width for a mask PID")
+          "and CANNOT be a single frame")
     check(masked[0x7E8] != masked[0x7E9],
           "supported-PID masks are ECU-specific, so two ECUs MUST NOT "
           "answer a mask PID with identical bytes")
     for ecu_id, frame in masked.items():
-        # A first frame is [0x1L, LL, then six data bytes]: 0x41, the PID,
-        # and the first four bytes of its answer.
         check(frame[2] == 0x41 and frame[3] == 0x20,
-              f"0x{ecu_id:03X}'s first frame MUST open the Mode 01 answer "
-              f"with 41 20")
+              f"0x{ecu_id:03X}'s first frame MUST open with 41 20")
         check(frame[4:8] == dev._j1979_mask_bytes(car.OBD_ECUS[ecu_id][1]),
-              f"0x{ecu_id:03X} MUST report ITS OWN 0x21-0x40 window -- the "
-              f"same bytes its probe response for 0x20 carried")
+              f"0x{ecu_id:03X} MUST report ITS OWN 0x21-0x40 window")
 
-    # SPEC.md 15.4.1 rule 8 -- a device WITHOUT bit 11 refuses a grouped set
-    # through rule 5, unamended: bit 7 set is a value outside 0x01..0x60.
-    plain_clock = [0]
-    plain = dev.VtpDevice(
-        now_us=lambda: plain_clock[0], mtu=247, gps_hz=0, imu_hz=0,
-        capabilities=dev.VtpDevice.DEFAULT_CAPABILITIES
-        & ~dev.CAP_OBD_PID_GROUPING)
-    plain.on_connect()
-    check(not vtp1.decode_info(plain.info())["capabilities"]
-          & dev.CAP_OBD_PID_GROUPING,
-          "the ungrouped build must not declare bit 11 in Info")
-    plain.handle_control(bytes([dev.OBD_INFO, 0x01]))
-    for _ in range(400):
-        plain_clock[0] += 5_000
-        if plain.due_control_response() is not None:
-            break
-    check(plain.handle_control(bytes([dev.OBD_POLL_SET, 0x02])
-                               + struct.pack("<HB", 25, 2)
-                               + bytes([0x0C | MORE, 0x0D]))[2]
-          == dev.ST_BAD_PARAMS,
-          "a device not declaring bit 11 MUST refuse a grouped poll set "
-          "(SPEC.md 15.4.1 rule 8, via rule 5 unamended)")
-    check(plain.handle_control(bytes([dev.OBD_POLL_SET, 0x03])
-                               + struct.pack("<HB", 25, 2)
-                               + bytes([0x0C, 0x0D]))[2] == dev.ST_OK,
-          "the same PIDs ungrouped MUST still be accepted there")
+    check(poll_set(0x76, 25, 0x0C)[2] == dev.ST_OK,
+          "a single-PID set must reinstall after a grouped one")
 
-    # Put the ungrouped device back to a stopped transmitter, and this one
-    # back to a single-PID set for the SPEC.md 15.7 cases that follow.
-    plain.handle_control(bytes([dev.OBD_POLL_SET, 0x04])
-                         + struct.pack("<HB", 0, 0))
-    check(obd_ctl(dev.OBD_POLL_SET, 0x76, struct.pack("<HB", 25, 1)
-                  + bytes([0x0C]))[2] == dev.ST_OK,
-          "an ungrouped set must reinstall after a grouped one")
+    # ---- SPEC.md 15.4: response pacing ---------------------------------
+    # On a car whose ECUs answer in the same tick, `interval_ms` is the only
+    # thing left pacing the loop, so pacing is INVISIBLE against the default
+    # synthetic car. These use a car with a latency, which is the only way the
+    # rule is observable at all.
+    def paced_rate(latency_us, interval_ms, seconds=2.0):
+        clk = [0]
+        c = dev.VtpDevice(now_us=lambda: clk[0], mtu=247, gps_hz=0, imu_hz=0,
+                          obd_latency_us=latency_us)
+        c.on_connect()
+        c.handle_control(bytes([dev.OBD_INFO, 0x01]))
+        for _ in range(400):
+            clk[0] += 5_000
+            if c.due_control_response() is not None:
+                break
+        r = c.handle_control(bytes([dev.OBD_POLL_SET, 0x02])
+                             + struct.pack("<HB", interval_ms, 1)
+                             + bytes([0x0C, 1]))
+        if r[2] != dev.ST_OK:
+            return None
+        seen = 0
+        for _ in range(int(seconds * 200)):
+            clk[0] += 5_000
+            for ch, payload in c.poll():
+                if ch != "can":
+                    continue
+                b = decode("can", c.stamp_seq(ch, payload))
+                c.commit_seq(ch)
+                if b is None:
+                    continue
+                seen += sum(1 for rec in b["records"] if rec["id"] == 0x7E8
+                            and bytes.fromhex(rec["payload"])[2] == 0x0C)
+        return seen / seconds
+
+    slow = paced_rate(20_000, 0)
+    check(slow is not None and 40 <= slow <= 55,
+          f"a car answering in 20 ms, with interval_ms 0, MUST be polled at "
+          f"about 50 Hz -- the CAR is the pacing; {slow} Hz observed")
+    fast = paced_rate(5_000, 0)
+    check(fast is not None and fast > slow * 1.8,
+          f"the same schedule on a 5 ms car MUST be markedly faster ({fast} "
+          f"Hz against {slow}); if it is not, the loop is not response-paced")
+    throttled = paced_rate(5_000, 50)
+    check(throttled is not None and 18 <= throttled <= 22,
+          f"interval_ms is a MINIMUM: a client asking for 50 ms on a 5 ms car "
+          f"MUST get about 20 Hz, not the car's rate; {throttled} Hz observed")
+
+    # SPEC.md 15.4.2 -- a divisor makes ONE group slower without touching the
+    # others, which is the whole thing repetition could never express.
+    check(poll_set(0x7B, 0, ((0x0C,), 1), ((0x0D,), 5))[2] == dev.ST_OK,
+          "a schedule mixing divisors MUST be accepted")
+    obd_run(0.2)
+    divided = [bytes.fromhex(r["payload"])[2]
+               for b in obd_run(1.0) for r in b["records"] if r["id"] == 0x7E8]
+    n_fast = divided.count(0x0C)
+    n_slow = divided.count(0x0D)
+    check(n_fast and n_slow,
+          "both groups of a divided schedule must still be transmitted")
+    check(4 <= n_fast / max(1, n_slow) <= 6,
+          f"a divisor of 5 MUST make its group one pass in five: "
+          f"{n_fast} fast against {n_slow} slow is a ratio of "
+          f"{n_fast / max(1, n_slow):.1f}, not 5")
+    check(poll_set(0x7C, 25, 0x0C)[2] == dev.ST_OK,
+          "an undivided set must reinstall after a divided one")
 
     # SPEC.md 15.7 -- the empty set stops the transmitter, and the polling
     # flag's falling edge is on the wire: a batch flushed after the stop
@@ -1627,8 +1659,7 @@ def main():
 
     # SPEC.md 15.7 -- CAN_RESET clears the poll set along with the table:
     # the one opcode that clears the receiver clears the transmitter too.
-    check(obd_ctl(dev.OBD_POLL_SET, 0x6C,
-                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+    check(poll_set(0x6C, 25, 0x0C)[2] == dev.ST_OK,
           "re-arming the poll set after a stop must succeed")
     check(obd_ctl(dev.CAN_RESET, 0x6D)[2] == dev.ST_OK, "CAN_RESET answers ok")
     check(obd_ctl(dev.CAN_SUBSCRIBE_MASK, 0x6E,
@@ -1640,8 +1671,7 @@ def main():
           "on the bus to forward (SPEC.md 15.7)")
     # ...but the probe result is a fact about the car, not the poll set, so
     # a re-arm without a second probe still works on this connection.
-    check(obd_ctl(dev.OBD_POLL_SET, 0x6F,
-                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+    check(poll_set(0x6F, 25, 0x0C)[2] == dev.ST_OK,
           "the probe result survives CAN_RESET; only the poll set clears")
 
     # SPEC.md 15.2 -- a probe nothing answered clears the poll set with the
@@ -1657,8 +1687,7 @@ def main():
     check(not [r for b in quiet[1:] for r in b["records"]],
           "a probe nothing answered MUST clear the poll set: after its own "
           "flush, nothing may be transmitted or delivered (SPEC.md 15.7)")
-    check(obd_ctl(dev.OBD_POLL_SET, 0x78,
-                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2]
+    check(poll_set(0x78, 25, 0x0C)[2]
           == dev.ST_BAD_PARAMS,
           "the silent probe replaced the probe result too, so nothing is "
           "pollable until a probe answers again (SPEC.md 15.4)")
@@ -1682,7 +1711,7 @@ def main():
     obd_clock[0] += 200_000
     check(car29.handle_control(
               bytes([dev.OBD_POLL_SET, 0x7C])
-              + struct.pack("<HB", 25, 1) + bytes([0x0C]))[2] == dev.ST_OK,
+              + struct.pack("<HB", 25, 1) + bytes([0x0C, 1]))[2] == dev.ST_OK,
           "polling a 29-bit car must be accepted")
     frames29 = []
     for _ in range(100):
@@ -1701,8 +1730,7 @@ def main():
     # SPEC.md 15.7 -- transmit never survives the link.
     car.on_disconnect()
     car.on_connect()
-    check(obd_ctl(dev.OBD_POLL_SET, 0x70,
-                  struct.pack("<HB", 25, 1) + bytes([0x0C]))[2]
+    check(poll_set(0x70, 25, 0x0C)[2]
           == dev.ST_BAD_PARAMS,
           "a reconnect clears the probe result with the poll set, so the "
           "next connection starts at declare-verify-use again")
