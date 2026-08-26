@@ -19,7 +19,7 @@ does, and a request unanswered when the next is due is abandoned:
 
   spacing = I
 
-The brief's §3.1 rule -- response-paced, floored, with I as a ceiling:
+The draft rule this models -- response-paced, floored, with I as a ceiling:
 
   next_tx = min(max(t + F, first_response_after(t)), t + I)
   spacing = min(max(F, L), I)     ==  clamp(L, F, I)
@@ -30,8 +30,18 @@ so the whole of what pacing buys, at one interval, is
 
 and that expression is the finding: it is bounded above by I/F, it does not
 depend on L at all once L <= F, and it is exactly 1 when I == F.
+
+**This models the DRAFT, not what SPEC.md 15.4 became.** The floor F was
+withdrawn precisely because of the finding above -- a device cannot honestly
+publish a rate for a car it has never met, and I/F caps the gain at a ratio
+of two numbers the client already controls -- and `interval_ms` became a
+MINIMUM the client may set to zero rather than a ceiling on waiting. The
+model is kept because it is the evidence that produced that decision, and
+because §4.3's measurement of a real car runs through the same code; read it
+as the argument for the shape §15.4 has, not as a description of it.
 """
 import argparse
+import math
 
 
 def spacing_fixed(F, I, L):
@@ -77,8 +87,15 @@ def table(F, intervals, latencies):
 
 
 def percentile(xs, q):
+    """Nearest-rank: the smallest value at or above which `q` of the sample
+    sits. `int(q * n)` indexes one past that and reads the tail as heavier
+    than it is -- on a 200-sample shape with two outliers it returned the
+    outlier as the 99th percentile, which two of them are not."""
     xs = sorted(xs)
-    return xs[min(len(xs) - 1, int(q * len(xs)))]
+    if not xs:
+        raise ValueError("percentile of an empty sample")
+    rank = max(1, math.ceil(q * len(xs)))
+    return xs[min(len(xs), rank) - 1]
 
 
 def informed_comparison(F, samples, label, drop_budget=0.01):

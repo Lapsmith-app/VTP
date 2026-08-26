@@ -1815,9 +1815,13 @@ def main():
     check(set(silent["absent"]) == {"request_id", "supported_01_20",
                                     "supported_21_40", "supported_41_60"},
           "a silent probe reports every gated field absent (SPEC.md 15.2)")
+    # Well-formed on purpose: a schedule missing its trailing u16 is refused
+    # by the parse (SPEC.md 15.4 rule 1) before the probe-state gate is ever
+    # consulted, so the check passed while testing nothing it claimed to.
     check(gated.handle_control(
-              bytes([dev.OBD_POLL_SET, 0x72],)
-              + struct.pack("<HB", 25, 1) + bytes([0x0C]))[2]
+              bytes([dev.OBD_POLL_SET, 0x72])
+              + struct.pack("<HB", 25, 1)
+              + bytes([0x0C]) + struct.pack("<H", 0))[2]
           == dev.ST_BAD_PARAMS,
           "nothing is pollable on a car that answered nothing")
 

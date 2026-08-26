@@ -202,9 +202,17 @@ tail it must tolerate:
 | tight fast car (3±1 ms) | 3.0 | 4 | 5.00× | **1.00×** |
 | tight gateway (18±2 ms) | 18.0 | 20 | 1.39× | **1.11×** |
 | bursty gateway (8 ms, 5% at 40) | 9.6 | 40 | 2.82× | **4.17×** |
-| heavy tail (5 ms, 1% at 80) | 5.8 | 80 | 4.81× | **13.91×** |
+| heavy tail (5 ms, 1% at 80) | 5.8 | 5 | 4.81× | **1.00×** |
 
 *(F = 5 ms. Deterministic shapes, no RNG, so the numbers are reproducible.)*
+
+The last row read 13.91× in an earlier draft, on a percentile that
+indexed one past nearest-rank and returned the outlier itself as the
+99th of 200 samples — which two outliers are not. Corrected it says the
+opposite: a distribution that is *mostly* fast with a rare spike is
+served perfectly well by an informed client, because the p99 it tunes to
+is still 5 ms. It is sustained spread, not rare outliers, that pacing
+wins on — which the bursty row shows and §4.3's real car confirms.
 
 **This is the finding.** Against a tight distribution, pacing beats a
 well-informed client by 0–11% and a latency report would do as well for far

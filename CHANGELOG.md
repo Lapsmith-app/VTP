@@ -12,7 +12,7 @@ conformance vector.
 
 Pre-1.0 and with no third-party consumers, so the poll loop was fixed rather
 than extended. What was three layered proposals — grouping behind a
-capability bit, pacing behind a second bit and a second opcode, divisors
+capability bit, pacing behind a second bit and a second opcode, rate control
 behind a third — is one rule on the opcode that already existed.
 
 **Polling is response-paced (§15.4).** The device transmits the next group
@@ -39,11 +39,16 @@ because the request frame is padded to eight bytes whether it names one PID
 or six. A group of one is the old behaviour, so mandating it costs a device
 only the parse.
 
-**Every group carries a rate divisor (§15.4.2).** A group with divisor *d* is
-transmitted one pass in *d*. Repetition could already make a PID faster than
-the cycle and could never make one slower; divisors close that, and they are
-admissible where per-PID rates were not because a divisor can only ever
-remove a request.
+**Every group carries a `u16` minimum interval (§15.4.2).** A group is
+transmitted no oftener than its own minimum, and 0 means none. Repetition
+could already make a PID faster than the cycle and could never make one
+slower; this closes that, and it is admissible where per-PID rates were not
+because a minimum can only ever remove a request.
+
+An interval and not a ratio, because under pacing the cycle time is the car's:
+one pass in five is a different rate on every vehicle and drifts inside a
+session, and a `u8` ratio cannot reach 0.1 Hz on a fast car at all. `fast = 0,
+medium = 500, slow = 10000` says 2 Hz and 0.1 Hz and means it.
 
 Measured against the reference peripheral, twelve PIDs on a car answering in
 10 ms: 8.0 Hz each ungrouped, **19.8 Hz grouped**, with the schedule paced by

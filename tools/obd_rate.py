@@ -273,7 +273,14 @@ def main():
     _, over_rates = measure("overpacked (6/group)", encode(overpacked),
                             overpacked, args.seconds, interval)
 
-    print(f"\n  gain: {fast / base:.2f}x  ({base:.2f} Hz -> {fast:.2f} Hz)\n")
+    if base:
+        print(f"\n  gain: {fast / base:.2f}x  ({base:.2f} Hz -> {fast:.2f} Hz)\n")
+    else:
+        # Every PID silent: a legal outcome (SPEC.md 15.4 abandons an
+        # unanswered request), and dividing by it crashed the run rather than
+        # reporting it.
+        print("\n  gain: not computable -- the ungrouped run answered no PID "
+              "at all, which SPEC.md 15.4 makes a legal outcome\n")
     print(f"  {'PID':<5}{'grouped':>10}{'overpacked':>13}")
     for pid in RACE_SET:
         over = over_rates[pid]

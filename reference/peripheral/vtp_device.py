@@ -502,6 +502,17 @@ class VtpDevice:
         # physically capable of 50. Counting cannot tie.
         self._obd_answers = 0
         self._obd_answer_mark = None
+        # SPEC.md 15.4 -- the PIDs of the outstanding request, so a frame can
+        # be told from a straggler. Functional addressing means several ECUs
+        # answer one request and they do NOT answer together: with replies to
+        # request N at 10 ms and 15 ms, the first released N+1 and the second
+        # -- still answering N -- released N+2 before N+1 had been answered at
+        # all, so "one request outstanding" held only on a single-ECU car.
+        # Mode 01 responses echo their PID (SPEC.md 15.5 says so, and that is
+        # why no client needs correlation state), so matching the echo against
+        # the group just asked separates the two without a correlation table
+        # and without any J1979 knowledge beyond reading one byte.
+        self._obd_outstanding_pids = frozenset()
         # SPEC.md 15.4.2 -- each schedule entry is [group, min_ms, last_tx],
         # one structure rather than parallel lists. Held together because they
         # were briefly apart: anything that restored the poll set without
@@ -968,6 +979,7 @@ class VtpDevice:
                     self._obd_last_tx_us = now
                     self._obd_outstanding_since = now
                     self._obd_answer_mark = self._obd_answers
+                    self._obd_outstanding_pids = frozenset(group)
                     self._obd_transmit(group, now)
 
         # OBD responses first: anything a probe put on the synthetic bus
@@ -1092,8 +1104,18 @@ class VtpDevice:
                 self._deferred.append(("can", batch))
         self._obd_poll, self._obd_interval_ms = [], 0
         self._obd_index = 0
-        self._obd_outstanding_since = self._obd_answer_mark = None
         self._obd_rx = []
+        # `_obd_outstanding_since` is NOT cleared, for the reason
+        # `_obd_last_tx_us` is not: it is a fact about the BUS, and the bus
+        # does not care why the client changed its mind. Clearing it let a
+        # stop-and-re-arm -- or an OBD_INFO, which calls this helper -- launch
+        # a second request while the first was still unanswered on the wire:
+        # with an 80 ms car, a stop 10 ms after a request put the next one out
+        # 5 ms later, two outstanding at once, which SPEC.md 15.1 forbids
+        # outright. The request now stays outstanding until it is answered or
+        # abandoned at OBD_RESPONSE_TIMEOUT_US, exactly as if nothing had
+        # happened -- and since `_obd_rx` is cleared here, an unanswered one
+        # reaches the timeout rather than being released by its own reply.
 
     def _obd_clear(self, *, flush=False):
         """Everything _obd_stop clears, plus the probe result -- the
@@ -1292,6 +1314,22 @@ class VtpDevice:
                 return entry, group
         return None
 
+    @staticmethod
+    def _obd_echoed_pid(payload):
+        """The PID a Mode 01 response frame answers for, or None.
+
+        Single frame: `[pci, 0x41, pid, ...]`. ISO-TP first frame, which is
+        how an oversized group is answered (SPEC.md 15.4.1):
+        `[0x1L, LL, 0x41, pid, ...]`. Anything else -- a consecutive frame,
+        another tester's transfer, a negative response -- answers for nothing
+        this device asked.
+        """
+        if len(payload) >= 3 and payload[0] >> 4 == 0 and payload[1] == 0x41:
+            return payload[2]
+        if len(payload) >= 4 and payload[0] >> 4 == 1 and payload[2] == 0x41:
+            return payload[3]
+        return None
+
     def _obd_fallback_delivers(self, cid):
         """SPEC.md 15.5 -- the one delivery rule beside the table: while the
         poll set is non-empty, a frame on a probe-reported response
@@ -1318,7 +1356,8 @@ class VtpDevice:
             if t > now:
                 hold.append((t, cid, payload))
                 continue
-            if cid in self._obd_ecu_ids:
+            if cid in self._obd_ecu_ids and \
+                    self._obd_echoed_pid(payload) in self._obd_outstanding_pids:
                 self._obd_answers += 1
             sub = self._governing(cid)
             if sub is None:
@@ -1680,8 +1719,11 @@ class VtpDevice:
                 return reply(ST_BAD_PARAMS)
             interval_ms, count = struct.unpack("<HB", params[:3])
             body = params[3:]
-            if count > OBD_POLL_SLOTS:
-                return reply(ST_TABLE_FULL)
+            # SPEC.md 15.4 -- shape first, capacity second. Checking capacity
+            # ahead of the parse answered `table_full` to a payload that was
+            # malformed as well as oversized (count 17 with an empty body),
+            # naming a capacity the request never actually reached. Rule 1 is
+            # the parse, and the parse of an empty body is what rejects it.
             if count == 0:
                 # The stop. Accepted whatever the probe state, and its
                 # interval MUST be 0 -- there is no schedule for it to pace.
@@ -1716,6 +1758,11 @@ class VtpDevice:
                 return reply(ST_BAD_PARAMS)
             if sum(len(g) for g, _ in groups) != count:
                 return reply(ST_BAD_PARAMS)
+            # SPEC.md 15.4 rule 2 -- the capacity was in Info, so the answer
+            # is a fact the client could have read, which is 9.6's argument
+            # for a typed refusal. Reached only once the shape is known good.
+            if count > OBD_POLL_SLOTS:
+                return reply(ST_TABLE_FULL)
 
             # SPEC.md 15.4 rule 4 -- pollable means declared supported by the
             # most recent probe of this connection. With no probe, nothing is,
@@ -1747,9 +1794,21 @@ class VtpDevice:
             # group asking for 0.1 Hz ran at 9.8 Hz when the set was
             # reinstalled every 100 ms, which is diagnostic traffic on a live
             # bus that the client explicitly declined.
-            carried = {group: last for group, _m, last in self._obd_poll
-                       if last is not None}
-            self._obd_poll = [[g, m, carried.get(g)] for g, m in groups]
+            # Per OCCURRENCE, not per group: SPEC.md 15.4 lets a schedule
+            # name the same group twice, and a dict collapsed the duplicates
+            # onto one timestamp, so reinstalling an identical repeated
+            # schedule moved its occurrences around -- delaying one and
+            # letting another transmit sooner than its own minimum. A queue
+            # per group hands the occurrences back in the order they appear,
+            # which makes replacing a set with itself exactly idempotent.
+            carried = {}
+            for group, _m, last in self._obd_poll:
+                carried.setdefault(group, []).append(last)
+            fresh = []
+            for g, m in groups:
+                queue = carried.get(g)
+                fresh.append([g, m, queue.pop(0) if queue else None])
+            self._obd_poll = fresh
             self._obd_interval_ms = interval_ms
             return reply(ST_OK)
 

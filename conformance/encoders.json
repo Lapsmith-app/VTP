@@ -759,7 +759,7 @@
       "record": "info",
       "must_refuse": true,
       "vector": "obd-capacity-without-capability",
-      "desc": "SPEC.md 4.1 -- both OBD capacities are zero while bit 10 is clear. Sharper than any other capacity rule: a poll capacity behind a cleared bit advertises transmitting on a vehicle bus while declaring not to.",
+      "desc": "SPEC.md 4.1 -- the OBD capacity is zero while bit 10 is clear. Sharper than any other capacity rule: a poll capacity behind a cleared bit advertises transmitting on a vehicle bus while declaring not to.",
       "input": {
         "protocol_major": 1,
         "protocol_minor": 0,

@@ -105,6 +105,7 @@
  "info/obd-dongle": "260a6d39b523fe1d6682b40b1f90b6ccd88e939696f508c8c6ff043a9e38859b",
  "info/obd-without-can": "5c10fd28762c76b267a180cf82d410d7c0f2a08236fd7886d3059641b1042be5",
  "info/rate-below-maximum": "7d0855b4da02aca34fd9a37f20c4b8b5175e7ed4e4080d77fbd2314ac7aa923c",
+ "info/reserved-bytes-set": "2ab0634b22a8cfedaa67b9d333988bd1c4cf083bdf147b1d53c323d99c80f702",
  "info/short-payload": "0cc22adf953e4fae39c1449dc89d5af33ae5e14bd7c3bc777548549177f816be",
  "monitor/count-exceeds-declaration": "a2e70cb7894d085d11b5f6f3409398ead77a0cbbe6aa31b145409d2e1cf16c8f",
  "monitor/count-exceeds-payload": "f15404fe5cd19a4f8888948f2b15f87a5e5b1f75327d56b0b3f48704f04805a7",

@@ -2044,7 +2044,13 @@ One Info capacity describes the role, in the byte freed at offset 20 (§11.2):
 
 - `obd_poll_slots` — the most PIDs one `OBD_POLL_SET` may name.
 
-It MUST be zero when bit 10 is clear and non-zero when it is set — §4.1's
+A device MUST NOT declare more slots than a schedule naming that many PIDs
+can occupy in one Control write on the smallest link §2 permits. The worst
+case is every PID its own group, which is `3 + count + 2 × count` bytes of
+parameters (§15.4.1), so at the 100-byte minimum ATT MTU the ceiling is 30 —
+and a device declaring 255 would be advertising a poll set 770 bytes long
+that no client could ever send. It MUST be zero when bit 10 is clear and
+non-zero when it is set — §4.1's
 table carries both columns, because a poll set nothing fits in describes a
 role no conforming exchange can use. The rule splits as every content rule
 does: an Info that breaks it still decodes, a client MUST NOT use the role
@@ -2303,8 +2309,9 @@ expressible.
 transmits the next group when *both* hold:
 
 1. the previous request has been **answered** — the first frame received on
-   an identifier the most recent probe reported — or `OBD_RESPONSE_TIMEOUT_MS`
-   has elapsed since it was transmitted, whichever comes first; and
+   an identifier the most recent probe reported **whose echoed Mode 01 PID is
+   one the outstanding request named** — or `OBD_RESPONSE_TIMEOUT_MS` has
+   elapsed since it was transmitted, whichever comes first; and
 2. at least `interval_ms` has elapsed since the previous transmission.
 
 `interval_ms` is a **minimum spacing, not a period**, and **0 means the client
@@ -2319,6 +2326,26 @@ the difference from a `periodic` subscription's `arg` (§6.8) and from the
 fixed clock this rule replaces: a device that waits for an answer before
 transmitting cannot generate traffic faster than the car produces it. The
 bound moved from a number to the pacing itself.
+
+**The echo test is what makes "one outstanding" hold on a real car.** A
+functionally addressed request is answered by every ECU implementing any PID
+in it (§15.4.1), and those ECUs do not answer together — a reply at 10 ms and
+another at 15 ms is ordinary. Releasing on any frame at all, the first reply
+frees the next request and the second, still answering the *previous* one,
+frees the one after that before it has been answered: two requests
+outstanding, which §15.1 forbids. A Mode 01 response echoes its PID — §15.5
+relies on exactly that, which is why no client needs correlation state — so
+comparing the echo against the group just asked separates an answer from a
+straggler with no correlation table and no J1979 knowledge beyond reading one
+byte.
+
+Two consequences worth stating. A schedule that names the same group twice in
+a row cannot distinguish the second request's answer from the first's
+straggler, so the echo test does nothing there and the client is back to
+`interval_ms` as its control. And a frame on a diagnostic response identifier
+that echoes a PID this device did not ask for never releases anything, which
+is what keeps another tester's traffic (§15.4.1) from pacing this device even
+though the fallback still delivers it.
 
 A request the bus did not answer is abandoned at `OBD_RESPONSE_TIMEOUT_MS`
 (§15.1); the loop does not stall, retry, or reorder, and comes round again on

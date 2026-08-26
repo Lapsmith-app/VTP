@@ -726,25 +726,64 @@ async def obd_grouping_is_one_request(s):
             raise Skip("the car answered nothing during the window; §15.4 "
                        "makes an unanswered request the honest outcome and "
                        "obd.poll_and_flag owns that diagnosis")
-        seen = max(len(leads[pids[0]]), len(leads[pids[1]]))
-        if not seen:
+        grouped = max(len(leads[pids[0]]), len(leads[pids[1]]))
+        if not grouped:
             raise Skip(f"no answer led with 0x{pids[0]:02X} or "
                        f"0x{pids[1]:02X}, so which request each answers "
                        f"cannot be told apart")
-        grouped_expect = elapsed / (interval / 1000)
-        # Generous: shedding, batching latency and a car answering slowly all
-        # pull the count down. The split-schedule defect HALVES it, so 70% of
-        # the grouped expectation is comfortably clear of 50%.
-        if seen < 0.7 * grouped_expect:
+
+        # Calibrate against THIS device on THIS car, by running the same two
+        # PIDs as two separate groups. Comparing against `elapsed / interval`
+        # assumed the fixed clock §15.4 replaced: under response pacing the
+        # spacing is max(interval, the car's latency), so a conforming device
+        # on a 50 ms car was failed for producing the 19 answers the car
+        # allowed against the ~40 an interval of 25 implied -- while a
+        # fixed-clock device, which is the actual defect, sailed through.
+        # The ratio between grouped and split is latency-free.
+        r = await c.request(
+            refdec.OPCODE["OBD_POLL_SET"],
+            struct.pack("<HB", interval, 2)
+            + _schedule([pids[0], pids[1]]))
+        if not r.ok:
+            raise Fail(f"the same two PIDs as separate groups were answered "
+                       f"{r.status_name}")
+        await asyncio.sleep(max(3 * interval / 1000, 0.35))
+        t1 = time.monotonic()
+        await asyncio.sleep(window)
+
+        # Distinct instants, exactly as the grouped run counts them: several
+        # ECUs answer one request, so counting frames here and instants there
+        # compared two different quantities and read 0.97 on a conforming
+        # device.
+        split_instants = set()
+        for n in log.since(t1):
+            try:
+                batch = refdec.decode("can_batch", n.payload)
+            except refdec.Reject:
+                continue
+            for rec in batch["records"]:
+                if _identity(rec) not in ecu_ids:
+                    continue
+                payload = bytes.fromhex(rec["payload"])
+                if len(payload) >= 3 and payload[0] >> 4 == 0 \
+                        and payload[1] == 0x41 and payload[2] == pids[0]:
+                    split_instants.add(rec["t_device_us"])
+        split = len(split_instants)
+        if not split:
+            raise Skip("the split schedule produced no comparable answers")
+        # Grouped asks for pids[0] every pass; split asks for it every other
+        # pass. A device that ignores the grouping produces the same number
+        # both ways, so anything at or above 1.4x is comfortably clear of 1.0
+        # while tolerating a car whose latency wandered between the two runs.
+        if grouped < 1.4 * split:
             raise Fail(
-                f"a group of (0x{pids[0]:02X}, 0x{pids[1]:02X}) led answers "
-                f"at {seen} distinct bus instants in {elapsed:.2f} s at "
-                f"interval {interval} ms, against about "
-                f"{grouped_expect:.0f} expected of one request per interval. "
-                f"A device scheduling the group's PIDs individually produces "
-                f"about {grouped_expect / 2:.0f} -- §15.4.1: a group is ONE "
-                f"request, and a device that answers `ok` and then halves "
-                f"the rate has told the client nothing")
+                f"0x{pids[0]:02X} was answered at {grouped} distinct instants "
+                f"when grouped with 0x{pids[1]:02X} and {split} when the two "
+                f"were separate groups, a ratio of {grouped / split:.2f}. "
+                f"§15.4.1 -- a group is ONE request, so grouping the pair "
+                f"should roughly double its rate; a device that answers `ok` "
+                f"and then schedules the PIDs individually reads 1.0 and has "
+                f"told the client nothing")
     finally:
         await c.request(refdec.OPCODE["OBD_POLL_SET"], struct.pack("<HB", 0, 0))
 
@@ -810,17 +849,38 @@ async def obd_group_minimum_is_honoured(s):
         if not fast:
             raise Skip("the car answered neither PID; §15.4 makes an "
                        "unanswered request the honest outcome")
-        allowed = elapsed / (min_ms / 1000) + 1
-        if slow > allowed:
+        # Replies clustered into transmissions, then the GAP between them.
+        # Functional addressing means several ECUs answer one request and
+        # they need not answer together, so raw instants read one
+        # transmission as several; a tolerance well above that stagger and
+        # well below the minimum collapses them. Testing the gap rather than
+        # a count is what makes this able to fail at all -- counting arrivals
+        # per minimum-sized bucket can never exceed one bucket per minimum,
+        # however fast the device actually transmits.
+        tolerance = min_ms * 1000 // 4
+        clusters = []
+        for t in sorted(leads[pids[1]]):
+            if not clusters or t - clusters[-1] > tolerance:
+                clusters.append(t)
+        gaps = [(b - a) / 1000.0 for a, b in zip(clusters, clusters[1:])]
+        tight = [g for g in gaps if g < min_ms * 0.8]
+        if tight:
             raise Fail(
-                f"a {min_ms} ms minimum is {1000 / min_ms:.1f} Hz, so at most "
-                f"{allowed:.0f} transmissions in {elapsed:.1f} s: "
-                f"0x{pids[1]:02X} was asked {slow} times. §15.4.2 -- the "
-                f"minimum is a rate the client is owed, and a device "
-                f"ignoring it generates traffic that was declined")
+                f"0x{pids[1]:02X} carries a {min_ms} ms minimum and was "
+                f"transmitted {len(tight)} time(s) sooner than that, the "
+                f"closest {min(tight):.0f} ms after the one before. "
+                f"§15.4.2 -- the minimum is a rate the client is owed, and a "
+                f"device ignoring it generates traffic that was declined")
         if not slow:
-            raise Fail(
-                f"the rate-limited group was never transmitted; §15.4.2 -- a "
-                f"minimum slows a group, it does not remove it")
+            # NOT a failure. §15.4 makes an unanswered PID legal and the
+            # transmitter is not observable from the stream, so a car that
+            # does not answer this PID and a device that never asked report
+            # identically. Distinguishing them needs
+            # instrumentation no client has.
+            raise Observe(
+                f"0x{pids[1]:02X} produced no answer, so its minimum "
+                f"interval could not be verified: §15.4 makes an unanswered "
+                f"PID legal and the stream cannot tell that from a group "
+                f"never transmitted")
     finally:
         await c.request(refdec.OPCODE["OBD_POLL_SET"], struct.pack("<HB", 0, 0))
