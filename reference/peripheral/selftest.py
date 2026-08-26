@@ -1217,26 +1217,26 @@ def main():
     def obd_ctl(op, tag, params=b""):
         return car.handle_control(bytes([op, tag]) + params)
 
-    def schedule(*groups, divisor=1):
+    def schedule(*groups, min_ms=0):
         """SPEC.md 15.4.1's layout: PID bytes with `more` set on all but the
-        last of a group, then that group's divisor byte.
+        last of a group, then that group's u16 minimum interval.
 
         Groups may be given as a bare PID, a tuple of PIDs, or a
-        (tuple, divisor) pair."""
+        (tuple, min_interval_ms) pair."""
         out, count = bytearray(), 0
         for g in groups:
-            d = divisor
+            m = min_ms
             if isinstance(g, tuple) and len(g) == 2 and isinstance(g[0], tuple):
-                g, d = g
+                g, m = g
             pids = g if isinstance(g, tuple) else (g,)
             for i, pid in enumerate(pids):
                 out.append(pid | (MORE if i < len(pids) - 1 else 0))
                 count += 1
-            out.append(d)
+            out += struct.pack("<H", m)
         return count, bytes(out)
 
-    def poll_set(tag, interval_ms, *groups, divisor=1, count=None):
-        n, body = schedule(*groups, divisor=divisor)
+    def poll_set(tag, interval_ms, *groups, min_ms=0, count=None):
+        n, body = schedule(*groups, min_ms=min_ms)
         return obd_ctl(dev.OBD_POLL_SET, tag,
                        struct.pack("<HB", interval_ms,
                                    n if count is None else count) + body)
@@ -1459,17 +1459,18 @@ def main():
     check(poll_set(0x73, 25, (0x0C,) * 6)[2] == dev.ST_OK,
           "a group of exactly six PIDs fits the request frame and MUST be "
           "accepted")
-    check(poll_set(0x71, 25, 0x0C, divisor=0)[2] == dev.ST_BAD_PARAMS,
-          "a divisor of 0 names a group that never transmits and MUST answer "
-          "bad_params (SPEC.md 15.4.2)")
+    check(poll_set(0x71, 25, 0x0C, min_ms=0)[2] == dev.ST_OK,
+          "a minimum interval of 0 means `every pass` and MUST be accepted: "
+          "unlike a divisor it subtracts nothing (SPEC.md 15.4.2)")
     check(obd_ctl(dev.OBD_POLL_SET, 0x72, struct.pack("<HB", 25, 2)
                   + bytes([0x0C | MORE, 0x0D | MORE]))[2] == dev.ST_BAD_PARAMS,
           "bit 7 left set on the last byte is a group continuing into "
           "nothing and MUST answer bad_params (SPEC.md 15.4.1)")
     check(obd_ctl(dev.OBD_POLL_SET, 0x78, struct.pack("<HB", 25, 1)
-                  + bytes([0x0C]))[2] == dev.ST_BAD_PARAMS,
-          "a group with no divisor byte after it MUST answer bad_params: the "
-          "parse is the length check (SPEC.md 15.4 rule 1)")
+                  + bytes([0x0C, 0]))[2] == dev.ST_BAD_PARAMS,
+          "a group whose minimum interval is truncated to one byte MUST "
+          "answer bad_params: the parse is the length check (SPEC.md 15.4 "
+          "rule 1)")
     check(poll_set(0x79, 25, 0x0C, count=2)[2] == dev.ST_BAD_PARAMS,
           "a count disagreeing with the PIDs the schedule names MUST answer "
           "bad_params")
@@ -1592,7 +1593,7 @@ def main():
                 break
         r = c.handle_control(bytes([dev.OBD_POLL_SET, 0x02])
                              + struct.pack("<HB", interval_ms, 1)
-                             + bytes([0x0C, 1]))
+                             + bytes([0x0C]) + struct.pack("<H", 0))
         if r[2] != dev.ST_OK:
             return None
         seen = 0
@@ -1622,23 +1623,27 @@ def main():
           f"interval_ms is a MINIMUM: a client asking for 50 ms on a 5 ms car "
           f"MUST get about 20 Hz, not the car's rate; {throttled} Hz observed")
 
-    # SPEC.md 15.4.2 -- a divisor makes ONE group slower without touching the
-    # others, which is the whole thing repetition could never express.
-    check(poll_set(0x7B, 0, ((0x0C,), 1), ((0x0D,), 5))[2] == dev.ST_OK,
-          "a schedule mixing divisors MUST be accepted")
-    obd_run(0.2)
-    divided = [bytes.fromhex(r["payload"])[2]
-               for b in obd_run(1.0) for r in b["records"] if r["id"] == 0x7E8]
-    n_fast = divided.count(0x0C)
-    n_slow = divided.count(0x0D)
+    # SPEC.md 15.4.2 -- a minimum interval holds an ABSOLUTE rate for its
+    # group, whatever the rest of the schedule and the car are doing. That is
+    # the whole reason it is an interval and not a ratio: under pacing the
+    # cycle time is the car's, so a ratio names a different rate on every
+    # vehicle and drifts inside one session.
+    check(poll_set(0x7B, 0, ((0x0C,), 0), ((0x0D,), 500))[2] == dev.ST_OK,
+          "a schedule mixing minimum intervals MUST be accepted")
+    obd_run(0.3)
+    timed = [bytes.fromhex(r["payload"])[2]
+             for b in obd_run(4.0) for r in b["records"] if r["id"] == 0x7E8]
+    n_fast, n_slow = timed.count(0x0C), timed.count(0x0D)
     check(n_fast and n_slow,
-          "both groups of a divided schedule must still be transmitted")
-    check(4 <= n_fast / max(1, n_slow) <= 6,
-          f"a divisor of 5 MUST make its group one pass in five: "
-          f"{n_fast} fast against {n_slow} slow is a ratio of "
-          f"{n_fast / max(1, n_slow):.1f}, not 5")
+          "both groups of a rate-limited schedule must still be transmitted")
+    check(6 <= n_slow <= 10,
+          f"a 500 ms minimum is 2 Hz, so about 8 answers in 4 s; {n_slow} "
+          f"arrived. An interval names a RATE, not a share of the cycle")
+    check(n_fast > n_slow * 5,
+          f"the group with no minimum MUST run at the schedule's own pace, "
+          f"far above the limited one: {n_fast} against {n_slow}")
     check(poll_set(0x7C, 25, 0x0C)[2] == dev.ST_OK,
-          "an undivided set must reinstall after a divided one")
+          "an unlimited set must reinstall after a rate-limited one")
 
     # SPEC.md 15.7 -- the empty set stops the transmitter, and the polling
     # flag's falling edge is on the wire: a batch flushed after the stop
@@ -1711,7 +1716,8 @@ def main():
     obd_clock[0] += 200_000
     check(car29.handle_control(
               bytes([dev.OBD_POLL_SET, 0x7C])
-              + struct.pack("<HB", 25, 1) + bytes([0x0C, 1]))[2] == dev.ST_OK,
+              + struct.pack("<HB", 25, 1) + bytes([0x0C])
+              + struct.pack("<H", 0))[2] == dev.ST_OK,
           "polling a 29-bit car must be accepted")
     frames29 = []
     for _ in range(100):

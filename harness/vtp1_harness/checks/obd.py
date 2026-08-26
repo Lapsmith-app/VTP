@@ -19,18 +19,18 @@ POLLING = 1 << refdec.bit("can_flags", "polling")
 RESPONDED = 1 << refdec.bit("obd_validity", "responded")
 
 
-def _schedule(pids, groups=None, divisor=1):
+def _schedule(pids, groups=None, min_ms=0):
     """SPEC.md 15.4.1's layout: PID bytes with `more` set on all but the last
-    of a group, then that group's divisor byte.
+    of a group, then that group's u16 minimum interval (SPEC.md 15.4.2).
 
-    `pids` alone makes every PID its own group at divisor 1, which is what
-    every check that does not care about grouping wants.
+    `pids` alone makes every PID its own group with no minimum, which is what
+    every check that does not care about rate limiting wants.
     """
     out = bytearray()
     for group in (groups if groups is not None else [(p,) for p in pids]):
         for i, pid in enumerate(group):
             out.append(pid | (0x80 if i < len(group) - 1 else 0))
-        out.append(divisor)
+        out += struct.pack("<H", min_ms)
     return bytes(out)
 
 
@@ -584,14 +584,14 @@ async def obd_grouping_refusals(s):
         raise Skip("the probe's union claims too few PIDs to group")
     problems = []
 
-    async def poll_set(payload, divisor=1):
+    async def poll_set(payload, min_ms=0):
         """`payload` is PID bytes with `more` already set where wanted."""
         out, n = bytearray(), 0
         for b in payload:
             out.append(b)
             n += 1
             if not b & MORE:
-                out.append(divisor)
+                out += struct.pack("<H", min_ms)
         return await c.request(
             refdec.OPCODE["OBD_POLL_SET"],
             struct.pack("<HB", interval, n) + bytes(out))
@@ -621,18 +621,20 @@ async def obd_grouping_refusals(s):
                 f"a group of exactly six PIDs was answered {r.status_name}; "
                 f"§15.4.1 rule 6 bounds groups at six, and six fits")
 
-    # SPEC.md 15.4.2 -- a divisor of 0 names a group that never transmits.
-    r = await poll_set([pids[0]], divisor=0)
-    if r.status != refdec.STATUS_VALUE["bad_params"]:
+    # SPEC.md 15.4.2 -- 0 means "no minimum" and MUST be accepted, unlike a
+    # ratio's zero which would name a group that never transmits.
+    r = await poll_set([pids[0]], min_ms=0)
+    if not r.ok:
         problems.append(
-            f"a divisor of 0 was answered {r.status_name}; §15.4.2 -- it "
-            f"names a group the device would never transmit")
-    # A group with no divisor byte after it: the parse IS the length check.
+            f"a minimum interval of 0 was answered {r.status_name}; §15.4.2 "
+            f"-- zero subtracts nothing and is how a client says `every pass`")
+    # A truncated interval: the parse IS the length check.
     r = await c.request(refdec.OPCODE["OBD_POLL_SET"],
-                        struct.pack("<HB", interval, 1) + bytes([pids[0]]))
+                        struct.pack("<HB", interval, 1)
+                        + bytes([pids[0], 0]))
     if r.status != refdec.STATUS_VALUE["bad_params"]:
         problems.append(
-            f"a schedule whose last group carries no divisor byte was "
+            f"a schedule whose last group carries a one-byte minimum was "
             f"answered {r.status_name}; §15.4 rule 1")
 
     # Rule 4 still tests bits 0-6: an unverified PID inside a group is
@@ -747,18 +749,18 @@ async def obd_grouping_is_one_request(s):
         await c.request(refdec.OPCODE["OBD_POLL_SET"], struct.pack("<HB", 0, 0))
 
 
-@check(id="obd.divisors_are_honoured", section="15.4.2", phase="control",
+@check(id="obd.group_minimum_is_honoured", section="15.4.2", phase="control",
        severity="MUST", requires=("obd",),
-       title="A rate divisor makes its group slower, and only its group")
-async def obd_divisors_are_honoured(s):
+       title="A group's minimum interval holds its rate, and only its group")
+async def obd_group_minimum_is_honoured(s):
     """SPEC.md 15.4.2 -- the defect this exists for is a device that parses the
-    divisor, answers `ok`, and transmits every group every pass anyway. The
-    client then gets its slow channels at the fast rate, which is bus traffic
-    it explicitly asked not to generate and cannot detect from the stream.
+    minimum, answers `ok`, and transmits every group every pass anyway. The
+    client then gets its slow channels at the fast rate: bus traffic it
+    explicitly asked not to generate, and nothing in the stream says so.
 
-    Measured by which PID an answer LEADS with, counted by distinct bus
-    instant, exactly as obd.grouping_is_one_request does and for the same
-    reason: several ECUs answer one request.
+    Asserted as an ABSOLUTE rate, because that is what the field means. A
+    ratio would have to be measured against the achieved cycle, which under
+    response pacing is the car's and not a constant.
     """
     c = _control(s)
     probe = _probe(s)
@@ -770,22 +772,24 @@ async def obd_divisors_are_honoured(s):
     if len(pids) < 2:
         raise Skip("the probe's union claims fewer than two PIDs")
     ecu_ids = {e["id"] for e in probe["ecus"]}
-    interval, divisor = 25, 4
+    min_ms, window = 500, 4.0
     log = s.streams["can"]
 
     r = await c.request(refdec.OPCODE["CAN_RESET"])
     if not r.ok:
         raise Fail(f"CAN_RESET was answered {r.status_name}")
     try:
-        schedule = bytes([pids[0], 1, pids[1], divisor])
+        schedule = (bytes([pids[0]]) + struct.pack("<H", 0)
+                    + bytes([pids[1]]) + struct.pack("<H", min_ms))
         r = await c.request(refdec.OPCODE["OBD_POLL_SET"],
-                            struct.pack("<HB", interval, 2) + schedule)
+                            struct.pack("<HB", 0, 2) + schedule)
         if not r.ok:
-            raise Fail(f"a schedule mixing divisors 1 and {divisor} was "
-                       f"answered {r.status_name}")
-        await asyncio.sleep(max(3 * interval / 1000, 0.35))
+            raise Fail(f"a schedule mixing minimum intervals was answered "
+                       f"{r.status_name}")
+        await asyncio.sleep(0.4)
         t0 = time.monotonic()
-        await asyncio.sleep(max(60 * interval / 1000, 3.0))
+        await asyncio.sleep(window)
+        elapsed = time.monotonic() - t0
 
         leads = {pids[0]: set(), pids[1]: set()}
         for n in log.since(t0):
@@ -806,19 +810,17 @@ async def obd_divisors_are_honoured(s):
         if not fast:
             raise Skip("the car answered neither PID; §15.4 makes an "
                        "unanswered request the honest outcome")
+        allowed = elapsed / (min_ms / 1000) + 1
+        if slow > allowed:
+            raise Fail(
+                f"a {min_ms} ms minimum is {1000 / min_ms:.1f} Hz, so at most "
+                f"{allowed:.0f} transmissions in {elapsed:.1f} s: "
+                f"0x{pids[1]:02X} was asked {slow} times. §15.4.2 -- the "
+                f"minimum is a rate the client is owed, and a device "
+                f"ignoring it generates traffic that was declined")
         if not slow:
             raise Fail(
-                f"the group with divisor {divisor} was never transmitted "
-                f"({fast} answers led with 0x{pids[0]:02X}, none with "
-                f"0x{pids[1]:02X}); §15.4.2 -- a divisor slows a group, it "
-                f"does not remove it")
-        ratio = fast / slow
-        if not 0.5 * divisor <= ratio <= 2.0 * divisor:
-            raise Fail(
-                f"a divisor of {divisor} MUST transmit its group one pass in "
-                f"{divisor}: 0x{pids[0]:02X} led {fast} answers against "
-                f"0x{pids[1]:02X}'s {slow}, a ratio of {ratio:.1f}. A device "
-                f"ignoring the divisor reads 1.0 and generates traffic the "
-                f"client asked it not to")
+                f"the rate-limited group was never transmitted; §15.4.2 -- a "
+                f"minimum slows a group, it does not remove it")
     finally:
         await c.request(refdec.OPCODE["OBD_POLL_SET"], struct.pack("<HB", 0, 0))

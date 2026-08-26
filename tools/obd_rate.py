@@ -100,14 +100,14 @@ def pack_greedily(pids):
     return groups
 
 
-def encode(groups, divisor=1):
+def encode(groups, min_ms=0):
     """SPEC.md 15.4.1 -- bit 7 set on every PID but the last of its group,
-    then that group's divisor byte."""
+    then that group's u16 minimum interval (SPEC.md 15.4.2)."""
     out = bytearray()
     for group in groups:
         for i, pid in enumerate(group):
             out.append(pid | (dev.OBD_PID_MORE if i < len(group) - 1 else 0))
-        out.append(divisor)
+        out += struct.pack("<H", min_ms)
     return bytes(out)
 
 

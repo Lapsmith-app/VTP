@@ -1075,7 +1075,7 @@ device has, and reaching it at all means the Control characteristic is live.
 | `0x40` | `MONITOR_LIST` | `monitor` | — | `monitor_declaration record` | Every channel this device asks the client to supply, in one response (SPEC.md 13.3) |
 | `0x50` | `GET_POWER` | `power` | — | `power_state record` | What the device knows about its own supply, measured when asked (SPEC.md 9.7) |
 | `0x60` | `OBD_INFO` | `obd` | — | `obd_probe record` | Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2) |
-| `0x61` | `OBD_POLL_SET` | `obd` | `interval_ms:u16, count:u8, schedule:u8*` | — | Replace the whole poll set; count 0 stops transmitting. Response-paced: interval_ms is a MINIMUM spacing and 0 means none (SPEC.md 15.4). Bit 7 of a PID byte groups it with the next and each group carries a rate divisor (SPEC.md 15.4.1, 15.4.2) |
+| `0x61` | `OBD_POLL_SET` | `obd` | `interval_ms:u16, count:u8, schedule:u8*` | — | Replace the whole poll set; count 0 stops transmitting. Response-paced: interval_ms is a MINIMUM spacing and 0 means none (SPEC.md 15.4). Bit 7 of a PID byte groups it with the next and each group carries a u16 minimum interval in ms (SPEC.md 15.4.1, 15.4.2) |
 <!-- END GENERATED: control -->
 
 Opcode values `0x05`, `0x14` and `0x31` were assigned by pre-1.0 drafts and
@@ -2295,8 +2295,8 @@ installed it, which is the §9.1 argument that removed `CAN_LIST`. The
 response carries no detail.
 
 The schedule is a list of **groups** (§15.4.1), walked in order and wrapping.
-Entries are ordered and MAY repeat, and each group carries a rate divisor
-(§15.4.2), so both faster-than-the-cycle and slower-than-the-cycle are
+Entries are ordered and MAY repeat, and each group carries a minimum interval
+(§15.4.2), so both faster-than-the-cycle and an absolute slower rate are
 expressible.
 
 **Polling is response-paced.** While the set is non-empty, the device
@@ -2341,8 +2341,10 @@ Refusals, checked in this order after the §9 capability gate:
    to any non-empty poll set before `OBD_INFO` has been answered, and the
    sequence declare (bit 10), verify (`OBD_INFO`), use (`OBD_POLL_SET`) is
    structural rather than convention.
-5. A group longer than **6 PIDs** is `bad_params` (§15.4.1), and a divisor of
-   0 is `bad_params` (§15.4.2).
+5. A group longer than **6 PIDs** is `bad_params` (§15.4.1). A minimum
+   interval of 0 is legal and means "no minimum" (§15.4.2) — unlike a ratio,
+   a floor of zero subtracts nothing rather than naming a group that never
+   transmits.
 
 A refused request MUST leave the installed poll set unchanged. The opcode
 is idempotent — replacing a set with itself is the same set — which is its
@@ -2361,16 +2363,16 @@ A schedule entry is a **group**: one or more PIDs asked in a single Mode 01
 request. Bit 7 of a PID byte is the `more` flag — a byte with bit 7 set is
 grouped with the byte that follows, and a group is a maximal such run
 terminated by the first byte with bit 7 clear. PIDs are `0x01`–`0x60`, so
-bit 7 is free. **Each group's terminating byte is followed by one divisor
-byte** (§15.4.2).
+bit 7 is free. **Each group's terminating byte is followed by a `u16`
+minimum interval**, little-endian, in milliseconds (§15.4.2).
 
 So the schedule is parsed in one pass: read PID bytes until one without
-`more`, read the divisor byte that follows it, repeat until the payload is
-consumed. `count` counts PID bytes only, so `obd_poll_slots` means what it
-always meant, and the payload is `3 + count + (number of groups)` bytes.
+`more`, read the two interval bytes that follow it, repeat until the payload
+is consumed. `count` counts PID bytes only, so `obd_poll_slots` means what it
+always meant, and the payload is `3 + count + 2 × (number of groups)` bytes.
 
-`[0x8C, 0x0D, 0x01, 0x85, 0x8F, 0x04, 0x05]` is two groups: `(0C, 0D)` every
-pass, and `(05, 0F, 04)` every fifth.
+`[0x8C, 0x0D, 0x00, 0x00, 0x85, 0x8F, 0x04, 0xF4, 0x01]` is two groups:
+`(0C, 0D)` with no minimum, and `(05, 0F, 04)` no oftener than every 500 ms.
 
 The device transmits one Mode 01 request per group —
 `[1+g, 0x01, pid₁ … pid_g]`, padded to eight bytes exactly as a single-PID
@@ -2422,32 +2424,46 @@ The effect is bounded, because the other requester keeps its own schedule and
 does not accelerate in response, and a client that cares sets a non-zero
 `interval_ms`.
 
-### 15.4.2 Rate divisors
+### 15.4.2 Per-group minimum intervals
 
-Every group carries a `u8` divisor. A group with divisor *d* is transmitted
-on one pass of the schedule in *d* and skipped on the others; *d* = 1 is every
-pass. **A divisor of 0 is `bad_params`** — it would name a group that is never
-transmitted, which is a group the client should not have installed.
+Every group carries a `u16` **minimum interval in milliseconds**. A group is
+transmitted only when at least that long has passed since *that group* last
+transmitted; **0 means no minimum**, and the group runs at whatever pace the
+schedule and the car allow.
 
-Divisors exist because repetition is one-way. A client can already make a PID
-faster than the cycle by naming it twice, and before this subsection it could
-not make one slower than once per cycle at all: everything in the schedule was
-sampled at the cycle rate whether it needed to be or not, and the only
-currency for buying a ratio was `obd_poll_slots`. A client wanting one channel
-slower had to pay in channels it could no longer read.
+This is a rate and not a ratio, and the difference is load-bearing under
+§15.4's pacing. A ratio — one pass in *d* — names a different rate on every
+car, because the cycle time is the car's response latency and not a constant.
+The same schedule that gives 2 Hz on one vehicle gives 6 Hz on a faster one
+and drifts inside a single session as the bus does. A client wanting a
+channel at 2 Hz would have to measure the achieved cycle and reissue the poll
+set whenever it moved, which is the control loop §15.4 exists to abolish. An
+interval holds its rate whatever the car does.
 
-**A divisor cannot increase the request rate.** The device still transmits at
-most one request per pass, and a divisor only ever causes one to be skipped,
-so §15.1's bounds are untouched and there is nothing to arbitrate — there is
-still one schedule and one cursor. That asymmetry is why divisors are
-admissible where RATIONALE §11.6 refused per-PID *rates*: N independent
-intervals make the bus load a sum only the client knows, while N divisors can
-only ever subtract from a load already bounded.
+The range matters too: a `u8` ratio bottoms out around 0.3 Hz on a car
+answering in 5 ms, so a genuinely slow channel — ambient temperature, fuel
+level — could not be expressed at all. `u16` milliseconds reaches 65.5 s.
 
-A skipped group advances the cursor without transmitting; it does not get its
-own timer, and it does not consume a pass. Because the divisor is a `u8`, the
-slowest a group can go is one pass in 255 — bounded, statable, and readable
-from the schedule the client installed.
+Minimum intervals exist because repetition is one-way. A client can already
+make a PID faster than the cycle by naming it twice, and before this
+subsection it could not make one slower than once per cycle at all:
+everything in the schedule was sampled at the cycle rate whether it needed to
+be or not, and the only currency for buying a ratio was `obd_poll_slots`. A
+client wanting one channel slower had to pay in channels it could no longer
+read.
+
+**A minimum interval cannot increase the request rate.** The device still
+transmits at most one request per pass of the schedule, and a minimum only
+ever causes one to be skipped, so §15.1's bounds are untouched and there is
+nothing to arbitrate — there is still one schedule and one cursor. That
+asymmetry is why per-group minimums are admissible where RATIONALE §11.6
+refused per-PID *rates*: N independent rates make the bus load a sum only the
+client knows, while N ceilings can only ever subtract from a load already
+bounded by the pacing.
+
+A skipped group advances the cursor without transmitting. A moment at which
+no group is due is a moment the device does not transmit, which is the client
+having asked for less traffic and got it.
 
 ### 15.5 Delivery — responses are ordinary frames
 

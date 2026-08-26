@@ -502,9 +502,11 @@ class VtpDevice:
         # physically capable of 50. Counting cannot tie.
         self._obd_answers = 0
         self._obd_answer_mark = None
-        # Pass counter for SPEC.md 15.4.2's divisors. Counts passes of the
-        # whole schedule, not requests, so a divisor means what it says.
-        self._obd_pass = 0
+        # SPEC.md 15.4.2 -- each schedule entry is [group, min_ms, last_tx],
+        # one structure rather than parallel lists. Held together because they
+        # were briefly apart: anything that restored the poll set without
+        # restoring the timestamps beside it left the cursor indexing a list
+        # that was no longer the same length.
         self._obd_clear()
 
     # -- clock ------------------------------------------------------------
@@ -959,8 +961,10 @@ class VtpDevice:
             spaced = (self._obd_last_tx_us is None
                       or now - self._obd_last_tx_us >= obd_interval_us)
             if answered and spaced:
-                group = self._obd_next_group()
-                if group is not None:
+                due = self._obd_next_group(now)
+                if due is not None:
+                    entry, group = due
+                    entry[2] = now
                     self._obd_last_tx_us = now
                     self._obd_outstanding_since = now
                     self._obd_answer_mark = self._obd_answers
@@ -1087,7 +1091,7 @@ class VtpDevice:
             if batch is not None:
                 self._deferred.append(("can", batch))
         self._obd_poll, self._obd_interval_ms = [], 0
-        self._obd_index = self._obd_pass = 0
+        self._obd_index = 0
         self._obd_outstanding_since = self._obd_answer_mark = None
         self._obd_rx = []
 
@@ -1266,22 +1270,26 @@ class VtpDevice:
             self._obd_rx.append((now + self.obd_latency_us, ecu_id,
                                  self._obd_mode01_frame(body)))
 
-    def _obd_next_group(self):
-        """SPEC.md 15.4.2 -- the next group due, or None if this pass has none.
+    def _obd_next_group(self, now):
+        """SPEC.md 15.4.2 -- the next group due, or None if none is.
 
-        A skipped group advances the cursor without transmitting and does not
-        consume a pass, so a divisor of `d` means one pass in `d` and nothing
-        else. Bounded by the schedule length: a pass in which every group is
-        skipped returns None rather than spinning, and the caller simply tries
-        again on the next tick with the pass counter advanced.
+        Each group carries its own minimum interval, so "due" is a question
+        about that group's own last transmission and not about a pass counter.
+        A ratio could not express what a client actually wants: under response
+        pacing the cycle time is set by the car, so `one pass in five` is a
+        different rate on every vehicle and drifts within a session. An
+        interval holds its rate whatever the car does.
+
+        Returns `(entry, group)`; the caller stamps the entry. Bounded
+        by the schedule length, so a moment when nothing is due returns None
+        rather than spinning.
         """
         for _ in range(len(self._obd_poll)):
-            group, divisor = self._obd_poll[self._obd_index % len(self._obd_poll)]
+            entry = self._obd_poll[self._obd_index % len(self._obd_poll)]
             self._obd_index += 1
-            if self._obd_index % len(self._obd_poll) == 0:
-                self._obd_pass += 1
-            if self._obd_pass % divisor == 0:
-                return group
+            group, min_ms, last = entry
+            if min_ms == 0 or last is None or now - last >= min_ms * 1000:
+                return entry, group
         return None
 
     def _obd_fallback_delivers(self, cid):
@@ -1697,10 +1705,11 @@ class VtpDevice:
                 run.append(byte & ~OBD_PID_MORE)
                 if byte & OBD_PID_MORE:
                     continue
-                if i >= len(body):
-                    return reply(ST_BAD_PARAMS)   # group with no divisor
-                groups.append((tuple(run), body[i]))
-                run, i = [], i + 1
+                if i + 2 > len(body):
+                    return reply(ST_BAD_PARAMS)   # group with no interval
+                groups.append((tuple(run),
+                               int.from_bytes(body[i:i + 2], "little")))
+                run, i = [], i + 2
             if run:
                 # SPEC.md 15.4.1 -- bit 7 left set on the last byte: a group
                 # that continues into nothing is not a schedule.
@@ -1714,19 +1723,19 @@ class VtpDevice:
             if any(not self._obd_pid_supported(pid)
                    for group, _ in groups for pid in group):
                 return reply(ST_BAD_PARAMS)
-            # SPEC.md 15.4 rule 5 -- seven PIDs do not fit the request frame,
-            # and a divisor of 0 names a group that never transmits.
-            if any(len(group) > OBD_MAX_GROUP or divisor == 0
-                   for group, divisor in groups):
+            # SPEC.md 15.4 rule 5 -- seven PIDs do not fit the request frame.
+            # A minimum of 0 is legal and means "every pass", so there is no
+            # zero case here: unlike a divisor, a floor of zero subtracts
+            # nothing rather than naming a group that never transmits.
+            if any(len(group) > OBD_MAX_GROUP for group, _ in groups):
                 return reply(ST_BAD_PARAMS)
 
             # The schedule is NOT reset: spacing is measured from the last
             # transmission (SPEC.md 15.1), so a replacement mid-interval waits
             # out the remainder instead of transmitting immediately.
-            self._obd_poll = groups
+            self._obd_poll = [[g, m, None] for g, m in groups]
             self._obd_interval_ms = interval_ms
             self._obd_index = 0
-            self._obd_pass = 0
             return reply(ST_OK)
 
         if opcode == MONITOR_LIST:

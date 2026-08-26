@@ -109,7 +109,7 @@ CAUGHT_BY = {
     "obd_accepts_unsupported_pid": "obd.poll_refusals",
     "obd_accepts_bad_group": "obd.grouping_refusals",
     "obd_splits_groups": "obd.grouping_is_one_request",
-    "obd_ignores_divisor": "obd.divisors_are_honoured",
+    "obd_ignores_group_minimum": "obd.group_minimum_is_honoured",
     "obd_ignores_stop": "obd.poll_and_flag",
     "obd_reset_keeps_polling": "obd.reset_stops",
     "obd_polls_before_probe": "obd.poll_before_probe",
