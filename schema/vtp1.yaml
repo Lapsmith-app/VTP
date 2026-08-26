@@ -117,7 +117,7 @@ profile:
     gps: [gps_rate_hz, gps_max_rate_hz]
     can: [can_subscription_slots, can_max_frames_per_s]
     imu: [imu_rate_hz, imu_max_rate_hz]
-    obd: [obd_poll_slots, obd_min_interval_ms]
+    obd: [obd_poll_slots]
 
   # Capacities that MUST also be NON-ZERO while their bit is SET (SPEC.md
   # 15): a poll set nothing fits in, or a floor of zero milliseconds,
@@ -127,7 +127,7 @@ profile:
   # stream), so requiring non-zero everywhere would outlaw a state SPEC.md
   # 9.6 defines.
   capacity_required:
-    obd: [obd_poll_slots, obd_min_interval_ms]
+    obd: [obd_poll_slots]
 
 enums:
   fix_type:
@@ -319,24 +319,7 @@ bitmasks:
       # physical listen-only switch clears it while the switch is set.
       - {bit: 10, name: obd, implies: [can, control],
          desc: "Device transmits OBD-II diagnostic requests on the bus (§15)"}
-      # Bit 11 buys back sample rate without moving the bound bit 10 exists to
-      # state. SPEC.md 15.1 already pads every request frame to eight bytes, so
-      # `[0x07, 0x01, p1..p6]` costs exactly what `[0x02, 0x01, pid]` costs: the
-      # worst case on the bus stays one short frame per obd_min_interval_ms,
-      # and the response side gets STRICTLY smaller -- one frame per ECU per
-      # group where there were one per ECU per PID.
-      #
-      # `implies: [obd]` and not [obd, can, control]: the validator walks every
-      # set bit, so obd's own implications are checked when it reaches obd.
-      #
-      # No Info capacity accompanies it. Six PIDs per request is the request
-      # frame's own limit and six response bytes per group is J1979's; both are
-      # constants of the bus rather than properties of a device, so a field
-      # would be a second statement of what the client already knows -- the
-      # argument that removed max_notify_bytes (RATIONALE 8.2).
-      - {bit: 11, name: obd_pid_grouping, implies: [obd],
-         desc: "Accepts grouped PIDs in OBD_POLL_SET (SPEC.md 15.4.1)"}
-    reserved_from: 12
+    reserved_from: 11
     reserved_purpose: "Roles and features added in a later minor"
   # These three were plain u8 fields with a prose description, so nothing
   # derived their reserved ranges: Appendix A listed them by hand and went
@@ -443,7 +426,7 @@ records:
       # a client must read it BEFORE choosing an interval: SPEC.md 9.6's
       # rate_exceeded precedent -- the ceiling is a fact the client could
       # have read in advance -- applies to a floor identically.
-      - {name: obd_min_interval_ms, offset: 22, size: 2, type: u16, units: ms, desc: "Smallest OBD_POLL_SET interval_ms this device accepts (SPEC.md 15.4); 0 if no OBD"}
+      - {name: reserved_22, offset: 22, size: 2, type: u16, reserved: true, desc: "Was obd_min_interval_ms; withdrawn with the fixed poll clock (SPEC.md 15.4)"}
 
   gps_fix:
     characteristic: gps
@@ -804,4 +787,4 @@ control:
     # repeat a PID -- [0C, 0D, 0C, 05] samples 0x0C twice per cycle -- which
     # is how relative rates exist without per-PID rate fields (SPEC.md 15.4).
     - {value: 0x60, name: OBD_INFO,     capability: obd, params: "",                              response: "obd_probe record", desc: "Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2)"}
-    - {value: 0x61, name: OBD_POLL_SET, capability: obd, params: "interval_ms:u16, count:u8, pids:u8*", response: "",                 desc: "Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4); with capability bit 11, bit 7 of a PID byte groups it with the next (SPEC.md 15.4.1)"}
+    - {value: 0x61, name: OBD_POLL_SET, capability: obd, params: "interval_ms:u16, count:u8, schedule:u8*", response: "",                 desc: "Replace the whole poll set; count 0 stops transmitting. Response-paced: interval_ms is a MINIMUM spacing and 0 means none (SPEC.md 15.4). Bit 7 of a PID byte groups it with the next and each group carries a u16 minimum interval in ms (SPEC.md 15.4.1, 15.4.2)"}

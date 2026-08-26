@@ -19,6 +19,21 @@ POLLING = 1 << refdec.bit("can_flags", "polling")
 RESPONDED = 1 << refdec.bit("obd_validity", "responded")
 
 
+def _schedule(pids, groups=None, min_ms=0):
+    """SPEC.md 15.4.1's layout: PID bytes with `more` set on all but the last
+    of a group, then that group's u16 minimum interval (SPEC.md 15.4.2).
+
+    `pids` alone makes every PID its own group with no minimum, which is what
+    every check that does not care about rate limiting wants.
+    """
+    out = bytearray()
+    for group in (groups if groups is not None else [(p,) for p in pids]):
+        for i, pid in enumerate(group):
+            out.append(pid | (0x80 if i < len(group) - 1 else 0))
+        out += struct.pack("<H", min_ms)
+    return bytes(out)
+
+
 def _identity(frame):
     """A decoded can_record's identifier over bits 0-29 (SPEC.md §15.5's
     comparison): the decoder splits the format bit out, the probe's ids
@@ -41,13 +56,11 @@ def _probe(s):
 
 
 def _probe_timeout(s):
-    """SPEC.md §15.2 -- a probe is up to three requests, each spaced by at
-    least the greater of the 50 ms collection window and the declared
-    floor, which is a u16: a device with a 2000 ms floor legitimately takes
-    ~6 s. The fixed control timeout would report that conforming probe
-    unanswered."""
-    floor = s.info["obd_min_interval_ms"] if s.info else 0
-    return max(3.0, 3 * max(floor, 50) / 1000 + 2.0)
+    """SPEC.md §15.2 -- a probe is up to three requests, each spaced by the
+    50 ms collection window, plus whatever the car takes to answer. Generous,
+    because the fixed control timeout would report a slow but conforming probe
+    unanswered and there is no longer a declared floor to size against."""
+    return 5.0
 
 
 def _union_bit(probe, pid):
@@ -68,9 +81,9 @@ async def obd_poll_before_probe(s):
     # connection yet. The request is well-formed in every other respect --
     # legal interval, one PID inside 0x01-0x60, within the slot count -- so
     # the only rule left to refuse it is §15.4's probe gate.
-    interval = max(s.info["obd_min_interval_ms"], 1)
+    interval = 25
     r = await c.request(refdec.OPCODE["OBD_POLL_SET"],
-                        struct.pack("<HB", interval, 1) + bytes([0x0C]))
+                        struct.pack("<HB", interval, 1) + _schedule([0x0C]))
     if r.status != refdec.STATUS_VALUE["bad_params"]:
         raise Fail(
             f"a well-formed non-empty poll set before any OBD_INFO was "
@@ -201,18 +214,17 @@ async def obd_reserved(s):
 async def obd_capacities(s):
     if s.info is None:
         raise Skip("Info did not decode")
-    zero = [name for name in ("obd_poll_slots", "obd_min_interval_ms")
+    zero = [name for name in ("obd_poll_slots",)
             if not s.info[name]]
     if zero:
         raise Fail(
             f"bit 10 is set and {', '.join(zero)} "
             f"{'is' if len(zero) == 1 else 'are'} zero. §15 -- a poll set "
-            f"nothing fits in, or a floor of zero milliseconds, describes a "
-            f"role no conforming exchange can use, exactly as §9.7 forbids "
-            f"declaring `power` and answering with nothing valid")
-    raise Observe(
-        f"up to {s.info['obd_poll_slots']} PIDs per set, no interval below "
-        f"{s.info['obd_min_interval_ms']} ms")
+            f"nothing fits in describes a role no conforming exchange can "
+            f"use, exactly as §9.7 forbids declaring `power` and answering "
+            f"with nothing valid")
+    raise Observe(f"up to {s.info['obd_poll_slots']} PIDs per set; polling is "
+                  f"response-paced, so there is no declared rate")
 
 
 @check(id="obd.poll_refusals", section="15.4", phase="control", severity="MUST",
@@ -223,15 +235,14 @@ async def obd_poll_refusals(s):
     probe = _probe(s)
     if s.info is None:
         raise Skip("Info did not decode")
-    floor = s.info["obd_min_interval_ms"]
     slots = s.info["obd_poll_slots"]
-    interval = max(floor, 1)
+    interval = 25
     problems = []
 
     async def poll_set(interval_ms, pids):
         return await c.request(
             refdec.OPCODE["OBD_POLL_SET"],
-            struct.pack("<HB", interval_ms, len(pids)) + bytes(pids))
+            struct.pack("<HB", interval_ms, len(pids)) + _schedule(pids))
 
     # An unverified PID: one whose union bit is clear, which always exists --
     # the probe covers 96 PIDs and no petrol car on earth implements all of
@@ -250,32 +261,23 @@ async def obd_poll_refusals(s):
     if r.status != refdec.STATUS_VALUE["bad_params"]:
         problems.append(f"PID 0x7F is outside 0x01-0x60 and was answered "
                         f"{r.status_name} instead of bad_params")
-    if floor > 1:
-        supported = next((pid for pid in range(0x01, 0x61)
-                          if _union_bit(probe, pid)), None)
-        if supported is not None:
-            r = await poll_set(floor - 1, [supported])
-            if r.status != refdec.STATUS_VALUE["bad_params"]:
-                problems.append(
-                    f"an interval of {floor - 1} ms, below the declared floor "
-                    f"of {floor}, was answered {r.status_name}")
-    # interval_ms 0 with a non-empty set is its own MUST: zero is not "no
-    # limit" here (§15.4) -- the device would be GENERATING unbounded
-    # traffic. Carried on a SUPPORTED PID, so the interval rule is the only
-    # one left to refuse it: on an unverified PID a device could answer
-    # bad_params for the PID alone and this assertion would pass without
-    # the zero-interval rule ever being consulted.
+    # SPEC.md 15.4 -- interval_ms 0 is ACCEPTED now, and that reversal is
+    # worth asserting rather than merely not testing. Zero used to mean
+    # unbounded generation; under response pacing the device waits for the
+    # answer before transmitting, so zero means "the client imposes no
+    # throttle" and the car is the bound.
     zero_pid = next((pid for pid in range(0x01, 0x61)
                      if probe["probe"]["validity"] & RESPONDED
                      and _union_bit(probe, pid)), None)
     if zero_pid is not None:
         r = await poll_set(0, [zero_pid])
-        if r.status != refdec.STATUS_VALUE["bad_params"]:
+        if not r.ok:
             problems.append(
                 f"a non-empty set with interval_ms 0 (PID "
                 f"0x{zero_pid:02X}, which the probe's union claims) was "
-                f"answered {r.status_name}; §15.4 refuses unbounded "
-                f"generation outright")
+                f"answered {r.status_name}; §15.4 -- pacing makes zero "
+                f"bounded by the car, so it is a client declining to "
+                f"throttle rather than a request for unbounded traffic")
     if slots < 0xFF:
         r = await poll_set(interval, [0x01] * (slots + 1))
         if r.status != refdec.STATUS_VALUE["table_full"]:
@@ -311,7 +313,7 @@ async def obd_poll_and_flag(s):
     if supported is None:
         raise Skip("the probe's union claims no PID at all")
     ecu_ids = {e["id"] for e in probe["ecus"]}
-    interval = max(s.info["obd_min_interval_ms"], 25)
+    interval = 25
     # §15.4 lets the set take effect within one interval, so a fixed window
     # fails a conforming device whose declared floor is large: every wait
     # here scales with the interval actually in use.
@@ -338,7 +340,7 @@ async def obd_poll_and_flag(s):
     try:
         r = await c.request(
             refdec.OPCODE["OBD_POLL_SET"],
-            struct.pack("<HB", interval, 1) + bytes([supported]))
+            struct.pack("<HB", interval, 1) + _schedule([supported]))
         if not r.ok:
             raise Fail(f"a probed, supported PID (0x{supported:02X}) at "
                        f"{interval} ms was answered {r.status_name} -- and "
@@ -402,7 +404,7 @@ async def obd_poll_and_flag(s):
                                f"while diagnosing a silent poll")
             r2 = await c.request(
                 refdec.OPCODE["OBD_POLL_SET"],
-                struct.pack("<HB", interval, 1) + bytes([fresh_pid]))
+                struct.pack("<HB", interval, 1) + _schedule([fresh_pid]))
             if not r2.ok:
                 raise Fail(f"re-arming the poll set against the fresh probe "
                            f"result was answered {r2.status_name}; §15.2 "
@@ -505,14 +507,14 @@ async def obd_reset_stops(s):
     if supported is None:
         raise Skip("the probe's union claims no PID at all")
     ecu_ids = {e["id"] for e in probe["ecus"]}
-    interval = max(s.info["obd_min_interval_ms"], 25)
+    interval = 25
     log = s.streams["can"]
     try:
         # §15.7 -- the probe result survives the previous check's CAN_RESET,
         # so a poll set re-arms without a second probe.
         r = await c.request(
             refdec.OPCODE["OBD_POLL_SET"],
-            struct.pack("<HB", interval, 1) + bytes([supported]))
+            struct.pack("<HB", interval, 1) + _schedule([supported]))
         if not r.ok:
             raise Fail(f"re-arming the poll set after CAN_RESET was answered "
                        f"{r.status_name}; §15.7 -- the probe result is a "
@@ -567,8 +569,8 @@ def _supported_pids(probe, n):
 
 
 @check(id="obd.grouping_refusals", section="15.4.1", phase="control",
-       severity="MUST", requires=("obd", "obd_pid_grouping"), adversarial=True,
-       title="A grouped OBD_POLL_SET refuses what §15.4.1 says it must")
+       severity="MUST", requires=("obd",), adversarial=True,
+       title="The schedule layout refuses what §15.4.1 and §15.4.2 say it must")
 async def obd_grouping_refusals(s):
     c = _control(s)
     probe = _probe(s)
@@ -576,16 +578,23 @@ async def obd_grouping_refusals(s):
         raise Skip("Info did not decode")
     if not probe["probe"]["validity"] & RESPONDED:
         raise Skip("nothing answered the probe, so nothing is pollable")
-    interval = max(s.info["obd_min_interval_ms"], 1)
+    interval = 25
     pids = _supported_pids(probe, 7)
     if len(pids) < 2:
         raise Skip("the probe's union claims too few PIDs to group")
     problems = []
 
-    async def poll_set(payload):
+    async def poll_set(payload, min_ms=0):
+        """`payload` is PID bytes with `more` already set where wanted."""
+        out, n = bytearray(), 0
+        for b in payload:
+            out.append(b)
+            n += 1
+            if not b & MORE:
+                out += struct.pack("<H", min_ms)
         return await c.request(
             refdec.OPCODE["OBD_POLL_SET"],
-            struct.pack("<HB", interval, len(payload)) + bytes(payload))
+            struct.pack("<HB", interval, n) + bytes(out))
 
     # Rule 7 -- a group that continues past the end of the list.
     r = await poll_set([pids[0], pids[1] | MORE])
@@ -612,7 +621,23 @@ async def obd_grouping_refusals(s):
                 f"a group of exactly six PIDs was answered {r.status_name}; "
                 f"§15.4.1 rule 6 bounds groups at six, and six fits")
 
-    # Rule 5 still tests bits 0-6: an unverified PID inside a group is
+    # SPEC.md 15.4.2 -- 0 means "no minimum" and MUST be accepted, unlike a
+    # ratio's zero which would name a group that never transmits.
+    r = await poll_set([pids[0]], min_ms=0)
+    if not r.ok:
+        problems.append(
+            f"a minimum interval of 0 was answered {r.status_name}; §15.4.2 "
+            f"-- zero subtracts nothing and is how a client says `every pass`")
+    # A truncated interval: the parse IS the length check.
+    r = await c.request(refdec.OPCODE["OBD_POLL_SET"],
+                        struct.pack("<HB", interval, 1)
+                        + bytes([pids[0], 0]))
+    if r.status != refdec.STATUS_VALUE["bad_params"]:
+        problems.append(
+            f"a schedule whose last group carries a one-byte minimum was "
+            f"answered {r.status_name}; §15.4 rule 1")
+
+    # Rule 4 still tests bits 0-6: an unverified PID inside a group is
     # refused for being unverified, not accepted for being flagged.
     unsupported = next((pid for pid in range(0x01, 0x61)
                         if not _union_bit(probe, pid)), None)
@@ -630,7 +655,7 @@ async def obd_grouping_refusals(s):
 
 
 @check(id="obd.grouping_is_one_request", section="15.4.1", phase="control",
-       severity="MUST", requires=("obd", "obd_pid_grouping"),
+       severity="MUST", requires=("obd",),
        title="A group is ONE request, not a schedule of its members")
 async def obd_grouping_is_one_request(s):
     """The defect this exists for: a device that parses bit 7, answers `ok`,
@@ -660,7 +685,7 @@ async def obd_grouping_is_one_request(s):
     if len(pids) < 2:
         raise Skip("the probe's union claims fewer than two PIDs")
     ecu_ids = {e["id"] for e in probe["ecus"]}
-    interval = max(s.info["obd_min_interval_ms"], 25)
+    interval = 25
     window = max(20 * interval / 1000, 1.0)
     log = s.streams["can"]
 
@@ -670,7 +695,7 @@ async def obd_grouping_is_one_request(s):
     try:
         r = await c.request(
             refdec.OPCODE["OBD_POLL_SET"],
-            struct.pack("<HB", interval, 2) + bytes([pids[0] | MORE, pids[1]]))
+            struct.pack("<HB", interval, 2) + _schedule(None, [(pids[0], pids[1])]))
         if not r.ok:
             raise Fail(f"a two-PID group of probed, supported PIDs at "
                        f"{interval} ms was answered {r.status_name}, on a "
@@ -701,41 +726,81 @@ async def obd_grouping_is_one_request(s):
             raise Skip("the car answered nothing during the window; §15.4 "
                        "makes an unanswered request the honest outcome and "
                        "obd.poll_and_flag owns that diagnosis")
-        seen = max(len(leads[pids[0]]), len(leads[pids[1]]))
-        if not seen:
+        grouped = max(len(leads[pids[0]]), len(leads[pids[1]]))
+        if not grouped:
             raise Skip(f"no answer led with 0x{pids[0]:02X} or "
                        f"0x{pids[1]:02X}, so which request each answers "
                        f"cannot be told apart")
-        grouped_expect = elapsed / (interval / 1000)
-        # Generous: shedding, batching latency and a car answering slowly all
-        # pull the count down. The split-schedule defect HALVES it, so 70% of
-        # the grouped expectation is comfortably clear of 50%.
-        if seen < 0.7 * grouped_expect:
+
+        # Calibrate against THIS device on THIS car, by running the same two
+        # PIDs as two separate groups. Comparing against `elapsed / interval`
+        # assumed the fixed clock §15.4 replaced: under response pacing the
+        # spacing is max(interval, the car's latency), so a conforming device
+        # on a 50 ms car was failed for producing the 19 answers the car
+        # allowed against the ~40 an interval of 25 implied -- while a
+        # fixed-clock device, which is the actual defect, sailed through.
+        # The ratio between grouped and split is latency-free.
+        r = await c.request(
+            refdec.OPCODE["OBD_POLL_SET"],
+            struct.pack("<HB", interval, 2)
+            + _schedule([pids[0], pids[1]]))
+        if not r.ok:
+            raise Fail(f"the same two PIDs as separate groups were answered "
+                       f"{r.status_name}")
+        await asyncio.sleep(max(3 * interval / 1000, 0.35))
+        t1 = time.monotonic()
+        await asyncio.sleep(window)
+
+        # Distinct instants, exactly as the grouped run counts them: several
+        # ECUs answer one request, so counting frames here and instants there
+        # compared two different quantities and read 0.97 on a conforming
+        # device.
+        split_instants = set()
+        for n in log.since(t1):
+            try:
+                batch = refdec.decode("can_batch", n.payload)
+            except refdec.Reject:
+                continue
+            for rec in batch["records"]:
+                if _identity(rec) not in ecu_ids:
+                    continue
+                payload = bytes.fromhex(rec["payload"])
+                if len(payload) >= 3 and payload[0] >> 4 == 0 \
+                        and payload[1] == 0x41 and payload[2] == pids[0]:
+                    split_instants.add(rec["t_device_us"])
+        split = len(split_instants)
+        if not split:
+            raise Skip("the split schedule produced no comparable answers")
+        # Grouped asks for pids[0] every pass; split asks for it every other
+        # pass. A device that ignores the grouping produces the same number
+        # both ways, so anything at or above 1.4x is comfortably clear of 1.0
+        # while tolerating a car whose latency wandered between the two runs.
+        if grouped < 1.4 * split:
             raise Fail(
-                f"a group of (0x{pids[0]:02X}, 0x{pids[1]:02X}) led answers "
-                f"at {seen} distinct bus instants in {elapsed:.2f} s at "
-                f"interval {interval} ms, against about "
-                f"{grouped_expect:.0f} expected of one request per interval. "
-                f"A device scheduling the group's PIDs individually produces "
-                f"about {grouped_expect / 2:.0f} -- §15.4.1: a group is ONE "
-                f"request, and a device that answers `ok` and then halves "
-                f"the rate has told the client nothing")
+                f"0x{pids[0]:02X} was answered at {grouped} distinct instants "
+                f"when grouped with 0x{pids[1]:02X} and {split} when the two "
+                f"were separate groups, a ratio of {grouped / split:.2f}. "
+                f"§15.4.1 -- a group is ONE request, so grouping the pair "
+                f"should roughly double its rate; a device that answers `ok` "
+                f"and then schedules the PIDs individually reads 1.0 and has "
+                f"told the client nothing")
     finally:
         await c.request(refdec.OPCODE["OBD_POLL_SET"], struct.pack("<HB", 0, 0))
 
 
-@check(id="obd.grouping_undeclared_refused", section="15.4.1", phase="control",
-       severity="MUST", requires=("obd",), adversarial=True,
-       title="A device not declaring bit 11 refuses grouped PID bytes")
-async def obd_grouping_undeclared_refused(s):
-    """§15.4.1 rule 8 -- and it needs no code on a conforming device: a byte
-    with bit 7 set is a value outside 0x01-0x60, which rule 5 already
-    refuses. The check exists because a device that quietly IGNORES bit 7
-    and polls the low seven bits is the failure -- it accepts a request it
-    does not implement, and the client believes it is grouping."""
-    if s.has("obd_pid_grouping"):
-        raise Skip("this device declares bit 11, so grouped bytes are "
-                   "meaningful; obd.grouping_refusals owns it")
+@check(id="obd.group_minimum_is_honoured", section="15.4.2", phase="control",
+       severity="MUST", requires=("obd",),
+       title="A group's minimum interval holds its rate, and only its group")
+async def obd_group_minimum_is_honoured(s):
+    """SPEC.md 15.4.2 -- the defect this exists for is a device that parses the
+    minimum, answers `ok`, and transmits every group every pass anyway. The
+    client then gets its slow channels at the fast rate: bus traffic it
+    explicitly asked not to generate, and nothing in the stream says so.
+
+    Asserted as an ABSOLUTE rate, because that is what the field means. A
+    ratio would have to be measured against the achieved cycle, which under
+    response pacing is the car's and not a constant.
+    """
     c = _control(s)
     probe = _probe(s)
     if s.info is None:
@@ -745,16 +810,77 @@ async def obd_grouping_undeclared_refused(s):
     pids = _supported_pids(probe, 2)
     if len(pids) < 2:
         raise Skip("the probe's union claims fewer than two PIDs")
-    interval = max(s.info["obd_min_interval_ms"], 1)
-    r = await c.request(
-        refdec.OPCODE["OBD_POLL_SET"],
-        struct.pack("<HB", interval, 2) + bytes([pids[0] | MORE, pids[1]]))
-    if r.status != refdec.STATUS_VALUE["bad_params"]:
-        await c.request(refdec.OPCODE["OBD_POLL_SET"],
-                        struct.pack("<HB", 0, 0))
-        raise Fail(
-            f"PID byte 0x{pids[0] | MORE:02X} was answered {r.status_name} "
-            f"on a device that does not declare bit 11. §15.4.1 rule 8 -- "
-            f"without grouping that byte is a value outside 0x01-0x60 and "
-            f"rule 5 refuses it; accepting it means the device is either "
-            f"grouping undeclared or silently polling 0x{pids[0]:02X}")
+    ecu_ids = {e["id"] for e in probe["ecus"]}
+    min_ms, window = 500, 4.0
+    log = s.streams["can"]
+
+    r = await c.request(refdec.OPCODE["CAN_RESET"])
+    if not r.ok:
+        raise Fail(f"CAN_RESET was answered {r.status_name}")
+    try:
+        schedule = (bytes([pids[0]]) + struct.pack("<H", 0)
+                    + bytes([pids[1]]) + struct.pack("<H", min_ms))
+        r = await c.request(refdec.OPCODE["OBD_POLL_SET"],
+                            struct.pack("<HB", 0, 2) + schedule)
+        if not r.ok:
+            raise Fail(f"a schedule mixing minimum intervals was answered "
+                       f"{r.status_name}")
+        await asyncio.sleep(0.4)
+        t0 = time.monotonic()
+        await asyncio.sleep(window)
+        elapsed = time.monotonic() - t0
+
+        leads = {pids[0]: set(), pids[1]: set()}
+        for n in log.since(t0):
+            try:
+                batch = refdec.decode("can_batch", n.payload)
+            except refdec.Reject:
+                continue
+            for rec in batch["records"]:
+                if _identity(rec) not in ecu_ids:
+                    continue
+                payload = bytes.fromhex(rec["payload"])
+                if len(payload) < 3 or payload[0] >> 4 != 0 \
+                        or payload[1] != 0x41:
+                    continue
+                if payload[2] in leads:
+                    leads[payload[2]].add(rec["t_device_us"])
+        fast, slow = len(leads[pids[0]]), len(leads[pids[1]])
+        if not fast:
+            raise Skip("the car answered neither PID; §15.4 makes an "
+                       "unanswered request the honest outcome")
+        # Replies clustered into transmissions, then the GAP between them.
+        # Functional addressing means several ECUs answer one request and
+        # they need not answer together, so raw instants read one
+        # transmission as several; a tolerance well above that stagger and
+        # well below the minimum collapses them. Testing the gap rather than
+        # a count is what makes this able to fail at all -- counting arrivals
+        # per minimum-sized bucket can never exceed one bucket per minimum,
+        # however fast the device actually transmits.
+        tolerance = min_ms * 1000 // 4
+        clusters = []
+        for t in sorted(leads[pids[1]]):
+            if not clusters or t - clusters[-1] > tolerance:
+                clusters.append(t)
+        gaps = [(b - a) / 1000.0 for a, b in zip(clusters, clusters[1:])]
+        tight = [g for g in gaps if g < min_ms * 0.8]
+        if tight:
+            raise Fail(
+                f"0x{pids[1]:02X} carries a {min_ms} ms minimum and was "
+                f"transmitted {len(tight)} time(s) sooner than that, the "
+                f"closest {min(tight):.0f} ms after the one before. "
+                f"§15.4.2 -- the minimum is a rate the client is owed, and a "
+                f"device ignoring it generates traffic that was declined")
+        if not slow:
+            # NOT a failure. §15.4 makes an unanswered PID legal and the
+            # transmitter is not observable from the stream, so a car that
+            # does not answer this PID and a device that never asked report
+            # identically. Distinguishing them needs
+            # instrumentation no client has.
+            raise Observe(
+                f"0x{pids[1]:02X} produced no answer, so its minimum "
+                f"interval could not be verified: §15.4 makes an unanswered "
+                f"PID legal and the stream cannot tell that from a group "
+                f"never transmitted")
+    finally:
+        await c.request(refdec.OPCODE["OBD_POLL_SET"], struct.pack("<HB", 0, 0))

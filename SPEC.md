@@ -237,7 +237,7 @@ Total: **24 bytes**. All fields little-endian.
 | 18 | 2 | `u16` | `imu_max_rate_hz` | `Hz` |
 | 20 | 1 | `u8` | `obd_poll_slots` | Most PIDs one OBD_POLL_SET may name (SPEC.md 15.4); 0 if no OBD |
 | 21 | 1 | `u8` | `clock_flags` | bitmask `clock_flags` |
-| 22 | 2 | `u16` | `obd_min_interval_ms` | `ms`; Smallest OBD_POLL_SET interval_ms this device accepts (SPEC.md 15.4); 0 if no OBD |
+| 22 | 2 | `u16` | `reserved_22` | Was obd_min_interval_ms; withdrawn with the fixed poll clock (SPEC.md 15.4); **reserved — MUST be zero** |
 <!-- END GENERATED: info -->
 
 `clock_flags` bits:
@@ -266,8 +266,7 @@ Total: **24 bytes**. All fields little-endian.
 | 8 | `power` | Device reports its own power state (SPEC.md 9.7) **Requires `control`.** |
 | 9 | `gnss_aiding` | Client supplies orbit data to the device's receiver (§14) **Requires `gps`, `control`.** |
 | 10 | `obd` | Device transmits OBD-II diagnostic requests on the bus (§15) **Requires `can`, `control`.** |
-| 11 | `obd_pid_grouping` | Accepts grouped PIDs in OBD_POLL_SET (SPEC.md 15.4.1) **Requires `obd`.** |
-| 12+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+| 11+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:capabilities -->
 
 A client MUST read this characteristic on every connection and MUST NOT cache
@@ -342,8 +341,7 @@ others alone.
 | 6 | `masked_subscriptions` | bit 1 (`can`) | — | — |
 | 8 | `power` | bit 4 (`control`) | — | — |
 | 9 | `gnss_aiding` | bit 0 (`gps`), bit 4 (`control`) | — | — |
-| 10 | `obd` | bit 1 (`can`), bit 4 (`control`) | `obd_poll_slots`, `obd_min_interval_ms` | `obd_poll_slots`, `obd_min_interval_ms` |
-| 11 | `obd_pid_grouping` | bit 10 (`obd`) | — | — |
+| 10 | `obd` | bit 1 (`can`), bit 4 (`control`) | `obd_poll_slots` | `obd_poll_slots` |
 <!-- END GENERATED: profile:capabilities -->
 
 **The largest CAN payload follows from the bits and is not a field.** A client
@@ -1077,7 +1075,7 @@ device has, and reaching it at all means the Control characteristic is live.
 | `0x40` | `MONITOR_LIST` | `monitor` | — | `monitor_declaration record` | Every channel this device asks the client to supply, in one response (SPEC.md 13.3) |
 | `0x50` | `GET_POWER` | `power` | — | `power_state record` | What the device knows about its own supply, measured when asked (SPEC.md 9.7) |
 | `0x60` | `OBD_INFO` | `obd` | — | `obd_probe record` | Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2) |
-| `0x61` | `OBD_POLL_SET` | `obd` | `interval_ms:u16, count:u8, pids:u8*` | — | Replace the whole poll set; count 0 stops transmitting (SPEC.md 15.4); with capability bit 11, bit 7 of a PID byte groups it with the next (SPEC.md 15.4.1) |
+| `0x61` | `OBD_POLL_SET` | `obd` | `interval_ms:u16, count:u8, schedule:u8*` | — | Replace the whole poll set; count 0 stops transmitting. Response-paced: interval_ms is a MINIMUM spacing and 0 means none (SPEC.md 15.4). Bit 7 of a PID byte groups it with the next and each group carries a u16 minimum interval in ms (SPEC.md 15.4.1, 15.4.2) |
 <!-- END GENERATED: control -->
 
 Opcode values `0x05`, `0x14` and `0x31` were assigned by pre-1.0 drafts and
@@ -2042,21 +2040,31 @@ opcodes live on Control. Bit 10 is past the eight bits the advertisement carries
 `power` and `gnss_aiding`: polling is something a client does after it
 connects, not something it ranks devices by before it does.
 
-Two Info capacities describe the role, in the bytes freed at offsets 20 and
-22 (§11.2):
+One Info capacity describes the role, in the byte freed at offset 20 (§11.2):
 
 - `obd_poll_slots` — the most PIDs one `OBD_POLL_SET` may name.
-- `obd_min_interval_ms` — the smallest `interval_ms` the device accepts, and
-  the floor under everything §15.1 lets it transmit.
 
-Both MUST be zero when bit 10 is clear, and both MUST be non-zero when it
-is set — §4.1's table carries both columns: a poll set nothing fits in, or a
-floor of zero milliseconds, each describes a role no conforming exchange can
-use. The rule splits as every content rule does: an Info that breaks it
-still decodes, a client MUST NOT use the role and SHOULD surface the
-contradiction as a device defect, and a conforming encoder refuses to
-produce it — unlike §9.7's power rule, whose violation spans two payloads
-and so has no single record an encoder could refuse.
+A device MUST NOT declare more slots than a schedule naming that many PIDs
+can occupy in one Control write on the smallest link §2 permits. The worst
+case is every PID its own group, which is `3 + count + 2 × count` bytes of
+parameters (§15.4.1), so at the 100-byte minimum ATT MTU the ceiling is 30 —
+and a device declaring 255 would be advertising a poll set 770 bytes long
+that no client could ever send. It MUST be zero when bit 10 is clear and
+non-zero when it is set — §4.1's
+table carries both columns, because a poll set nothing fits in describes a
+role no conforming exchange can use. The rule splits as every content rule
+does: an Info that breaks it still decodes, a client MUST NOT use the role
+and SHOULD surface the contradiction as a device defect, and a conforming
+encoder refuses to produce it — unlike §9.7's power rule, whose violation
+spans two payloads and so has no single record an encoder could refuse.
+
+**There is no declared rate.** Offsets 22–23 held `obd_min_interval_ms` in
+drafts of this section and are reserved again. A device is plugged into a car
+it has never met, so a rate it publishes as *safe* is a guess about a vehicle
+it cannot see — the same guess a client makes when it hard-codes an interval,
+relocated to the party with even less information. What bounds this role
+instead is §15.4's pacing, which is a discipline rather than a number and
+holds on every car without knowing any of them.
 
 Because Info is read on every connection and never cached (§4), bit 10
 describes **this connection, not the model**. A device with a physical
@@ -2088,24 +2096,36 @@ another tester's transfer, and cannot complete one of its own (§15.5).
 Three bounds hold across the probe and the poll loop together:
 
 - A device MUST NOT have more than one request outstanding on the bus.
-- A device MUST NOT transmit two requests less than `obd_min_interval_ms`
-  apart, and while a poll set is active MUST NOT transmit two less than its
-  `interval_ms` apart. A probe continues the same schedule from the same
+- A device MUST NOT transmit until the outstanding request has been answered
+  or abandoned, and while a poll set is active MUST NOT transmit two requests
+  less than its `interval_ms` apart (§15.4). A probe continues from the same
   last transmission — and since a probe clears the poll set (§15.2), its
   requests and the poll loop's never contend.
-- A device MUST NOT retry an unanswered request. A request still unanswered
-  when the next transmission is due is abandoned; the poll loop simply comes
-  round again (§15.4), and a probe moves on, or falls back to the other
-  addressing — a different request, not the same one again (§15.2).
+- A device MUST NOT retry an unanswered request. A request unanswered
+  `OBD_RESPONSE_TIMEOUT_MS` after it was transmitted is abandoned; the poll
+  loop simply comes round again (§15.4), and a probe moves on, or falls back
+  to the other addressing — a different request, not the same one again
+  (§15.2).
 
 A group is **one request** under all three: one outstanding at a time, one
-per `interval_ms`, never retried. Grouping therefore does not move any bound
-in this section, and cannot — the request frame is padded to eight bytes
-whether it names one PID or six.
+per pass of the schedule, never retried. Grouping therefore does not move any
+bound in this section, and cannot — the request frame is padded to eight
+bytes whether it names one PID or six.
 
-These bounds are what make the role auditable: a device's worst case on the
-bus is one short frame per `obd_min_interval_ms`, stated in a field the
-client reads before anything is transmitted.
+**`OBD_RESPONSE_TIMEOUT_MS` is 100.** It exists only so a PID nothing answers
+cannot stall the schedule, and is deliberately generous rather than tuned:
+ISO 15765-4's P2max of 50 ms is the figure a dedicated tester uses, and a
+logger that abandons a slow gatewayed ECU has lost the reading a tester would
+have waited for. A device MUST NOT make it configurable — a second timing
+knob is a second thing for a client to guess wrong.
+
+These bounds are what make the role auditable, and the claim is a discipline
+rather than a rate: **a conforming device has at most one diagnostic request
+outstanding, waits for its answer, never retries, and transmits nothing a
+client did not ask for.** That is checkable by inspection, true on every car,
+and — unlike a published interval — needs no guess about a vehicle the device
+has never met. What actually bounds the request rate is the car: a device
+that waits for an answer cannot outrun the ECU replying to it.
 
 ### 15.2 OBD_INFO — the probe
 
@@ -2273,51 +2293,101 @@ widening of this one.
 
 ### 15.4 OBD_POLL_SET — the poll set
 
-`OBD_POLL_SET` (`0x61`) takes `interval_ms:u16`, `count:u8`, and `count`
-PID bytes. It **replaces the whole poll set** — the request is a complete
-statement, like a Monitor update (§13.4), so there is no add, no remove and
-no read-back: a client knows the set because it installed it, which is the
-§9.1 argument that removed `CAN_LIST`. The response carries no detail.
+`OBD_POLL_SET` (`0x61`) takes `interval_ms:u16`, `count:u8`, and a schedule
+naming `count` PIDs (§15.4.1). It **replaces the whole poll set** — the
+request is a complete statement, like a Monitor update (§13.4), so there is
+no add, no remove and no read-back: a client knows the set because it
+installed it, which is the §9.1 argument that removed `CAN_LIST`. The
+response carries no detail.
 
-While the set is non-empty the device transmits one Mode 01 request per
-`interval_ms`, walking the list in order and wrapping — the list is a
-schedule, not a set. **Entries are ordered and MAY repeat**: a client that
-wants engine speed sampled twice as often as coolant temperature sends
-`[0x0C, 0x05, 0x0C, 0x0F]`, and relative rates exist without per-PID rate
-fields. `interval_ms` is the spacing between consecutive requests, and a
-group (§15.4.1) is one request, so one PID in a schedule of *g* groups is
-sampled every *g* × `interval_ms`. Without grouping every PID is its own
-group and *g* is the list length.
+The schedule is a list of **groups** (§15.4.1), walked in order and wrapping.
+Entries are ordered and MAY repeat, and each group carries a minimum interval
+(§15.4.2), so both faster-than-the-cycle and an absolute slower rate are
+expressible.
 
-A request the bus did not answer is abandoned when the next transmission is
-due (§15.1); the loop does not stall, retry, or reorder. The client sees the
-gap as the absence of a response frame, which is the truth.
+**Polling is response-paced.** While the set is non-empty, the device
+transmits the next group when *both* hold:
+
+1. the previous request has been **answered** — the first frame received on
+   an identifier the most recent probe reported **whose echoed Mode 01 PID is
+   one the outstanding request named** — or `OBD_RESPONSE_TIMEOUT_MS` has
+   elapsed since it was transmitted, whichever comes first; and
+2. at least `interval_ms` has elapsed since the previous transmission.
+
+`interval_ms` is a **minimum spacing, not a period**, and **0 means the client
+imposes none** — the device then goes as fast as the car answers, which is
+what a dedicated tester does and what the pacing rule makes safe. A non-zero
+value is a client throttling the device below the car's own speed, for a
+vehicle it has reason to be careful with; it is not a sample period and it is
+not a guess about latency the client cannot make.
+
+Zero is admissible here precisely because it is **not** unbounded, which is
+the difference from a `periodic` subscription's `arg` (§6.8) and from the
+fixed clock this rule replaces: a device that waits for an answer before
+transmitting cannot generate traffic faster than the car produces it. The
+bound moved from a number to the pacing itself.
+
+**The echo test is what makes "one outstanding" hold on a real car.** A
+functionally addressed request is answered by every ECU implementing any PID
+in it (§15.4.1), and those ECUs do not answer together — a reply at 10 ms and
+another at 15 ms is ordinary. Releasing on any frame at all, the first reply
+frees the next request and the second, still answering the *previous* one,
+frees the one after that before it has been answered: two requests
+outstanding, which §15.1 forbids. A Mode 01 response echoes its PID — §15.5
+relies on exactly that, which is why no client needs correlation state — so
+comparing the echo against the group just asked separates an answer from a
+straggler with no correlation table and no J1979 knowledge beyond reading one
+byte.
+
+Two consequences worth stating. A schedule that names the same group twice in
+a row cannot distinguish the second request's answer from the first's
+straggler, so the echo test does nothing there and the client is back to
+`interval_ms` as its control. And a frame on a diagnostic response identifier
+that echoes a PID this device did not ask for never releases anything, which
+is what keeps another tester's traffic (§15.4.1) from pacing this device even
+though the fallback still delivers it.
+
+A request the bus did not answer is abandoned at `OBD_RESPONSE_TIMEOUT_MS`
+(§15.1); the loop does not stall, retry, or reorder, and comes round again on
+the next pass. The client sees the gap as the absence of a response frame,
+which is the truth.
 
 Refusals, checked in this order after the §9 capability gate:
 
-1. A payload that is not exactly 3 + `count` bytes is `bad_params`.
+1. A payload the schedule parse does not consume exactly, or that names other
+   than `count` PIDs, is `bad_params` (§15.4.1 gives the layout).
 2. `count` above `obd_poll_slots` is `table_full` — the capacity was in
    Info, so the answer is a fact the client could have read, §9.6's
    argument for `rate_exceeded`.
 3. With `count` 0, `interval_ms` MUST be 0, and the empty set **stops
    polling**: it is how a client turns transmit off, it is accepted
    whatever the probe state, and it is not an error.
-4. With `count` non-zero, an `interval_ms` of 0 or below
-   `obd_min_interval_ms` is `bad_params`. Zero does not mean "no limit" as
-   it does for a `periodic` subscription (§6.8): there the device filters
-   traffic that exists anyway, here it would be generating unbounded
-   traffic, which is the one thing this role must never do.
-5. A PID outside `0x01`–`0x60`, or one whose bit in the most recent probe's
+4. A PID outside `0x01`–`0x60`, or one whose bit in the most recent probe's
    union is clear, is `bad_params`. With no probe completed this
    connection, nothing is pollable — so a device MUST answer `bad_params`
    to any non-empty poll set before `OBD_INFO` has been answered, and the
    sequence declare (bit 10), verify (`OBD_INFO`), use (`OBD_POLL_SET`) is
    structural rather than convention.
+5. A group longer than **6 PIDs** is `bad_params` (§15.4.1). A minimum
+   interval of 0 is legal and means "no minimum" (§15.4.2) — unlike a ratio,
+   a floor of zero subtracts nothing rather than naming a group that never
+   transmits.
+
+A replacement **preserves the cursor, and preserves each group's last
+transmission for any group the new schedule names again** — a group is the
+same group if it names the same PIDs in the same order. Neither is reset,
+for the same reason the transmission spacing is not: re-issuing a poll set is
+the only way to change a PID, so a client does it routinely, and a device
+that started the schedule over each time would starve the tail of a set
+replaced faster than it cycles, while one that restarted the minimum
+intervals of §15.4.2 would let a client defeat its own rate limits by
+reinstalling. Groups the new schedule does not name lose their history with
+the set that held them.
 
 A refused request MUST leave the installed poll set unchanged. The opcode
 is idempotent — replacing a set with itself is the same set — which is its
-§9.4 retry-safety. The change takes effect within one interval: after an
-`ok`, at most one further request MAY go out under the old set.
+§9.4 retry-safety. The change takes effect promptly: after an `ok`, at most
+one further request MAY go out under the old set.
 
 An accepted, non-empty poll set is the whole of what a client must do to
 receive the answers: §15.5 delivers them on the probe's reported response
@@ -2325,86 +2395,113 @@ identifiers with no subscription required. Subscriptions remain what they
 are everywhere — the client's choice of broadcast traffic, and its means
 of governing the diagnostic identifiers more tightly than `every_frame`.
 
-### 15.4.1 PID grouping
+### 15.4.1 PID grouping and the schedule layout
 
-A device declaring capability bit 11 (`obd_pid_grouping`) accepts a poll set
-whose PID bytes carry a `more` flag in bit 7: a byte with bit 7 set is
-grouped with the byte that follows, and a **group** is a maximal such run
+A schedule entry is a **group**: one or more PIDs asked in a single Mode 01
+request. Bit 7 of a PID byte is the `more` flag — a byte with bit 7 set is
+grouped with the byte that follows, and a group is a maximal such run
 terminated by the first byte with bit 7 clear. PIDs are `0x01`–`0x60`, so
-bit 7 is never set on a conforming request that predates this subsection —
-though note that it is not Appendix A reserved space either: before §15.4.1
-such a byte was **malformed input**, refused by rule 5, and assigning it a
-meaning is a pre-1.0 decision about the encoding rather than the ordinary
-minor-version reserved-bit assignment of §11.2. The device
-transmits one Mode 01 request per group — `[1+g, 0x01, pid₁ … pid_g]` — and
-the schedule walks groups, not PIDs. `count` still counts PID *bytes*, so
-`obd_poll_slots` is unchanged.
+bit 7 is free. **Each group's terminating byte is followed by a `u16`
+minimum interval**, little-endian, in milliseconds (§15.4.2).
 
-`[0x8C, 0x0D, 0x85, 0x8F, 0x04]` is two groups: `(0C, 0D)` and
-`(05, 0F, 04)`.
+So the schedule is parsed in one pass: read PID bytes until one without
+`more`, read the two interval bytes that follow it, repeat until the payload
+is consumed. `count` counts PID bytes only, so `obd_poll_slots` means what it
+always meant, and the payload is `3 + count + 2 × (number of groups)` bytes.
 
-Grouping exists because `interval_ms` spaces requests: a schedule of sixteen
-PIDs in six groups samples each PID at 1/(6 × `interval_ms`) rather than
-1/(16 × `interval_ms`), for identical airtime — the request frame is padded
-to eight bytes either way (§15.1) — and strictly fewer response frames.
+`[0x8C, 0x0D, 0x00, 0x00, 0x85, 0x8F, 0x04, 0xF4, 0x01]` is two groups:
+`(0C, 0D)` with no minimum, and `(05, 0F, 04)` no oftener than every 500 ms.
 
-Three rules, continuing §15.4's ordered refusals:
+The device transmits one Mode 01 request per group —
+`[1+g, 0x01, pid₁ … pid_g]`, padded to eight bytes exactly as a single-PID
+request is. **Grouping is free on the bus**: a six-PID request occupies the
+same eight bytes a one-PID request occupies (§15.1), and the response side
+gets strictly smaller — one frame per ECU per group where there was one per
+ECU per PID.
 
-6. A group longer than **6 PIDs** is `bad_params`. Seven would not fit the
-   request frame, which is the only bound on grouping the device checks.
-7. Bit 7 set on the **last** byte of `pids` is `bad_params`: a group that
-   continues into nothing is not a schedule.
-8. On a device that does **not** declare bit 11, any byte with bit 7 set is
-   `bad_params` under rule 5, which needs no amendment — such a byte is a
-   value outside `0x01`–`0x60`. A client therefore never reaches this path:
-   it reads bit 11 first, and declare-verify-use holds as it does for the
-   role itself.
+A group longer than 6 PIDs is `bad_params`: seven would not fit the request
+frame, and that is the only bound on grouping the device checks.
 
-**The cost is one lost error check, and it is stated rather than hidden.**
-On a device declaring bit 11, a PID byte with bit 7 set is a grouped PID and
-not a malformed one. A client that computes a PID wrongly — an `OR` against
-a flag constant, a sign-extended byte, a stale enum — and sends `0x8C` in a
-non-terminal position is answered `ok` and polls `0x0C` grouped with
-whatever follows, where the same request to a device without bit 11 is
-`bad_params` under rule 5. Only the terminal position is still caught, by
-rule 7. This is inherent to the encoding: bit 7 cannot be both a flag and a
-range check, and every alternative that keeps both costs a field in a record
-this major version has closed (§11.3). A client MUST NOT set bit 7 except to
-group deliberately, and a client that validates its own PID values before
-sending them keeps the check the device gave up.
-
-**The device does not check response sizes, and MUST NOT.** Whether a
-group's answer fits a single frame is arithmetic over J1979 response
-lengths, and those tables live in the client (§15.5). A group whose response
-exceeds seven bytes is answered with a first frame, and §15.5 already
-governs it with no special case: the subscription table decides first, and a
-first frame the table does not match, on a probe-reported response
-identifier, while the poll set is non-empty, **is forwarded by §15.5's
-fallback like any other frame there**. The client therefore *receives* the
-first frame — it is not silently dropped — and receives nothing further,
-because the transfer it opens dies for want of a flow control this device
-will not send. The device reassembles nothing and transmits no flow control,
-exactly as §15.1 requires of it.
+**The device does not check response sizes, and MUST NOT.** Whether a group's
+answer fits a single frame is arithmetic over J1979 response lengths, and
+those tables live in the client (§15.5). A group whose response exceeds seven
+bytes is answered with a first frame, and §15.5 already governs it with no
+special case: the subscription table decides first, and a first frame the
+table does not match, on a probe-reported response identifier, while the poll
+set is non-empty, **is forwarded by §15.5's fallback like any other frame
+there**. The client therefore *receives* the first frame — it is not silently
+dropped — and receives nothing further, because the transfer it opens dies
+for want of a flow control this device will not send. The device reassembles
+nothing and transmits no flow control, exactly as §15.1 requires of it.
 
 That the failure is delivered rather than swallowed is the point: a client
 that oversized a group sees a frame whose PCI says a multi-frame answer is
 coming, learns immediately that its own arithmetic was wrong, and regroups.
-A dropped frame would have made the same mistake look like a silent bus.
 
 A client sizing a group counts six bytes of budget: a single-frame response
 is `41` plus one `pid`+`data` pair per PID, and no Mode 01 response in
 `0x01`–`0x60` exceeds four data bytes. Three PIDs per group is therefore the
-practical ceiling and two is common — well under rule 6's six, which bounds
-the request and not the answer.
+practical ceiling and two is common — well under the six that bounds the
+request.
 
 **A group is functionally addressed like every other request**, so every ECU
-implementing *any* PID in the group answers, each with the subset it
-implements — and each such response is smaller than the group's worst case,
-so a client sizing against "one ECU answers everything" is sizing
-conservatively. The probe reports the *union* of the ECUs' masks and not
-per-ECU masks (§15.3), so a client wanting per-ECU attribution before it
-groups obtains it the way §15.3 already says: poll the PIDs singly, watch
-which response identifiers answer, then install the grouped schedule.
+implementing *any* PID in it answers, each with the subset it implements —
+and each such response is smaller than the group's worst case, so a client
+sizing against "one ECU answers everything" is sizing conservatively. The
+probe reports the *union* of the ECUs' masks and not per-ECU masks (§15.3),
+so a client wanting per-ECU attribution before it groups obtains it the way
+§15.3 already says: poll the PIDs singly, watch which response identifiers
+answer, then install the grouped schedule.
+
+One consequence of pacing belongs here: "the answer arrived" means *an*
+answer on a diagnostic response identifier, and §15.5 notes those carry other
+testers' answers too — a splitter with a second dongle in it, or a
+vehicle-internal module making its own requests. A device can therefore be
+paced by traffic it did not cause and run faster than it otherwise would.
+The effect is bounded, because the other requester keeps its own schedule and
+does not accelerate in response, and a client that cares sets a non-zero
+`interval_ms`.
+
+### 15.4.2 Per-group minimum intervals
+
+Every group carries a `u16` **minimum interval in milliseconds**. A group is
+transmitted only when at least that long has passed since *that group* last
+transmitted; **0 means no minimum**, and the group runs at whatever pace the
+schedule and the car allow.
+
+This is a rate and not a ratio, and the difference is load-bearing under
+§15.4's pacing. A ratio — one pass in *d* — names a different rate on every
+car, because the cycle time is the car's response latency and not a constant.
+The same schedule that gives 2 Hz on one vehicle gives 6 Hz on a faster one
+and drifts inside a single session as the bus does. A client wanting a
+channel at 2 Hz would have to measure the achieved cycle and reissue the poll
+set whenever it moved, which is the control loop §15.4 exists to abolish. An
+interval holds its rate whatever the car does.
+
+The range matters too: a `u8` ratio bottoms out around 0.3 Hz on a car
+answering in 5 ms, so a genuinely slow channel — ambient temperature, fuel
+level — could not be expressed at all. `u16` milliseconds reaches 65.5 s.
+
+Minimum intervals exist because repetition is one-way. A client can already
+make a PID faster than the cycle by naming it twice, and before this
+subsection it could not make one slower than once per cycle at all:
+everything in the schedule was sampled at the cycle rate whether it needed to
+be or not, and the only currency for buying a ratio was `obd_poll_slots`. A
+client wanting one channel slower had to pay in channels it could no longer
+read.
+
+**A minimum interval cannot increase the request rate.** The device still
+transmits at most one request per pass of the schedule, and a minimum only
+ever causes one to be skipped, so §15.1's bounds are untouched and there is
+nothing to arbitrate — there is still one schedule and one cursor. That
+asymmetry is why per-group minimums are admissible where RATIONALE §11.6
+refused per-PID *rates*: N independent rates make the bus load a sum only the
+client knows, while N ceilings can only ever subtract from a load already
+bounded by the pacing.
+
+A skipped group advances the cursor without transmitting. A moment at which
+no group is due is a moment the device does not transmit, which is the client
+having asked for less traffic and got it.
 
 ### 15.5 Delivery — responses are ordinary frames
 
@@ -2598,7 +2695,7 @@ record tables above.
 | --- | --- | --- |
 | `gps_fix.validity` | bits 12–31 | Validity for fields added in a later minor |
 | `gps_fix.fix_flags` | bits 5–7 | Additional solution-quality flags |
-| `info.capabilities` | bit 7, bits 12–31 | Roles and features added in a later minor |
+| `info.capabilities` | bit 7, bits 11–31 | Roles and features added in a later minor |
 | `can_header.flags` | bits 2–7 | Additional batch-level CAN status |
 | `imu_header.flags` | bits 3–7 | Additional sensor groups |
 | `info.clock_flags` | bits 2–7 | Additional clock properties |
@@ -2607,6 +2704,7 @@ record tables above.
 | `gnss_aid_caps.validity` | bits 1–7 | Validity for aiding capabilities added in a later minor |
 | `aid_commit_result.validity` | bits 1–7 | Validity for commit results added in a later minor |
 | `obd_probe.validity` | bits 1–7 | Validity for probe results added in a later minor |
+| `info.reserved_22` | 2 bytes | Was obd_min_interval_ms; withdrawn with the fixed poll clock (SPEC.md 15.4) |
 | `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
 | `monitor_declaration.reserved` | 1 byte | Declaration metadata |

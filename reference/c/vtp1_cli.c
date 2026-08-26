@@ -230,11 +230,11 @@ int main(void) {
                    "\"capabilities\":%u,\"gps_rate_hz\":%u,\"gps_max_rate_hz\":%u,"
                    "\"can_subscription_slots\":%u,\"can_max_frames_per_s\":%u,"
                    "\"imu_rate_hz\":%u,\"imu_max_rate_hz\":%u,\"obd_poll_slots\":%u,"
-                   "\"clock_flags\":%u,\"obd_min_interval_ms\":%u",
+                   "\"clock_flags\":%u,\"reserved_22\":%u",
                    v.protocol_major, v.protocol_minor, v.capabilities,
                    v.gps_rate_hz, v.gps_max_rate_hz, v.can_subscription_slots,
                    v.can_max_frames_per_s, v.imu_rate_hz, v.imu_max_rate_hz,
-                   v.obd_poll_slots, v.clock_flags, v.obd_min_interval_ms);
+                   v.obd_poll_slots, v.clock_flags, v.reserved_22);
             finish(enc, vtp_encode_info(&v, enc, sizeof enc));
 
         } else if (!strcmp(record, "monitor_list")) {
