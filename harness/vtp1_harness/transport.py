@@ -353,7 +353,9 @@ FAULTS = {
     "obd_polls_before_probe": "SPEC.md §15.4 — a poll set is accepted before any probe has answered, transmitting for PIDs nothing verified",
     "obd_delivery_needs_subscription": "SPEC.md §15.5 — poll responses are delivered only through the table, so an unsubscribed polling client transmits on the car and receives nothing",
     "obd_flag_never_set": "SPEC.md §15.6 — the poll set is non-empty and no batch carries the polling flag",
-    "obd_accepts_zero_interval": "SPEC.md §15.4 — interval_ms 0 with a non-empty set is accepted as `as fast as legal` instead of refused",
+    "obd_accepts_bad_group": "SPEC.md §15.4.1 — a group of seven PIDs, and a group left open past the end of the list, are both answered ok",
+    "obd_ignores_group_minimum": "SPEC.md §15.4.2 — every group is transmitted every pass whatever minimum interval it was given",
+    "obd_splits_groups": "SPEC.md §15.4.1 — bit 7 is parsed and answered ok, then the group's PIDs are scheduled individually: half the rate the client asked for, with nothing on the wire to say so",
     # The two below are SCENARIO seeds, not matrix faults: neither violates a
     # rule any single check can catch on its own. The first is a CONFORMING
     # car whose polled PID nothing answers (§15.4 makes that gap legal, so the
@@ -736,10 +738,68 @@ class LoopbackTransport(Transport):
             # dispatch, so a supported PID rides through to an ok answer and
             # the transmitter genuinely starts. Zero is generation without
             # bound, and the check must see it accepted to say so.
-            floor = (getattr(self.device, "OBD_MIN_INTERVAL_MS", None)
-                     or _load_peripheral().OBD_MIN_INTERVAL_MS)
-            request = (request[:2] + struct.pack("<H", max(floor, 1))
-                       + request[4:])
+            request = request[:2] + struct.pack("<H", 25) + request[4:]
+        if {"obd_accepts_bad_group", "obd_splits_groups",
+                "obd_ignores_group_minimum"} & self.faults and \
+                len(request) >= _OBD_POLL_FIXED and \
+                request[0] == refdec.OPCODE["OBD_POLL_SET"] and \
+                request[_OBD_POLL_FIXED - 1] != 0:
+            # SPEC.md 15.4.1/15.4.2 -- three ways to get the schedule wrong,
+            # all of which answer `ok`. Rewriting the REQUEST is how each
+            # becomes reachable: the device below is conforming, so the defect
+            # has to be injected as the request it never should have accepted.
+            head, body = request[:_OBD_POLL_FIXED], request[_OBD_POLL_FIXED:]
+            MORE = 0x80
+            groups, run_, i, malformed = [], [], 0, False
+            while i < len(body):
+                b = body[i]
+                i += 1
+                run_.append(b & ~MORE)
+                if b & MORE:
+                    continue
+                if i + 2 > len(body):
+                    malformed = True
+                    break
+                groups.append((run_, int.from_bytes(body[i:i + 2], "little")))
+                run_, i = [], i + 2
+            if run_:
+                malformed = True
+
+            def emit(gs):
+                # `count` is rewritten with the body. Leaving the original in
+                # place made this fault inert on the two rules it names: a
+                # seven-PID group re-emitted as six against count=7, and a
+                # trailing-`more` schedule as one PID against count=2, were
+                # both refused by the parser's count check exactly as an
+                # unfaulted device refuses them -- so the fault was only ever
+                # caught by a sibling assertion in the same check.
+                out, n = bytearray(), 0
+                for pids_, min_ms in gs:
+                    for j, pid in enumerate(pids_):
+                        out.append(pid | (MORE if j < len(pids_) - 1 else 0))
+                        n += 1
+                    out += struct.pack("<H", min_ms)
+                return head[:-1] + bytes([n]) + bytes(out)
+
+            if malformed:
+                # A schedule the device would refuse: hand it a legal one so
+                # the refusal check sees `ok` where it requires bad_params.
+                if "obd_accepts_bad_group" in self.faults:
+                    flat = [((p_,), 0) for p_ in
+                            (b & ~MORE for b in body)][:1]
+                    request = emit(flat)
+            elif "obd_ignores_group_minimum" in self.faults:
+                # Parsed, answered ok, then every group transmitted every
+                # pass. Only a RATE check can see this one.
+                request = emit([(pids_, 0) for pids_, _ in groups])
+            elif "obd_splits_groups" in self.faults:
+                # Bit 7 parsed and accepted, then every PID scheduled on its
+                # own: half the rate the client asked for, silently.
+                request = emit([((p_,), m) for pids_, m in groups
+                                for p_ in pids_])
+            elif "obd_accepts_bad_group" in self.faults and \
+                    any(len(pids_) > 6 for pids_, _ in groups):
+                request = emit([(pids_[:6], m) for pids_, m in groups])
         if "obd_polls_before_probe" in self.faults and \
                 len(request) >= _OBD_POLL_FIXED and \
                 request[0] == refdec.OPCODE["OBD_POLL_SET"] and \

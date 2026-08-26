@@ -8,9 +8,51 @@ conformance vector.
 
 ## [Unreleased]
 
-Everything since 0.1.0, condensed: with zero deployed devices a changelog is
-a record of decisions, not a diary — the pull requests and RATIONALE.md hold
-the detail and the arguments, and git holds the archaeology.
+### §15 rewritten: response-paced, grouped, divided
+
+Pre-1.0 and with no third-party consumers, so the poll loop was fixed rather
+than extended. What was three layered proposals — grouping behind a
+capability bit, pacing behind a second bit and a second opcode, rate control
+behind a third — is one rule on the opcode that already existed.
+
+**Polling is response-paced (§15.4).** The device transmits the next group
+when the previous request has been answered, or `OBD_RESPONSE_TIMEOUT_MS`
+(100) has passed, and no sooner than `interval_ms` after the last
+transmission. `interval_ms` is a **minimum spacing, not a period**, and 0
+means the client imposes none — the car is then the only pacing there is,
+which is safe precisely because the device waits for it. Zero is admissible
+where a `periodic` subscription's `arg` could not be, because waiting for an
+answer cannot generate traffic faster than the car produces it.
+
+**`obd_min_interval_ms` is withdrawn** and Info bytes 22–23 are reserved
+again. A device is plugged into a car it has never met, so a rate it
+publishes as safe is a guess about a vehicle it cannot see. §15.1's audit
+claim is now a discipline rather than a number: one request outstanding,
+waits for its answer, never retries, transmits nothing the client did not ask
+for. The cost — no rate readable from Info before anything is transmitted —
+is stated in RATIONALE §11.5a rather than glossed.
+
+**Grouping is part of the role (§15.4.1)**, not capability bit 11, which is
+withdrawn and reserved again. Bit 7 of a PID byte groups it with the byte
+that follows; a group is one Mode 01 request and costs the bus nothing,
+because the request frame is padded to eight bytes whether it names one PID
+or six. A group of one is the old behaviour, so mandating it costs a device
+only the parse.
+
+**Every group carries a `u16` minimum interval (§15.4.2).** A group is
+transmitted no oftener than its own minimum, and 0 means none. Repetition
+could already make a PID faster than the cycle and could never make one
+slower; this closes that, and it is admissible where per-PID rates were not
+because a minimum can only ever remove a request.
+
+An interval and not a ratio, because under pacing the cycle time is the car's:
+one pass in five is a different rate on every vehicle and drifts inside a
+session, and a `u8` ratio cannot reach 0.1 Hz on a fast car at all. `fast = 0,
+medium = 500, slow = 10000` says 2 Hz and 0.1 Hz and means it.
+
+Measured against the reference peripheral, twelve PIDs on a car answering in
+10 ms: 8.0 Hz each ungrouped, **19.8 Hz grouped**, with the schedule paced by
+the car rather than by a number the client guessed.
 
 ### Reviewed as what it is, and slimmed
 
@@ -56,7 +98,8 @@ deliberately not a minor version, which v0.x exists to permit.
   whose device TRANSMITS on the vehicle bus, which is the reason it is a
   declared capability at all: without the bit, the protocol loses the
   ability to say whether a given device transmits. What may be transmitted
-  is a closed enumeration (single-frame Mode 01 requests, one PID each,
+  is a closed enumeration (single-frame Mode 01 requests, one PID each
+  before §15.4.1's grouping and at most six after,
   spaced, never retried, no flow control); responses arrive as ordinary
   `can_record`s — delivered on the probe's reported response identifiers
   while the poll set is non-empty, with the subscription table governing

@@ -192,9 +192,28 @@ SUB_EVERY_FRAME, SUB_PERIODIC = 0, 1
 CAN_SUBSCRIPTION_SLOTS = 32
 CAN_MAX_FRAMES_PER_S = 4000
 
-# SPEC.md 15.4 -- the two OBD capacities this build declares in Info.
+# SPEC.md 15.4 -- the one OBD capacity this build declares in Info. There is
+# no declared rate: polling is response-paced, so what bounds the request rate
+# is the car, and a device publishing a "safe" interval would be guessing about
+# a vehicle it has never met.
 OBD_POLL_SLOTS = 16
-OBD_MIN_INTERVAL_MS = 20
+# SPEC.md 15.1 -- an unanswered request is abandoned after this long, so a PID
+# nothing answers cannot stall the schedule. Deliberately generous rather than
+# ISO 15765-4's P2max of 50 ms: a logger that gives up on a slow gatewayed ECU
+# has lost the reading a tester would have waited for.
+OBD_RESPONSE_TIMEOUT_US = 100_000
+# SPEC.md 15.4.1 -- bit 7 of a PID byte groups it with the byte that follows.
+# PIDs are 0x01..0x60, so bit 7 is space that reads zero on a device without
+# capability bit 11 and is refused there by rule 5 as a value out of range.
+OBD_PID_MORE = 0x80
+# The ONLY bound on grouping the device checks. Seven PIDs would not fit the
+# request frame: `[1+g, 0x01, p1..pg]` is 2+g bytes and a classic CAN frame
+# holds eight. Whether the RESPONSE fits is arithmetic over J1979 lengths,
+# whose tables live in the client (SPEC.md 15.5) -- the device does not check
+# it and must not, because a table of PID sizes in firmware is exactly what
+# SPEC.md 15.9 excludes. An oversize group is answered with a first frame and
+# dies for want of a flow control this device will not send.
+OBD_MAX_GROUP = 6
 # SPEC.md 15.6 -- can_header.flags `polling`: the poll set is non-empty.
 # Schema-derived like the capability bits above.
 CAN_FLAG_POLLING = next(1 << b["bit"]
@@ -350,10 +369,19 @@ class VtpDevice:
                 _pid_mask(0x41, [0x42, 0x51])),
     }
 
+    #: How long this synthetic car takes to answer, in microseconds. Zero --
+    #: answering in the same tick the request went out -- is what the model did
+    #: before SPEC.md 15.4 was response-paced, and it makes pacing invisible:
+    #: with an instant car the next request is due immediately and `interval_ms`
+    #: is the only thing left pacing the loop. Set it to model a real bus.
+    OBD_ECU_LATENCY_US = 0
+
     def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
                  circuit=None, monitor_channels=None, capabilities=None,
-                 can_scale=1.0, can_rates=None):
+                 can_scale=1.0, can_rates=None, obd_latency_us=None):
         self._clock = now_us or self._monotonic_us
+        self.obd_latency_us = (self.OBD_ECU_LATENCY_US if obd_latency_us is None
+                               else obd_latency_us)
         self._origin_ns = time.monotonic_ns()
         self._wall_origin_ms = int(time.time() * 1000)
 
@@ -469,6 +497,36 @@ class VtpDevice:
         # had just sent. It survives every edge short of construction,
         # because the bus does not care why two frames were close together.
         self._obd_last_tx_us = None
+        # SPEC.md 15.4 -- response pacing needs one more fact than the fixed
+        # clock did: whether the request already sent is still outstanding.
+        # None means nothing is in flight and the next group may go as soon as
+        # `interval_ms` allows.
+        self._obd_outstanding_since = None
+        # How many frames on probe-reported response identifiers have been
+        # admitted, and the value that counter held when the outstanding
+        # request went out. A COUNTER and not a timestamp: with a car that
+        # answers within one tick the answer's bus-arrival time equals the
+        # transmit time, and any comparison of instants then reads a request's
+        # own tick as having answered it -- which measured as 193 Hz on a car
+        # physically capable of 50. Counting cannot tie.
+        self._obd_answers = 0
+        self._obd_answer_mark = None
+        # SPEC.md 15.4 -- the PIDs of the outstanding request, so a frame can
+        # be told from a straggler. Functional addressing means several ECUs
+        # answer one request and they do NOT answer together: with replies to
+        # request N at 10 ms and 15 ms, the first released N+1 and the second
+        # -- still answering N -- released N+2 before N+1 had been answered at
+        # all, so "one request outstanding" held only on a single-ECU car.
+        # Mode 01 responses echo their PID (SPEC.md 15.5 says so, and that is
+        # why no client needs correlation state), so matching the echo against
+        # the group just asked separates the two without a correlation table
+        # and without any J1979 knowledge beyond reading one byte.
+        self._obd_outstanding_pids = frozenset()
+        # SPEC.md 15.4.2 -- each schedule entry is [group, min_ms, last_tx],
+        # one structure rather than parallel lists. Held together because they
+        # were briefly apart: anything that restored the poll set without
+        # restoring the timestamps beside it left the cursor indexing a list
+        # that was no longer the same length.
         self._obd_clear()
 
     # -- clock ------------------------------------------------------------
@@ -658,7 +716,7 @@ class VtpDevice:
             "imu_rate_hz": self.imu_hz if imu else 0,
             "imu_max_rate_hz": 833 if imu else 0,
             "obd_poll_slots": OBD_POLL_SLOTS if obd else 0,
-            "obd_min_interval_ms": OBD_MIN_INTERVAL_MS if obd else 0,
+            "reserved_22": 0,
             "clock_flags": 0b10,      # survives reconnect; not GNSS-disciplined
         })
 
@@ -915,21 +973,64 @@ class VtpDevice:
         # NEW list divides by zero. Every mutation of the pair rebinds
         # rather than mutating in place, so a local reference stays a
         # consistent pre- or post-write view.
+        # SPEC.md 15.4 -- answers are admitted BEFORE the transmit decision,
+        # and the order is load-bearing. Taken afterwards, an answer arriving
+        # in the same tick as a transmission counts against the request that
+        # transmission just sent, and the loop fires again one tick later: the
+        # spacing measured as an alternating 5 ms / 20 ms on a car whose
+        # latency is a flat 20. Deliver first, then decide.
+        obd_frames = (list(self._due_obd_frames(now))
+                      if caps & CAP_CAN else [])
+
         obd_poll = self._obd_poll
         obd_interval_us = self._obd_interval_ms * 1000
-        if caps & CAP_OBD and obd_poll and (
-                self._obd_last_tx_us is None
-                or now - self._obd_last_tx_us >= obd_interval_us):
-            pid = obd_poll[self._obd_index % len(obd_poll)]
-            self._obd_index += 1
-            self._obd_last_tx_us = now
-            self._obd_transmit(pid, now)
+        if caps & CAP_OBD and obd_poll:
+            # SPEC.md 15.4 -- "answered" is a frame on a probe-reported
+            # response identifier at or after the outstanding request went
+            # out. The device does not correlate a response to a request
+            # (SPEC.md 15.5 is why it never needs to), so this is the only
+            # signal available.
+            #
+            # This runs BEFORE the transmit decision, and must: functional
+            # addressing means several ECUs answer one request, and if the
+            # queue were walked afterwards the SECOND ECU's answer would clear
+            # the state belonging to the request just sent. That defect
+            # measured as 78 requests/s where the car's 20 ms latency allows
+            # 50 -- pacing off a car that had not answered yet.
+            if (self._obd_outstanding_since is not None
+                    and self._obd_answer_mark is not None
+                    and self._obd_answers > self._obd_answer_mark):
+                self._obd_outstanding_since = None
+            # SPEC.md 15.1 -- an unanswered request is abandoned, not retried.
+            # Abandoning is what clears the way for the next group; the ECU may
+            # still answer afterwards and SPEC.md 15.5 delivers that frame like
+            # any other.
+            if (self._obd_outstanding_since is not None
+                    and now - self._obd_outstanding_since
+                    >= OBD_RESPONSE_TIMEOUT_US):
+                self._obd_outstanding_since = None
+            # SPEC.md 15.4 -- both conditions, and `interval_ms` is a MINIMUM
+            # rather than a period. With interval 0 the car is the only pacing
+            # there is, which is safe precisely because the first condition
+            # waits for it.
+            answered = self._obd_outstanding_since is None
+            spaced = (self._obd_last_tx_us is None
+                      or now - self._obd_last_tx_us >= obd_interval_us)
+            if answered and spaced:
+                due = self._obd_next_group(now)
+                if due is not None:
+                    entry, group = due
+                    entry[2] = now
+                    self._obd_last_tx_us = now
+                    self._obd_outstanding_since = now
+                    self._obd_answer_mark = self._obd_answers
+                    self._obd_outstanding_pids = frozenset(group)
+                    self._obd_transmit(group, now)
 
         # OBD responses first: anything a probe put on the synthetic bus
         # between polls carries an older bus-arrival time than the broadcast
         # frames generated at `now`, and records within a batch must not run
-        # backwards.
-        obd_frames = (self._due_obd_frames(now) if caps & CAP_CAN else ())
+        # backwards. Collected above, before the transmitter ran.
         # The CAN branch is already gated by `_subscriptions`, which stays
         # empty on a device whose CAN opcodes all answer unsupported_opcode --
         # but relying on a side effect of the control plane to enforce a
@@ -1046,8 +1147,20 @@ class VtpDevice:
             batch = self._flush_can(now)
             if batch is not None:
                 self._deferred.append(("can", batch))
-        self._obd_poll, self._obd_interval_ms, self._obd_index = [], 0, 0
+        self._obd_poll, self._obd_interval_ms = [], 0
+        self._obd_index = 0
         self._obd_rx = []
+        # `_obd_outstanding_since` is NOT cleared, for the reason
+        # `_obd_last_tx_us` is not: it is a fact about the BUS, and the bus
+        # does not care why the client changed its mind. Clearing it let a
+        # stop-and-re-arm -- or an OBD_INFO, which calls this helper -- launch
+        # a second request while the first was still unanswered on the wire:
+        # with an 80 ms car, a stop 10 ms after a request put the next one out
+        # 5 ms later, two outstanding at once, which SPEC.md 15.1 forbids
+        # outright. The request now stays outstanding until it is answered or
+        # abandoned at OBD_RESPONSE_TIMEOUT_US, exactly as if nothing had
+        # happened -- and since `_obd_rx` is cleared here, an unanswered one
+        # reaches the timeout rather than being released by its own reply.
 
     def _obd_clear(self, *, flush=False):
         """Everything _obd_stop clears, plus the probe result -- the
@@ -1079,14 +1192,31 @@ class VtpDevice:
             return False
         return self._mask_has(self._obd_masks, pid)
 
-    def _obd_pid_data(self, pid, st):
+    def _obd_pid_data(self, pid, st, masks=None):
         """Data bytes of a positive Mode 01 response.
 
         J1979 encodings for the PIDs a lap-timing client actually reads --
         derived from the same motion state as the GPS fix and the IMU sample,
         so a client cross-checking channels finds them consistent -- and a
         deterministic one-byte filler for the rest of the declared set. The
-        device does NOT decode any of this; it is the synthetic CAR."""
+        device does NOT decode any of this; it is the synthetic CAR.
+
+        `masks` is the answering ECU's own supported-PID windows, and is
+        required for the MASK PIDs. 0x20 and 0x40 are inside 0x01..0x60 and
+        the probe's union claims them, so a client may poll them like any
+        other PID -- and their answer is four bytes, and is DIFFERENT PER
+        ECU. The filler below returned one byte for both, identical from
+        every ECU, which made a grouped `(0x20, 0x40)` decode as 0x20 with
+        four bytes of data taken from its neighbour: a plausible wrong value
+        of exactly the kind SPEC.md 1.1 exists to prevent, and the reason
+        this is a parameter rather than a lookup.
+        """
+        if masks is not None and pid in (0x00, 0x20, 0x40):
+            # 0x00 -> window 0, 0x20 -> 1, 0x40 -> 2. NOT `_mask_has`'s
+            # divmod(pid - 1, 32): that maps a PID to the window CONTAINING
+            # it, and a mask PID names the window it DESCRIBES, which is the
+            # next one up. The two disagree for exactly these three values.
+            return _j1979_mask_bytes(masks[pid // 32])
         if pid == 0x04:            # engine load, A*100/255
             return bytes([round(st["throttle"] * 255 / 100)])
         if pid == 0x05:            # coolant temperature, A-40
@@ -1100,29 +1230,150 @@ class VtpDevice:
             return bytes([35 + 40])
         if pid == 0x11:            # throttle position, A*100/255
             return bytes([round(st["throttle"] * 255 / 100)])
+        # The two-byte PIDs matter to grouping and not to decoding: a group's
+        # answer must fit seven bytes (SPEC.md 15.4.1), so a car that returned
+        # one byte for every PID it does not model would let a client pack
+        # groups no real car would answer in a single frame, and the rate
+        # measured against it would be a number no vehicle produces.
+        if pid == 0x10:            # MAF, (256A+B)/100 g/s
+            q = min(0xFFFF, round(st["throttle"] * 45))
+            return bytes([(q >> 8) & 0xFF, q & 0xFF])
+        if pid == 0x1F:            # run time since start, 256A+B seconds
+            return bytes([0x00, 0x96])
+        if pid == 0x42:            # control module voltage, (256A+B)/1000 V
+            return bytes([0x36, 0xB0])
+        if pid == 0x43:            # absolute load, (256A+B)*100/255
+            q = min(0xFFFF, round(st["throttle"] * 2.55))
+            return bytes([(q >> 8) & 0xFF, q & 0xFF])
         return bytes([pid ^ 0x55])
 
     @staticmethod
-    def _obd_response_frame(pid, data):
-        """An ISO 15765-4 single frame: PCI length, `41`, the PID, the data,
-        padded to DLC 8. Self-describing, which is why no client-side
-        request/response state exists anywhere (SPEC.md 15.5)."""
-        body = bytes([2 + len(data), 0x41, pid]) + data
+    def _obd_mode01_frame(body):
+        """The car's answer to one Mode 01 request, `body` being the
+        concatenated `pid`+`data` pairs.
+
+        A single frame carries seven data bytes; one is the `41` echo, so
+        six bytes of pairs fit and a seventh does not. Past that the car
+        answers with an ISO-TP FIRST FRAME, which is what makes the failure
+        mode of a badly sized group real rather than theoretical: SPEC.md
+        15.5 says such a frame is ordinary -- forwarded if subscribed,
+        otherwise dropped -- and the transfer it opens dies unanswered,
+        because SPEC.md 15.1 forbids this device the flow control that would
+        continue it. No consecutive frames are ever queued here, and that is
+        the point: the client sees one useless frame and regroups.
+        """
+        if 1 + len(body) <= 7:
+            frame = bytes([1 + len(body), 0x41]) + body
+            return frame + b"\x00" * (8 - len(frame))
+        total = 1 + len(body)
+        return bytes([0x10 | (total >> 8), total & 0xFF, 0x41]) + body[:5]
+
+    @classmethod
+    def _obd_response_frame(cls, pid, data):
+        """The single-PID case, kept for the probe (SPEC.md 15.2), whose mask
+        requests are never grouped."""
+        return cls._obd_mode01_frame(bytes([pid]) + data)
+
+    @staticmethod
+    def _obd_request_frame(group):
+        """SPEC.md 15.1 -- the request this device puts on the bus.
+
+        `[1+g, 0x01, p1..pg]` and padding, to DLC 8. This is the whole of why
+        grouping does not move SPEC.md 15.1's bus bound: a six-PID request
+        occupies exactly the eight bytes a one-PID request occupies, so the
+        worst case stays one short frame per obd_min_interval_ms. That claim
+        is load-bearing enough to be BUILT rather than asserted in prose --
+        `_obd_transmit` answers what this frame says and not what its caller
+        meant, so a builder that got the PCI or the padding wrong would show
+        up as wrong responses in every OBD test rather than as a comment
+        nobody can check.
+        """
+        body = bytes([1 + len(group), 0x01]) + bytes(group)
+        if len(body) > 8:
+            # Unreachable through the control plane: SPEC.md 15.4.1 rule 6
+            # refuses a group of seven before it is ever installed. Raised
+            # rather than truncated because a request frame that does not fit
+            # a classic CAN frame is not a frame to put on a car.
+            raise ValueError(f"group of {len(group)} exceeds the request frame")
         return body + b"\x00" * (8 - len(body))
 
-    def _obd_transmit(self, pid, now):
+    @staticmethod
+    def _obd_request_pids(frame):
+        """The PIDs a request frame names, read back off the bus.
+
+        The car answers what it heard. Going through the frame rather than
+        the caller's list is what makes _obd_request_frame testable at all:
+        a wrong PCI length silently changes which PIDs the ECUs see.
+        """
+        return tuple(frame[2:1 + frame[0]])
+
+    def _obd_transmit(self, group, now):
         """One Mode 01 request on the synthetic bus, and what answers it.
+
+        `group` is one or more PIDs (SPEC.md 15.4.1) and goes out as ONE
+        request frame, built by `_obd_request_frame` and read back by the car
+        exactly as an ECU would read it.
 
         The REQUEST frame never reaches `_obd_rx`: the CAN stream carries
         what the device hears, never what it says (SPEC.md 15.5). Every ECU
-        whose own masks cover the PID answers -- functional addressing asks
-        the car, not an ECU."""
+        whose own masks cover ANY PID in the group answers -- functional
+        addressing asks the car, not an ECU -- and each answers with the
+        subset it implements, which is why a client sizing a group against
+        "one ECU answers everything" is sizing conservatively.
+        """
         st = self.circuit.at(now / 1e6)
+        asked = self._obd_request_pids(self._obd_request_frame(group))
         for ecu_id in sorted(self.OBD_ECUS):
-            if not self._mask_has(self.OBD_ECUS[ecu_id], pid):
+            masks = self.OBD_ECUS[ecu_id]
+            body = b"".join(bytes([pid]) + self._obd_pid_data(pid, st, masks)
+                            for pid in asked if self._mask_has(masks, pid))
+            if not body:
+                # An ECU implementing none of the group says nothing. Real
+                # ECUs vary here -- some refuse a group they support only
+                # partly -- which is a car behaviour, not a device one, and
+                # the reason SPEC.md 15.4.1 tells a client to learn per-ECU
+                # attribution by polling singly first.
                 continue
-            self._obd_rx.append(
-                (now, ecu_id, self._obd_response_frame(pid, self._obd_pid_data(pid, st))))
+            self._obd_rx.append((now + self.obd_latency_us, ecu_id,
+                                 self._obd_mode01_frame(body)))
+
+    def _obd_next_group(self, now):
+        """SPEC.md 15.4.2 -- the next group due, or None if none is.
+
+        Each group carries its own minimum interval, so "due" is a question
+        about that group's own last transmission and not about a pass counter.
+        A ratio could not express what a client actually wants: under response
+        pacing the cycle time is set by the car, so `one pass in five` is a
+        different rate on every vehicle and drifts within a session. An
+        interval holds its rate whatever the car does.
+
+        Returns `(entry, group)`; the caller stamps the entry. Bounded
+        by the schedule length, so a moment when nothing is due returns None
+        rather than spinning.
+        """
+        for _ in range(len(self._obd_poll)):
+            entry = self._obd_poll[self._obd_index % len(self._obd_poll)]
+            self._obd_index += 1
+            group, min_ms, last = entry
+            if min_ms == 0 or last is None or now - last >= min_ms * 1000:
+                return entry, group
+        return None
+
+    @staticmethod
+    def _obd_echoed_pid(payload):
+        """The PID a Mode 01 response frame answers for, or None.
+
+        Single frame: `[pci, 0x41, pid, ...]`. ISO-TP first frame, which is
+        how an oversized group is answered (SPEC.md 15.4.1):
+        `[0x1L, LL, 0x41, pid, ...]`. Anything else -- a consecutive frame,
+        another tester's transfer, a negative response -- answers for nothing
+        this device asked.
+        """
+        if len(payload) >= 3 and payload[0] >> 4 == 0 and payload[1] == 0x41:
+            return payload[2]
+        if len(payload) >= 4 and payload[0] >> 4 == 1 and payload[2] == 0x41:
+            return payload[3]
+        return None
 
     def _obd_fallback_delivers(self, cid):
         """SPEC.md 15.5 -- the one delivery rule beside the table: while the
@@ -1150,6 +1401,9 @@ class VtpDevice:
             if t > now:
                 hold.append((t, cid, payload))
                 continue
+            if cid in self._obd_ecu_ids and \
+                    self._obd_echoed_pid(payload) in self._obd_outstanding_pids:
+                self._obd_answers += 1
             sub = self._governing(cid)
             if sub is None:
                 if self._obd_fallback_delivers(cid):
@@ -1192,7 +1446,10 @@ class VtpDevice:
         # verified against, so the set clears first, flushing what it had
         # already accepted (§15.7).
         self._obd_stop(flush=True)
-        step_us = max(50, OBD_MIN_INTERVAL_MS) * 1000
+        # SPEC.md 15.2 -- the probe stays clock-paced: it has its own
+        # fallback-addressing logic, runs once, and has no schedule to
+        # pace against. 50 ms is a collection window, not a rate bound.
+        step_us = 50_000
         t = now
         if self._obd_last_tx_us is not None:
             t = max(t, self._obd_last_tx_us + step_us)
@@ -1501,45 +1758,103 @@ class VtpDevice:
 
         if opcode == OBD_POLL_SET:
             # SPEC.md 15.4 -- refusals in the stated order: shape, capacity,
-            # the empty-set stop, the interval floor, then the PIDs. A
+            # the empty-set stop, then the PIDs and the group bounds. A
             # refused request leaves the installed poll set unchanged.
             if len(params) < 3:
                 return reply(ST_BAD_PARAMS)
             interval_ms, count = struct.unpack("<HB", params[:3])
-            pids = params[3:]
-            if len(pids) != count:
-                return reply(ST_BAD_PARAMS)
-            # Capacity second: the answer is a fact the client could have
-            # read in Info, which is §9.6's argument for a typed refusal.
-            if count > OBD_POLL_SLOTS:
-                return reply(ST_TABLE_FULL)
+            body = params[3:]
+            # SPEC.md 15.4 -- shape first, capacity second. Checking capacity
+            # ahead of the parse answered `table_full` to a payload that was
+            # malformed as well as oversized (count 17 with an empty body),
+            # naming a capacity the request never actually reached. Rule 1 is
+            # the parse, and the parse of an empty body is what rejects it.
             if count == 0:
                 # The stop. Accepted whatever the probe state, and its
                 # interval MUST be 0 -- there is no schedule for it to pace.
                 # flush=True: frames already accepted while polling are
                 # delivered now rather than stranded until some later
-                # subscription surfaces them with a stale t_base (§15.7).
-                if interval_ms != 0:
+                # subscription surfaces them with a stale t_base (SPEC.md 15.7).
+                if interval_ms != 0 or body:
                     return reply(ST_BAD_PARAMS)
                 self._obd_stop(flush=True)
                 return reply(ST_OK)
-            # SPEC.md 15.4 -- zero is NOT "no limit" here: the device would
-            # be generating unbounded traffic, not filtering existing
-            # traffic, so the floor applies and covers zero.
-            if interval_ms < OBD_MIN_INTERVAL_MS:
+
+            # SPEC.md 15.4.1 -- one pass: PID bytes until one without `more`,
+            # then that group's divisor byte. The parse is its own length
+            # check, which is why rule 1 is "the payload the parse does not
+            # consume exactly" rather than an arithmetic on `count`: the
+            # number of groups is not known until the walk finds them.
+            groups, run, i = [], [], 0
+            while i < len(body):
+                byte = body[i]
+                i += 1
+                run.append(byte & ~OBD_PID_MORE)
+                if byte & OBD_PID_MORE:
+                    continue
+                if i + 2 > len(body):
+                    return reply(ST_BAD_PARAMS)   # group with no interval
+                groups.append((tuple(run),
+                               int.from_bytes(body[i:i + 2], "little")))
+                run, i = [], i + 2
+            if run:
+                # SPEC.md 15.4.1 -- bit 7 left set on the last byte: a group
+                # that continues into nothing is not a schedule.
                 return reply(ST_BAD_PARAMS)
-            # SPEC.md 15.4 -- pollable means declared supported by the most
-            # recent probe of this connection. With no probe, nothing is,
+            if sum(len(g) for g, _ in groups) != count:
+                return reply(ST_BAD_PARAMS)
+            # SPEC.md 15.4 rule 2 -- the capacity was in Info, so the answer
+            # is a fact the client could have read, which is 9.6's argument
+            # for a typed refusal. Reached only once the shape is known good.
+            if count > OBD_POLL_SLOTS:
+                return reply(ST_TABLE_FULL)
+
+            # SPEC.md 15.4 rule 4 -- pollable means declared supported by the
+            # most recent probe of this connection. With no probe, nothing is,
             # which is what makes declare-verify-use structural.
-            if any(not self._obd_pid_supported(pid) for pid in pids):
+            if any(not self._obd_pid_supported(pid)
+                   for group, _ in groups for pid in group):
                 return reply(ST_BAD_PARAMS)
+            # SPEC.md 15.4 rule 5 -- seven PIDs do not fit the request frame.
+            # A minimum of 0 is legal and means "every pass", so there is no
+            # zero case here: unlike a divisor, a floor of zero subtracts
+            # nothing rather than naming a group that never transmits.
+            if any(len(group) > OBD_MAX_GROUP for group, _ in groups):
+                return reply(ST_BAD_PARAMS)
+
             # The schedule is NOT reset: spacing is measured from the last
-            # transmission (§15.1), so a replacement mid-interval waits out
-            # the remainder instead of transmitting immediately, and a first
-            # set transmits at the next poll() tick.
-            self._obd_poll = list(pids)
+            # transmission (SPEC.md 15.1), so a replacement mid-interval waits
+            # out the remainder instead of transmitting immediately.
+            #
+            # SPEC.md 15.4 -- and neither is the CURSOR or the per-group
+            # timers, for any group the new schedule names again. Rebuilding
+            # both from scratch made re-issuing a poll set -- ordinary client
+            # behaviour, since it is the only way to change a PID -- silently
+            # destructive twice over. Resetting the cursor meant a client
+            # replacing its set faster than the schedule cycles never reached
+            # the tail of its own list: six groups re-issued every 40 ms on a
+            # 20 ms car left four of them at exactly 0 Hz, indistinguishable
+            # from PIDs the car does not implement, which SPEC.md 15.4 makes
+            # legal. Resetting `last` restarted every minimum interval: a
+            # group asking for 0.1 Hz ran at 9.8 Hz when the set was
+            # reinstalled every 100 ms, which is diagnostic traffic on a live
+            # bus that the client explicitly declined.
+            # Per OCCURRENCE, not per group: SPEC.md 15.4 lets a schedule
+            # name the same group twice, and a dict collapsed the duplicates
+            # onto one timestamp, so reinstalling an identical repeated
+            # schedule moved its occurrences around -- delaying one and
+            # letting another transmit sooner than its own minimum. A queue
+            # per group hands the occurrences back in the order they appear,
+            # which makes replacing a set with itself exactly idempotent.
+            carried = {}
+            for group, _m, last in self._obd_poll:
+                carried.setdefault(group, []).append(last)
+            fresh = []
+            for g, m in groups:
+                queue = carried.get(g)
+                fresh.append([g, m, queue.pop(0) if queue else None])
+            self._obd_poll = fresh
             self._obd_interval_ms = interval_ms
-            self._obd_index = 0
             return reply(ST_OK)
 
         if opcode == MONITOR_LIST:

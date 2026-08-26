@@ -107,7 +107,9 @@ CAUGHT_BY = {
     "obd_reserved_nonzero": "obd.reserved",
     "obd_capacity_zero": "obd.capacities",
     "obd_accepts_unsupported_pid": "obd.poll_refusals",
-    "obd_accepts_zero_interval": "obd.poll_refusals",
+    "obd_accepts_bad_group": "obd.grouping_refusals",
+    "obd_splits_groups": "obd.grouping_is_one_request",
+    "obd_ignores_group_minimum": "obd.group_minimum_is_honoured",
     "obd_ignores_stop": "obd.poll_and_flag",
     "obd_reset_keeps_polling": "obd.reset_stops",
     "obd_polls_before_probe": "obd.poll_before_probe",
@@ -213,6 +215,7 @@ NEEDS_RECONNECT = {"subs_survive_reconnect", "seq_survives_reconnect"}
 PARTIAL = "gps+imu+control"
 NEEDS_PARTIAL = {"inert_cccd_rejected", "opcode_capability_late"}
 
+
 #: Faults whose rule needs a profile of their own. §4.1's inert-Control rule
 #: only exists on a device that has not declared Control at all, which PARTIAL
 #: does, so it gets a profile that does not.
@@ -232,7 +235,7 @@ def capabilities(profile):
     import vtp_device
     bits = {"gps": vtp_device.CAP_GPS, "can": vtp_device.CAP_CAN,
             "imu": vtp_device.CAP_IMU, "monitor": vtp_device.CAP_MONITOR,
-            "control": vtp_device.CAP_CONTROL}
+            "control": vtp_device.CAP_CONTROL, "obd": vtp_device.CAP_OBD}
     word = 0
     for name in profile.split("+"):
         word |= bits[name]
@@ -346,9 +349,6 @@ def _coverage_problems():
 #: matching, a refusal newly read as "not applicable" -- looks exactly like a
 #: passing run. This is the baseline that makes that visible.
 EXPECTED_SKIPS = {
-    "info.reserved_fields":
-        "Info has no reserved fields in this version; the check revives "
-        "when a later minor reserves a byte",
     "control.opcode_capability":
         "this profile owns every opcode in this version",
     "gatt.inert_cccd":

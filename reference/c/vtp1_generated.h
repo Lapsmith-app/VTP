@@ -28,7 +28,7 @@
 #define VTP_INFO_OFF_IMU_MAX_RATE_HZ 18
 #define VTP_INFO_OFF_OBD_POLL_SLOTS 20
 #define VTP_INFO_OFF_CLOCK_FLAGS 21
-#define VTP_INFO_OFF_OBD_MIN_INTERVAL_MS 22
+#define VTP_INFO_OFF_RESERVED_22 22
 
 /* One complete position solution. Never split, never paired, never packed. */
 #define VTP_GPS_FIX_SIZE 74
@@ -323,16 +323,14 @@ typedef struct { uint32_t bit; uint8_t offset, size; const char *field; } vtp_ca
     { (1u << 2), 16, 2, "imu_rate_hz" }, \
     { (1u << 2), 18, 2, "imu_max_rate_hz" }, \
     { (1u << 10), 20, 1, "obd_poll_slots" }, \
-    { (1u << 10), 22, 2, "obd_min_interval_ms" }, \
 }
-#define VTP_CAPACITY_RULE_COUNT 8
+#define VTP_CAPACITY_RULE_COUNT 7
 
 /* SPEC.md 15 -- capacities that MUST be NON-zero while their
  * bit is SET. Same row type as VTP_CAPACITY_RULES. */
 #define VTP_CAPACITY_REQUIRED_RULES { \
     { (1u << 10), 20, 1, "obd_poll_slots" }, \
-    { (1u << 10), 22, 2, "obd_min_interval_ms" }, \
 }
-#define VTP_CAPACITY_REQUIRED_RULE_COUNT 2
+#define VTP_CAPACITY_REQUIRED_RULE_COUNT 1
 
 #endif /* VTP1_GENERATED_H */

@@ -403,7 +403,6 @@ static void do_info(const jctx *c, const jv *in) {
     v.imu_max_rate_hz        = (uint16_t)jint(c, in, "imu_max_rate_hz");
     v.obd_poll_slots         = (uint8_t) jint(c, in, "obd_poll_slots");
     v.clock_flags            = (uint8_t) jint(c, in, "clock_flags");
-    v.obd_min_interval_ms    = (uint16_t)jint(c, in, "obd_min_interval_ms");
     encoded(vtp_encode_info(&v, out, sizeof out), out);
 }
 
