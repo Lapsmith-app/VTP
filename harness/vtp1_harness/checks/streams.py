@@ -570,13 +570,30 @@ async def _restore_observation_table(s):
             await c.subscribe_can(can_id, mask=mask)
 
 
-#: ISO 15765-4's diagnostic response range. Traffic here exists only while a
-#: poll set is installed (SPEC.md 15.4), and every governing check below opens
-#: with CAN_RESET -- which clears the poll set along with the table (SPEC.md
-#: 15.7). Choosing one of these as the target measured a baseline of zero and
-#: skipped, reporting "too little traffic" about an identifier the check had
-#: just silenced itself. Broadcast traffic does not stop when the table does.
-_DIAGNOSTIC_IDS = range(0x7E8, 0x7F0)
+#: ISO 15765-4's 11-bit diagnostic response range, used only when no probe
+#: result is available to say what this car actually answers on.
+_DIAGNOSTIC_IDS_11BIT = range(0x7E8, 0x7F0)
+
+
+def _diagnostic_ids(s):
+    """Identifiers whose traffic exists only while a poll set is installed.
+
+    Taken from the probe when there is one (SPEC.md 15.2 reports the response
+    identifiers this car uses, whichever addressing it answered on) and from
+    the 11-bit range otherwise. A hardcoded range covered 11-bit addressing
+    only, so on a 29-bit car -- `0x18DAF1xx`, which SPEC.md 15.2 supports and
+    the peripheral's own selftest exercises -- the exclusion missed and the
+    defect it exists to prevent came back.
+
+    Masked to bits 0-28 because that is what a decoded `can_record` carries;
+    the probe's ids hold the format bit in bit 29 and comparing across that
+    split never matches.
+    """
+    probe = s.state.get("obd_probe")
+    if probe is None:
+        return set(_DIAGNOSTIC_IDS_11BIT)
+    return {e["id"] & 0x1FFFFFFF for e in probe.get("ecus", ())} \
+        or set(_DIAGNOSTIC_IDS_11BIT)
 
 
 def _busiest_id(s):
@@ -585,8 +602,13 @@ def _busiest_id(s):
     for _, batch in good:
         for r in batch["records"]:
             counts[r["id"]] = counts.get(r["id"], 0) + 1
-    broadcast = {cid: n for cid, n in counts.items()
-                 if cid not in _DIAGNOSTIC_IDS}
+    # Every governing check below opens with CAN_RESET, which clears the poll
+    # set along with the table (SPEC.md 15.7). Choosing a diagnostic response
+    # identifier as the target measured a baseline of zero and skipped,
+    # reporting "too little traffic" about an identifier the check had just
+    # silenced itself. Broadcast traffic does not stop when the table does.
+    diagnostic = _diagnostic_ids(s)
+    broadcast = {cid: n for cid, n in counts.items() if cid not in diagnostic}
     if not broadcast:
         raise Skip("no broadcast CAN frame was observed, so there is no "
                    "identifier that survives the CAN_RESET this check opens "

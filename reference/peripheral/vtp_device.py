@@ -1733,9 +1733,24 @@ class VtpDevice:
             # The schedule is NOT reset: spacing is measured from the last
             # transmission (SPEC.md 15.1), so a replacement mid-interval waits
             # out the remainder instead of transmitting immediately.
-            self._obd_poll = [[g, m, None] for g, m in groups]
+            #
+            # SPEC.md 15.4 -- and neither is the CURSOR or the per-group
+            # timers, for any group the new schedule names again. Rebuilding
+            # both from scratch made re-issuing a poll set -- ordinary client
+            # behaviour, since it is the only way to change a PID -- silently
+            # destructive twice over. Resetting the cursor meant a client
+            # replacing its set faster than the schedule cycles never reached
+            # the tail of its own list: six groups re-issued every 40 ms on a
+            # 20 ms car left four of them at exactly 0 Hz, indistinguishable
+            # from PIDs the car does not implement, which SPEC.md 15.4 makes
+            # legal. Resetting `last` restarted every minimum interval: a
+            # group asking for 0.1 Hz ran at 9.8 Hz when the set was
+            # reinstalled every 100 ms, which is diagnostic traffic on a live
+            # bus that the client explicitly declined.
+            carried = {group: last for group, _m, last in self._obd_poll
+                       if last is not None}
+            self._obd_poll = [[g, m, carried.get(g)] for g, m in groups]
             self._obd_interval_ms = interval_ms
-            self._obd_index = 0
             return reply(ST_OK)
 
         if opcode == MONITOR_LIST:

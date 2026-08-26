@@ -1645,6 +1645,67 @@ def main():
     check(poll_set(0x7C, 25, 0x0C)[2] == dev.ST_OK,
           "an unlimited set must reinstall after a rate-limited one")
 
+    # SPEC.md 15.4 -- re-issuing a poll set is the only way to change a PID,
+    # so a client does it routinely, and a replacement must not quietly undo
+    # the schedule's own state. Both halves were live defects: the cursor
+    # reset starved the tail of a set replaced faster than it cycles, and the
+    # per-group timers restarted, so reinstalling defeated a rate limit.
+    def replaced_rates(reinstall_ms, seconds=3.0):
+        clk = [0]
+        c = dev.VtpDevice(now_us=lambda: clk[0], mtu=247, gps_hz=0, imu_hz=0,
+                          obd_latency_us=20_000)
+        c.on_connect()
+        c.handle_control(bytes([dev.OBD_INFO, 0x01]))
+        for _ in range(400):
+            clk[0] += 5_000
+            if c.due_control_response() is not None:
+                break
+        body = (bytes([0x0C]) + struct.pack("<H", 0)
+                + bytes([0x0D]) + struct.pack("<H", 0)
+                + bytes([0x04]) + struct.pack("<H", 0)
+                + bytes([0x11]) + struct.pack("<H", 2000))
+        req = (bytes([dev.OBD_POLL_SET, 0x02])
+               + struct.pack("<HB", 0, 4) + body)
+        c.handle_control(req)
+        last, seen = clk[0], set()
+        for _ in range(int(seconds * 200)):
+            clk[0] += 5_000
+            if reinstall_ms and clk[0] - last >= reinstall_ms * 1000:
+                c.handle_control(req)
+                last = clk[0]
+            for ch, payload in c.poll():
+                if ch != "can":
+                    continue
+                b = decode("can", c.stamp_seq(ch, payload))
+                c.commit_seq(ch)
+                if b is None:
+                    continue
+                for rec in b["records"]:
+                    f = bytes.fromhex(rec["payload"])
+                    if len(f) > 2 and f[1] == 0x41:
+                        seen.add((f[2], rec["t_device_us"]))
+        out = {}
+        for pid, _t in seen:
+            out[pid] = out.get(pid, 0) + 1
+        return {pid: out.get(pid, 0) / seconds for pid in (0x0C, 0x0D, 0x04, 0x11)}
+
+    steady = replaced_rates(0)
+    churned = replaced_rates(40)
+    check(min(steady.values()) > 0,
+          "the control run must poll every group at least once")
+    check(all(churned[pid] > 0 for pid in (0x0C, 0x0D, 0x04)),
+          f"a poll set replaced every 40 ms MUST still reach the tail of its "
+          f"own schedule; got {churned} against {steady}. Resetting the "
+          f"cursor starves the last groups, and SPEC.md 15.4 makes an "
+          f"unanswered PID legal, so the client cannot tell")
+    check(churned[0x11] <= steady[0x11] * 2 + 0.5,
+          f"a 2000 ms minimum MUST survive a replacement: reinstalling drove "
+          f"it to {churned[0x11]} Hz against {steady[0x11]} Hz steady. A rate "
+          f"limit a client can defeat by re-issuing its own set is traffic on "
+          f"a live bus that the client declined (SPEC.md 15.4.2)")
+    check(poll_set(0x7D, 25, 0x0C)[2] == dev.ST_OK,
+          "a plain set must reinstall after the replacement checks")
+
     # SPEC.md 15.7 -- the empty set stops the transmitter, and the polling
     # flag's falling edge is on the wire: a batch flushed after the stop
     # carries it clear.

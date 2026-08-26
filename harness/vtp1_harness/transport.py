@@ -766,12 +766,20 @@ class LoopbackTransport(Transport):
                 malformed = True
 
             def emit(gs):
-                out = bytearray()
+                # `count` is rewritten with the body. Leaving the original in
+                # place made this fault inert on the two rules it names: a
+                # seven-PID group re-emitted as six against count=7, and a
+                # trailing-`more` schedule as one PID against count=2, were
+                # both refused by the parser's count check exactly as an
+                # unfaulted device refuses them -- so the fault was only ever
+                # caught by a sibling assertion in the same check.
+                out, n = bytearray(), 0
                 for pids_, min_ms in gs:
                     for j, pid in enumerate(pids_):
                         out.append(pid | (MORE if j < len(pids_) - 1 else 0))
+                        n += 1
                     out += struct.pack("<H", min_ms)
-                return head + bytes(out)
+                return head[:-1] + bytes([n]) + bytes(out)
 
             if malformed:
                 # A schedule the device would refuse: hand it a legal one so

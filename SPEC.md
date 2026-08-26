@@ -2346,6 +2346,17 @@ Refusals, checked in this order after the §9 capability gate:
    a floor of zero subtracts nothing rather than naming a group that never
    transmits.
 
+A replacement **preserves the cursor, and preserves each group's last
+transmission for any group the new schedule names again** — a group is the
+same group if it names the same PIDs in the same order. Neither is reset,
+for the same reason the transmission spacing is not: re-issuing a poll set is
+the only way to change a PID, so a client does it routinely, and a device
+that started the schedule over each time would starve the tail of a set
+replaced faster than it cycles, while one that restarted the minimum
+intervals of §15.4.2 would let a client defeat its own rate limits by
+reinstalling. Groups the new schedule does not name lose their history with
+the set that held them.
+
 A refused request MUST leave the installed poll set unchanged. The opcode
 is idempotent — replacing a set with itself is the same set — which is its
 §9.4 retry-safety. The change takes effect promptly: after an `ok`, at most

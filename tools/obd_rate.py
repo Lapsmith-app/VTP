@@ -69,7 +69,13 @@ def verify_table(car, now_s=0.0):
             wrong.append(f"PID {pid:02X} is polled but has no size in "
                          f"PID_RESPONSE_BYTES")
             continue
-        actual = 1 + len(car._obd_pid_data(pid, st))
+        # The answering ECU's masks, because `_obd_pid_data` returns the
+        # four-byte answer for 0x00/0x20/0x40 only when it has them -- and
+        # those PIDs are pollable. Without this the guard reads the one-byte
+        # filler, reports agreement, and lets classify() walk the frame with
+        # the wrong stride: the exact failure the guard exists to prevent.
+        masks = car.OBD_ECUS[min(car.OBD_ECUS)]
+        actual = 1 + len(car._obd_pid_data(pid, st, masks))
         if actual != PID_RESPONSE_BYTES[pid]:
             wrong.append(f"PID {pid:02X}: the table says {PID_RESPONSE_BYTES[pid]} "
                          f"response bytes, the car emits {actual}")
