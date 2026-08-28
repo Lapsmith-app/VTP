@@ -38,12 +38,17 @@ with a new `--encrypt` mode) when nothing changed. If in doubt, stop the old
 instance first.
 
 **`--encrypt none` is deliberate here**, and differs from `serve.py`'s own
-default of `all` (everything except Info). A Mac hosting the peripheral for an
-iPhone on the same iCloud account hits a macOS stack fault that leaves the link
-unusable — see [When the client can see `VTP` but cannot
-connect](#when-the-client-can-see-vtp-but-cannot-connect). Drop the flag to
-exercise the real postures (`--encrypt all|control|none`), but expect that
-fault, and prefer a Linux host for posture work.
+default of `all` (everything except Info). It drops the only demand for an
+encrypted link this peripheral makes, which leaves one thing that can fail to
+produce a key on a Mac hosting for an iPhone on the same iCloud account instead
+of two. It does **not** fix the fault that costs you the link there — that
+expectation is the central's, not our GATT permissions', and connecting fails
+under `--encrypt none` too. See [When the client can see `VTP` but cannot
+connect](#when-the-client-can-see-vtp-but-cannot-connect) for what does fix it.
+
+So keep the flag while you are working on something else, and drop it to
+exercise the real postures (`--encrypt all|control|none`) — which is the only
+way to test a client against them, and is work to do on a Linux host.
 
 The synthetic bus runs at 80 frames/s by default, which is gentle — a real
 500 kbit/s bus carries thousands. `--can-scale FACTOR` multiplies every channel
@@ -102,8 +107,8 @@ rather than re-pairing. The link stays up and unusable.
 Deleting the MacBook from the iPhone's Bluetooth list clears it, but iCloud
 re-pairs within seconds, so it returns. There is no `VTP` entry on the iPhone to
 forget — the peripheral has no identity of its own. No `serve.py` flag affects
-any of this: it fails under `--encrypt none` too, which is why that posture is
-only a partial mitigation. The durable fix is a host with no Apple-ecosystem
+any of this: it fails under `--encrypt none` too, so the flag above narrows
+what can go wrong without fixing this. The durable fix is a host with no Apple-ecosystem
 relationship to the client — the Linux path above needs no bundle, no signing
 and no permission prompt, and `bluetoothctl` gives deterministic bond control.
 
