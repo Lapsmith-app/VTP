@@ -1453,7 +1453,7 @@ class VtpDevice:
         probe, so the transport polls this from its pump and delivers what
         comes back; the state changes (the cleared poll set, the replaced
         probe result) took effect when the request was applied, exactly as
-        SPEC.md 9.6 orders them, and only the indication waits.
+        SPEC.md 9.4 orders them, and only the indication waits.
         """
         if self._obd_pending_info is None:
             return None
@@ -1528,7 +1528,7 @@ class VtpDevice:
         if opcode == CAN_RESET:
             # Parameterless. It used to clear the table regardless of what
             # followed the tag, so a malformed request still took effect --
-            # exactly what §9.6 forbids for a request a device cannot answer,
+            # exactly what §9.4 forbids for a request a device cannot answer,
             # applied to one it should not have answered at all.
             if params:
                 return reply(ST_BAD_PARAMS)
@@ -1703,7 +1703,7 @@ class VtpDevice:
         if opcode == OBD_INFO:
             # SPEC.md 15.2 -- parameterless; probes afresh on every request,
             # and the response is sent only when the probe is complete: the
-            # probe runs NOW (the set clears, the result replaces -- 9.6's
+            # probe runs NOW (the set clears, the result replaces -- 9.4's
             # apply-then-answer order), the reply is held until `done_us`.
             if params:
                 return reply(ST_BAD_PARAMS)
@@ -1759,7 +1759,7 @@ class VtpDevice:
             if sum(len(g) for g, _ in groups) != count:
                 return reply(ST_BAD_PARAMS)
             # SPEC.md 15.4 rule 2 -- the capacity was in Info, so the answer
-            # is a fact the client could have read, which is 9.6's argument
+            # is a fact the client could have read, which is 9.4's argument
             # for a typed refusal. Reached only once the shape is known good.
             if count > OBD_POLL_SLOTS:
                 return reply(ST_TABLE_FULL)

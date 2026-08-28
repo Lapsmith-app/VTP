@@ -253,7 +253,7 @@ def main():
           f"every matching identifier keeps its own mode state")
 
     # ---- The request lifecycle ------------------------------------------
-    # SPEC.md §9.6 — admission is decided before dispatch, so these are the
+    # SPEC.md §9.4 — admission is decided before dispatch, so these are the
     # rules that stop a device applying a request it cannot answer. Exercised
     # against the transport's queue directly: it holds no Bluetooth state
     # precisely so that this is testable without a radio.
@@ -267,7 +267,7 @@ def main():
 
     # A client that pipelines anyway. It gets `busy` -- which is why the status
     # survived the removal of the queue it used to describe: the alternatives
-    # are silence and applying a request the device cannot answer, and §9.6
+    # are silence and applying a request the device cannot answer, and §9.4
     # forbids both.
     check(q.admit(8) == "busy",
           "a second request written before the first was answered MUST be "
@@ -281,14 +281,35 @@ def main():
           f"the busy refusal must be queued behind the response it was "
           f"refused for, not dropped; queue holds {len(q)}")
 
+    # SPEC.md §9 -- the case that settled the verb. The first response has now
+    # reached the client and the refusal has NOT, so a device tracking what it
+    # owes as a flag would read itself free and apply the next request. It owes
+    # the refusal, so the next request is refused too.
+    q.delivered()
+    check(len(q) == 1,
+          f"delivering the first response must leave the refusal owed; queue "
+          f"holds {len(q)}")
+    check(q.admit(9) == "busy",
+          "a request written while an undelivered busy refusal is still owed "
+          "MUST be refused: owing ends at the confirmation, not the send")
+    q.hold(9, bytes([0x02, 9, 5]))
+
+    # ...and the holding is bounded. §9 asks for two -- the response and one
+    # refusal -- and lets a device discard beyond that, so a client that keeps
+    # writing cannot size this queue.
+    check(q.admit(10) == "full",
+          "a third request written while two responses are owed MAY be "
+          "discarded unanswered; §9 bounds what a device has to hold")
+    q.delivered()
+    q.delivered()
+    check(len(q) == 0, "the queue should be empty again")
+
     # SPEC.md §9 — with one request outstanding, tag ambiguity is not
     # prevented, it is impossible: a second request written before the first is
     # answered is refused whatever tag it carries, and one written after cannot
     # collide with anything. There is no duplicate-tag verdict to test, and a
     # device needs no tag table.
-    q.delivered()
-    q.delivered()
-    check(q.admit(9) == "apply", "the queue should be empty again")
+    check(q.admit(9) == "apply", "a drained queue admits again")
     q.hold(9, bytes([0x02, 9, 0]))
     check(q.admit(9) == "busy",
           "a request reusing the outstanding tag is refused for the same "

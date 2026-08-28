@@ -1010,17 +1010,37 @@ Nothing on the control plane is latency-critical: subscriptions are installed
 once at connect, rates change when a user changes them, and `TIME_SYNC`
 measures the round trip it is already waiting for (RATIONALE §8.7).
 
+**A response is owed from the moment its request is accepted until the
+indication carrying it has been confirmed.** Composing it does not discharge
+the obligation and neither does handing it to the transport: the link carries
+one outstanding indication, so a response awaiting confirmation is still
+occupying the only means the device has of answering anything else. The
+confirmation is also the one moment both ends observe (RATIONALE §8.7). A
+response a device has not composed yet is owed too — `OBD_INFO` is answered
+only once its probe completes (§15.2), and the request is outstanding for the
+whole of it.
+
 A device MUST answer `busy` to a request that arrives while it still owes a
 response, and MUST NOT apply it. A client that receives `busy` has broken the
 rule above; it MUST wait for the outstanding response and MAY then retry, and
 MUST NOT treat the request as refused — `busy` says nothing about the request
 itself.
 
+**A `busy` refusal is a response, and is owed like every other.** A device
+that refuses one request while it still owes the answer to another is holding
+two, so what it tracks is a count of the responses it owes and not a flag: a
+flag cleared when the first is confirmed reads as free while the refusal is
+still undelivered, and the next request is applied where it should have been
+refused. A device MUST be able to hold two — the response it owes and one
+refusal — and MAY discard, unanswered and unapplied, a request that arrives
+while it owes both.
+
 A client MUST NOT reuse a `tag` while a request bearing it is outstanding. It
 needs no enforcement: with one request outstanding, a second write is refused
-`busy` whatever tag it carries, so a device keeps no table of tags — it echoes
-the tag and forgets it. A tag becomes reusable as soon as its response has
-been sent.
+`busy` whatever tag it carries, so a device keeps no table of tags — each tag
+rides in the response composed for it and is gone once that response is
+confirmed, and admission consults a count rather than a tag. A tag becomes
+reusable as soon as the response bearing it has arrived.
 
 **`detail` is present if and only if `status` is `ok`.** A refused request is
 answered with exactly three bytes, and a client MUST NOT read the detail of a
@@ -1091,7 +1111,7 @@ remain unassigned in major version 1.
 | 2 | `bad_params` | Parameters malformed or out of range |
 | 3 | `table_full` | No free subscription slot |
 | 4 | `rate_exceeded` | Requested rate is above gps_max_rate_hz or imu_max_rate_hz (SPEC.md 9.6). Never used for CAN |
-| 5 | `busy` | A response is already outstanding; wait for it, then retry (SPEC.md 9) |
+| 5 | `busy` | A response is still owed; wait for it, then retry (SPEC.md 9) |
 | 6 | `needs_encryption` | Allocated, never sent: encryption is enforced by GATT permission (SPEC.md 10) |
 | 7 | `unknown_subscription` | No installed subscription with that id and mask |
 | *other* | *unknown* | MUST decode as unknown, never as a default |
@@ -1177,11 +1197,11 @@ Responses arrive by indication on that characteristic, so a write that precedes
 enablement is a request whose answer has nowhere to go.
 
 **A device MUST NOT apply a request it cannot answer.** If the response cannot
-be delivered — indications not enabled, or a response already outstanding — the
-request MUST NOT take effect, and the device MUST NOT count it as received.
-Deliverability is decided *before* dispatch, not after: a device that applies
-a request whose response is then lost leaves the client no way to find out
-what happened.
+be delivered — indications not enabled, or a response still owed from an
+earlier request — the request MUST NOT take effect, and the device MUST NOT
+count it as received. Deliverability is decided *before* dispatch, not after: a
+device that applies a request whose response is then lost leaves the client no
+way to find out what happened.
 
 **Every opcode in this specification is safe to retry:**
 

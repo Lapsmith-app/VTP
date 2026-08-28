@@ -229,8 +229,14 @@ def _describe_request(value):
 # One slot beyond that still exists, and it is not slack. It carries the `busy`
 # refusal itself: a client that pipelines anyway must be told so, and a device
 # whose only slot is occupied by the response it already owes has nothing left
-# to say that with. §9.6 forbids both alternatives — silence, and applying a
+# to say that with. §9.4 forbids both alternatives — silence, and applying a
 # request it cannot answer.
+#
+# So this queue holds TWO — the response and one refusal — which is what §9
+# requires and also all it requires. The refusal is a response and is owed
+# until confirmed like any other, so a client that keeps writing would keep
+# adding to a queue with no bound; §9 lets a device discard past the second,
+# which `admit` does by answering "full" once depth + 1 are held.
 CONTROL_OUTSTANDING = 1
 CONTROL_QUEUE_DEPTH = CONTROL_OUTSTANDING
 
@@ -238,7 +244,7 @@ CONTROL_QUEUE_DEPTH = CONTROL_OUTSTANDING
 class ControlQueue:
     """Decides whether a control request can be answered, before it is applied.
 
-    SPEC.md §9.6 — a device MUST NOT apply a request it cannot answer. That
+    SPEC.md §9.4 — a device MUST NOT apply a request it cannot answer. That
     makes admission a decision taken *ahead* of dispatch rather than a check on
     the way out, which is the whole point: applying first and answering second
     is the natural order to write the code in, and it is the order that leaves
@@ -272,8 +278,8 @@ class ControlQueue:
         prevented by this class any more, it is structurally impossible -- and
         a device needs no tag table at all.
         """
-        if len(self._out) > self.depth:
-            return "full"
+        if len(self._out) > self.depth:            # depth + 1 held: the
+            return "full"                          # response and one refusal
         if len(self._out) == self.depth:
             return "busy"
         return "apply"
@@ -285,6 +291,18 @@ class ControlQueue:
         return self._out[0][1] if self._out else None
 
     def delivered(self):
+        """One response has reached the client, so it is no longer owed.
+
+        SPEC.md §9 — owing ends at the CONFIRMATION of the indication, not at
+        the send. This peripheral calls this from `update_value` returning
+        True, which under CoreBluetooth means the stack accepted the value for
+        transmission: a peripheral app is never told that a central confirmed
+        an indication, so the confirmation is not observable from here. The
+        window between the two is the one place this reference is weaker than
+        the specification it demonstrates, and it is a limit of the host stack
+        rather than a reading of §9. A device on a stack that surfaces the
+        confirmation MUST decrement there.
+        """
         self._out.popleft()
 
     def discard_all(self):
@@ -548,17 +566,17 @@ class Peripheral:
             return
         opcode, tag = request[0], request[1]
 
-        # SPEC.md §9.6 — everything that could stop this response reaching the
+        # SPEC.md §9.4 — everything that could stop this response reaching the
         # client is decided here, BEFORE the device sees the request.
         subscribed = self._subscribed()
         if subscribed is not None and "control" not in subscribed:
             # No indications enabled: the answer has nowhere to go, so the
             # request MUST NOT take effect. A client that writes before
-            # subscribing is violating §9.6 and would otherwise leave the two
+            # subscribing is violating §9.4 and would otherwise leave the two
             # ends disagreeing about the subscription table.
             self._note_control(request, "discarded: no indication subscriber")
             log.warning("CTRL  %s -> DISCARDED unapplied: the client has not "
-                        "enabled indications on Control (SPEC.md 9.6)",
+                        "enabled indications on Control (SPEC.md 9.4)",
                         _describe_request(request))
             return
 
@@ -577,14 +595,14 @@ class Peripheral:
         if verdict == "busy":
             # SPEC.md §9 — a client has one request outstanding. This one wrote
             # again before its answer arrived, so it is told to wait rather
-            # than having a request applied that cannot be answered (§9.6).
+            # than having a request applied that cannot be answered (§9.4).
             response = bytes([opcode, tag, 5])          # busy
         else:
             response = self.device.handle_control(request, t_rx=t_rx)
             if response is None:
                 return
             if response is dev.RESPONSE_PENDING:
-                # SPEC.md 15.2 -- the request took effect (9.6's order), and
+                # SPEC.md 15.2 -- the request took effect (9.4's order), and
                 # the response is owed once the probe completes. The pump
                 # collects it from due_control_response(); until then this
                 # request holds the one-outstanding slot.

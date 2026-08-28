@@ -721,6 +721,52 @@ exchange, for NTP's reason. The request carries no parameters because an
 earlier draft had it carry the host's UTC milliseconds, which the equations
 could not use and the device could only discard.
 
+**Why owing ends at the confirmation, not the send (SPEC §9).** §9 used three
+words for one idea — a device "owes" a response, a tag is reusable once its
+response has been "sent", a request is refused when one is already
+"outstanding" — and for a single request in flight they agree. They come apart
+the moment a device holds two, which SPEC §9 creates itself: the `busy`
+refusal is a response, so a device answering one request and refusing another
+is holding both. The first implementer outside this repository found it by
+review, on a stack whose queued-request pump runs before the completed
+request's callback, so the refusal is already on its way out at the instant
+the first response's completion runs. A device tracking "outstanding" as one
+flag cleared there reports itself free while it still owes the refusal, and
+applies the next request.
+
+Confirmation wins over send for two reasons. The obligation exists because the
+delivery slot is physically singular — one outstanding indication per bearer —
+and a response awaiting confirmation is still in that slot, so a device that
+discharges on send does not have the free slot it believes it has; it has a
+queue, which is the thing SPEC §9 was written to avoid. And the confirmation
+is an event on the wire that both ends see, where "sent" is a moment only the
+device can name and every stack names differently: handed to the host, on air,
+acknowledged at the link layer. A specification cannot make a MUST out of a
+moment its implementers do not agree on.
+
+The cost is a `busy` a device need not have sent, which costs a client one
+round trip — and only a client that has already broken the one-outstanding
+rule. The cost of the other reading is a request applied while the client
+believes the device is busy, which is the two ends disagreeing about device
+state for the rest of the connection. SPEC §9.4 exists to prevent exactly
+that, so the asymmetry decides it.
+
+What the strict reading does not license is an unbounded queue. A device
+answers `busy` while it owes anything, and that refusal is itself owed, so a
+client pipelining without limit could ask a device to hold without limit.
+SPEC §9 bounds it at two — the response and one refusal — and lets a device
+discard anything further unanswered. A client three requests outside a rule
+it has already broken twice is not going to be rescued by a third answer, and
+the alternative is letting a misbehaving client size a device's RAM.
+
+Two held is not the four-deep queue this section opens by rejecting. What that
+draft cost was a depth to agree on, an ordering guarantee and a refusal to
+hold them together, all so a client could pipeline by design. Nothing here is
+by design: a device holds a second response only to refuse a client that
+already broke the rule, the order is the order they were composed in, and the
+second slot is the refusal — so there is nothing to negotiate and no client
+that benefits from it.
+
 **Why deliverability is decided before dispatch (SPEC §9.4).** Applying first and
 answering second is the natural order to write the code in, and it strands the
 client: a device that applies a request whose response is then lost leaves the

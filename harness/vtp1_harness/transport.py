@@ -391,7 +391,20 @@ class LoopbackTransport(Transport):
         # Roughly one connection interval: long enough that a client writing two
         # requests back to back has the second arrive while the first is owed.
         self._control_latency = control_latency
-        self._owed = False
+        # SPEC.md §9 -- a COUNT of the responses owed, not a flag. A response is
+        # owed from acceptance until the client confirms it, and the `busy`
+        # refusal is a response owed the same way, so a device answering one
+        # request and refusing another owes two. A flag cleared when the first
+        # is confirmed reads as free while the refusal is still undelivered.
+        self._owed = 0
+        # Responses leave one at a time. ATT carries ONE outstanding indication
+        # per bearer, so a device holding two delivers the second only after
+        # the first is confirmed -- which is the interval SPEC.md §9 is about,
+        # and the reason a `busy` refusal queued behind a response is still
+        # owed after that response lands. Delivering both on independent timers
+        # would land them together and model a device that never has the
+        # interval at all.
+        self._deliver_lock = None
         # A request the device applied but has not answered yet (OBD_INFO:
         # the response waits for the probe, SPEC.md 15.2). Holds the raw
         # request so the pump can hand the eventual reply through
@@ -545,7 +558,8 @@ class LoopbackTransport(Transport):
             # unanswered forever. SPEC.md §15.4 makes that gap legal.
             self.device._obd_transmit = lambda pid, now: None
         self._connected = True
-        self._owed = False
+        self._owed = 0
+        self._deliver_lock = asyncio.Lock()
         self._pending_ctl_request = None
         self._obd_info_answers = 0
         self._pump = asyncio.create_task(self._run())
@@ -905,8 +919,14 @@ class LoopbackTransport(Transport):
                 if "busy_but_applied" in self.faults:
                     self.device.handle_control(request, t_rx=t_rx)
                 if len(request) >= 2:
-                    self._deliver_control(bytes([request[0], request[1],
-                                                 refdec.STATUS_VALUE["busy"]]))
+                    # Delivered on the same schedule as any other response,
+                    # because it IS one: sending it immediately would model a
+                    # refusal that is never owed for any duration, and §9's
+                    # rule is about the interval in which it is.
+                    self._owed += 1
+                    asyncio.create_task(self._answer(bytes(
+                        [request[0], request[1],
+                         refdec.STATUS_VALUE["busy"]])))
                 return
 
         response = self.device.handle_control(request, t_rx=t_rx)
@@ -919,7 +939,7 @@ class LoopbackTransport(Transport):
             # the reply from due_control_response() and delivers it through
             # _corrupt_response under the request captured here.
             self._pending_ctl_request = bytes(request)
-            self._owed = True
+            self._owed += 1
             return
         if "obd_ignores_stop" in self.faults and obd_poll_before and \
                 obd_poll_before[0] and response[2] == 0 and \
@@ -945,7 +965,7 @@ class LoopbackTransport(Transport):
             # asserting.
             return                                  # answered by nobody
         response = self._corrupt_response(bytearray(response), request)
-        self._owed = True
+        self._owed += 1
         asyncio.create_task(self._answer(bytes(response)))
 
     async def _answer(self, response):
@@ -956,10 +976,25 @@ class LoopbackTransport(Transport):
         about what a device does with two at once passes by never creating the
         condition it is testing -- which is exactly how this harness came to
         assert the opposite rule for a while without noticing.
+
+        The lock is the second half of that argument. Responses go out one at a
+        time (SPEC.md §9), so a refusal queued behind a response is delivered a
+        whole round trip later and is still owed when that response lands. The
+        decrement is per delivery for the same reason.
+
+        The lock also identifies the connection: `connect` makes a fresh one,
+        so a response still sleeping when the link drops finds its lock
+        replaced and does nothing. Without that it would deliver into the next
+        connection and decrement a count it never incremented -- and a negative
+        count refuses the next request `busy` for no reason at all.
         """
-        await asyncio.sleep(self._control_latency)
-        self._deliver_control(response)
-        self._owed = False
+        lock = self._deliver_lock
+        async with lock:
+            await asyncio.sleep(self._control_latency)
+            if lock is not self._deliver_lock:
+                return                              # a different connection
+            self._deliver_control(response)
+            self._owed -= 1
 
     def _deliver_control(self, response):
         cb = self._subs.get(refdec.CHAR["control"])
@@ -1300,7 +1335,7 @@ class LoopbackTransport(Transport):
                     self._pending_ctl_request = None
                     self._deliver_control(bytes(
                         self._corrupt_response(bytearray(due), request)))
-                    self._owed = False
+                    self._owed -= 1
             for stream, payload in self.device.poll():
                 uuid = refdec.CHAR[self._STREAM_CHAR[stream]]
                 cb = self._subs.get(uuid)
