@@ -1010,37 +1010,43 @@ Nothing on the control plane is latency-critical: subscriptions are installed
 once at connect, rates change when a user changes them, and `TIME_SYNC`
 measures the round trip it is already waiting for (RATIONALE §8.7).
 
-**A response is owed from the moment its request is accepted until the
-indication carrying it has been confirmed.** Composing it does not discharge
-the obligation and neither does handing it to the transport: the link carries
-one outstanding indication, so a response awaiting confirmation is still
-occupying the only means the device has of answering anything else. The
-confirmation is also the one moment both ends observe (RATIONALE §8.7). A
-response a device has not composed yet is owed too — `OBD_INFO` is answered
-only once its probe completes (§15.2), and the request is outstanding for the
-whole of it.
+**A response is owed from the moment its request is accepted until the device
+has sent it** — handed it to the transport with nothing further for the device
+to do. A response it has not composed yet is owed too: `OBD_INFO` is answered
+only once its probe completes (§15.2), and its request is outstanding for the
+whole of that.
+
+**The send, and not the confirmation, because the client's boundary is the
+arrival.** A client writes again as soon as the response reaches it, and ATT
+permits that before its confirmation has gone out. A device that kept owing
+until the confirmation would answer `busy` to a client that had waited exactly
+as long as this section tells it to, and the retry would meet the same window
+again. A device's boundary has to fall no later than the client's; the send
+does, the confirmation does not (RATIONALE §8.7).
 
 A device MUST answer `busy` to a request that arrives while it still owes a
-response, and MUST NOT apply it. A client that receives `busy` has broken the
-rule above; it MUST wait for the outstanding response and MAY then retry, and
-MUST NOT treat the request as refused — `busy` says nothing about the request
+response, and MUST NOT apply it — unless it has no room to hold the refusal,
+in which case it MUST discard the request unanswered and unapplied rather than
+apply one it cannot answer. A client that receives `busy` has broken the rule
+above; it MUST wait for the outstanding response and MAY then retry, and MUST
+NOT treat the request as refused — `busy` says nothing about the request
 itself.
 
-**A `busy` refusal is a response, and is owed like every other.** A device
-that refuses one request while it still owes the answer to another is holding
-two, so what it tracks is a count of the responses it owes and not a flag: a
-flag cleared when the first is confirmed reads as free while the refusal is
-still undelivered, and the next request is applied where it should have been
-refused. A device MUST be able to hold two — the response it owes and one
-refusal — and MAY discard, unanswered and unapplied, a request that arrives
-while it owes both.
+**One outstanding indication is a reason to hold a response, not to refuse a
+request.** The link carries one indication at a time, so a response composed
+while an earlier one is still unconfirmed waits for that confirmation before
+it is sent. **A device MUST be able to hold one such response**, because that
+window is exactly where a conforming client's next request arrives. A `busy`
+refusal is a response and waits its turn the same way. Past that a device has
+no room, which is the discard above: a client writing faster than a bounded
+device can answer has already broken the one-outstanding rule, and holding
+more would let it size the device's memory.
 
 A client MUST NOT reuse a `tag` while a request bearing it is outstanding. It
 needs no enforcement: with one request outstanding, a second write is refused
 `busy` whatever tag it carries, so a device keeps no table of tags — each tag
-rides in the response composed for it and is gone once that response is
-confirmed, and admission consults a count rather than a tag. A tag becomes
-reusable as soon as the response bearing it has arrived.
+rides in the response composed for it and is gone once that response is sent.
+A tag becomes reusable as soon as the response bearing it has arrived.
 
 **`detail` is present if and only if `status` is `ok`.** A refused request is
 answered with exactly three bytes, and a client MUST NOT read the detail of a

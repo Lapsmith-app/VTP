@@ -721,51 +721,69 @@ exchange, for NTP's reason. The request carries no parameters because an
 earlier draft had it carry the host's UTC milliseconds, which the equations
 could not use and the device could only discard.
 
-**Why owing ends at the confirmation, not the send (SPEC §9).** §9 used three
-words for one idea — a device "owes" a response, a tag is reusable once its
-response has been "sent", a request is refused when one is already
-"outstanding" — and for a single request in flight they agree. They come apart
-the moment a device holds two, which SPEC §9 creates itself: the `busy`
+**Why owing ends at the send, not the confirmation (SPEC §9).** SPEC §9 used
+three words for one idea — a device "owes" a response, a tag is reusable once
+its response has been "sent", a request is refused when one is already
+"outstanding" — and for a single response in flight they agree. They come
+apart the moment a device holds two, which SPEC §9 creates itself: the `busy`
 refusal is a response, so a device answering one request and refusing another
 is holding both. The first implementer outside this repository found it by
 review, on a stack whose queued-request pump runs before the completed
-request's callback, so the refusal is already on its way out at the instant
-the first response's completion runs. A device tracking "outstanding" as one
-flag cleared there reports itself free while it still owes the refusal, and
-applies the next request.
+request's callback, and asked which word governed.
 
-Confirmation wins over send for two reasons. The obligation exists because the
-delivery slot is physically singular — one outstanding indication per bearer —
-and a response awaiting confirmation is still in that slot, so a device that
-discharges on send does not have the free slot it believes it has; it has a
-queue, which is the thing SPEC §9 was written to avoid. And the confirmation
-is an event on the wire that both ends see, where "sent" is a moment only the
-device can name and every stack names differently: handed to the host, on air,
-acknowledged at the link layer. A specification cannot make a MUST out of a
-moment its implementers do not agree on.
+The answer is the send, and the reason is that the client's boundary is the
+arrival. SPEC §9 tells a client to write again as soon as the response reaches
+it, and ATT permits that write before the client's confirmation has gone out —
+request/response and indication/confirmation are independent flows on the
+bearer. Send, arrival and confirmation are three points in that order, so a
+device whose obligation ran to the confirmation would refuse, with `busy`, a
+client that had waited exactly as long as SPEC §9 told it to; the retry would
+meet the same window, and whether it ever cleared would depend on how the
+client's stack ordered its own confirmation against its own writes. **A
+device's completion point has to fall no later than the client's.** The send
+does. The confirmation does not.
 
-The cost is a `busy` a device need not have sent, which costs a client one
-round trip — and only a client that has already broken the one-outstanding
-rule. The cost of the other reading is a request applied while the client
-believes the device is busy, which is the two ends disagreeing about device
-state for the rest of the connection. SPEC §9.4 exists to prevent exactly
-that, so the asymmetry decides it.
+This was got wrong first. The draft that answered the report chose the
+confirmation, on the argument that the delivery slot is physically singular —
+one outstanding indication per bearer — so a response awaiting confirmation
+still occupies the only means the device has of answering anything else. That
+premise is true and the conclusion does not follow from it. One outstanding
+indication is a reason to **hold** a response, not a reason to **refuse** a
+request: a response composed while an earlier one is unconfirmed simply waits
+its turn, and waiting is bounded and safe where refusing is neither. The
+supporting argument — that the confirmation is the one moment both ends
+observe — was true and irrelevant, because only the device ever evaluates this
+boundary. The client evaluates the arrival.
 
-What the strict reading does not license is an unbounded queue. A device
-answers `busy` while it owes anything, and that refusal is itself owed, so a
-client pipelining without limit could ask a device to hold without limit.
-SPEC §9 bounds it at two — the response and one refusal — and lets a device
-discard anything further unanswered. A client three requests outside a rule
-it has already broken twice is not going to be rescued by a third answer, and
-the alternative is letting a misbehaving client size a device's RAM.
+So SPEC §9's tag-reuse sentence was right before the report and is right now.
+What the report changed is everything around it: the word is stated once, the
+same way, in all three places, and the two things the old text left unsaid are
+said.
 
-Two held is not the four-deep queue this section opens by rejecting. What that
-draft cost was a depth to agree on, an ordering guarantee and a refusal to
+The report was right about the structure even though it picked the later
+boundary. One flag does not do, whichever boundary it is cleared at: the
+refusal is a response too, so a device that has sent the answer to one request
+and not yet sent the refusal to the next still owes something, and a flag
+cleared on that first send reads as free. A count is the fix, and the report's
+device had one. What was conservative was only where it stopped counting.
+
+The first is that a `busy` refusal is a response and is owed like every other,
+so it too waits for the slot. The second is what a device has to hold. It is
+one response beyond the indication in flight, and that is not a spare: it is
+where a **conforming** client's next request lands, arriving after the
+previous response reached it but before the confirmation did. A device with
+nowhere to put that response would have to refuse a client doing everything
+right — the same defect as the confirmation reading, reached from the other
+side. Past that a device has no room and discards, which is not a queue depth
+to negotiate: it is the point where a client writing faster than a bounded
+device can answer would otherwise size the device's memory.
+
+Two held is therefore not the four-deep queue this section opens by rejecting.
+That draft cost a depth to agree on, an ordering guarantee and a refusal to
 hold them together, all so a client could pipeline by design. Nothing here is
-by design: a device holds a second response only to refuse a client that
-already broke the rule, the order is the order they were composed in, and the
-second slot is the refusal — so there is nothing to negotiate and no client
-that benefits from it.
+by design: the order is the order they were composed in, the second slot
+exists for a client that is obeying the rule, and no client benefits from
+asking for more.
 
 **Why deliverability is decided before dispatch (SPEC §9.4).** Applying first and
 answering second is the natural order to write the code in, and it strands the
@@ -1301,6 +1319,21 @@ states. Every entry below was a place where two parts of the specification, or
 the specification and its own conformance suite, said different things — the
 class of defect that produces two implementations which each pass every test
 and cannot talk to each other. The full history is in CHANGELOG.md.
+
+**A control response had three completion points and one of them was the
+client's.** SPEC §9 said a device "owes" a response, that a tag frees when its
+response is "sent", and that a request is refused while one is "outstanding" —
+three words agreeing only while a single response is in flight, which the
+`busy` refusal breaks by being a response itself. Reported by the first
+implementation outside this repository. The first fix chose the confirmation
+as the boundary and introduced a worse contradiction than it closed: SPEC §9
+also tells a *client* to write again as soon as the response arrives, which
+ATT permits before its confirmation goes out, so a device owing until the
+confirmation refuses a client obeying the rule and the retry meets the same
+window. The boundary is the send, which falls no later than the client's
+(RATIONALE §8.7) — and what a device must be able to hold is one response
+beyond the one in flight, because that window is where the conforming client's
+next request lands.
 
 **Capability implications were nowhere.** SPEC.md defined each capability bit
 independently while `conformance/run.py` carried a hard-coded table making

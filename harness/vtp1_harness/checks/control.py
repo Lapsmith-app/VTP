@@ -224,11 +224,11 @@ async def control_busy_when_outstanding(s):
         # second is illegal until the first's Write Response arrives, and a
         # device sends that as soon as its write handler returns. The window in
         # which `busy` is reachable is therefore the gap between that Write
-        # Response and the indication's confirmation -- roughly one connection
-        # interval -- and a device that answers promptly closes it before this
-        # harness can write into it. Reported by the first outside implementer
-        # (SPEC.md 9), who reached it only by holding responses 300 ms behind a
-        # build-time fault.
+        # Response and the moment the device SENDS the answer (SPEC.md 9) --
+        # roughly one connection interval -- and a device that answers promptly
+        # closes it before this harness can write into it. Reported by the
+        # first outside implementer, who reached it only by holding responses
+        # 300 ms behind a build-time fault.
         #
         # So this Observe is the honest outcome and not a gap to be plugged: a
         # device fast enough to be unverifiable here is a device behaving well.

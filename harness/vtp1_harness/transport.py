@@ -391,19 +391,25 @@ class LoopbackTransport(Transport):
         # Roughly one connection interval: long enough that a client writing two
         # requests back to back has the second arrive while the first is owed.
         self._control_latency = control_latency
-        # SPEC.md §9 -- a COUNT of the responses owed, not a flag. A response is
-        # owed from acceptance until the client confirms it, and the `busy`
-        # refusal is a response owed the same way, so a device answering one
-        # request and refusing another owes two. A flag cleared when the first
-        # is confirmed reads as free while the refusal is still undelivered.
+        # SPEC.md §9 -- a COUNT of the responses owed, not a flag. A response
+        # is owed from acceptance until it is SENT, and the `busy` refusal is a
+        # response owed the same way, so a device answering one request and
+        # refusing another owes two until both have gone out.
         self._owed = 0
+        # ...and no more than two, which is all §9 requires a device to hold:
+        # the one going out and one composed behind it. Past that there is no
+        # room, and §9 says discard rather than apply a request that cannot be
+        # answered. Without the cap a client that keeps writing spawns an
+        # unbounded number of `_answer` tasks -- the model device growing
+        # without limit under exactly the abuse §9 bounds a real one against.
+        self._owed_max = 2
         # Responses leave one at a time. ATT carries ONE outstanding indication
-        # per bearer, so a device holding two delivers the second only after
-        # the first is confirmed -- which is the interval SPEC.md §9 is about,
+        # per bearer, so a response composed while an earlier one is still in
+        # flight waits its turn -- which is the interval SPEC.md §9 is about,
         # and the reason a `busy` refusal queued behind a response is still
-        # owed after that response lands. Delivering both on independent timers
-        # would land them together and model a device that never has the
-        # interval at all.
+        # owed after that response goes out. Delivering both on independent
+        # timers would land them together and model a device that never has
+        # the interval at all.
         self._deliver_lock = None
         # A request the device applied but has not answered yet (OBD_INFO:
         # the response waits for the probe, SPEC.md 15.2). Holds the raw
@@ -918,7 +924,7 @@ class LoopbackTransport(Transport):
             if "pipelines_silently" not in self.faults:
                 if "busy_but_applied" in self.faults:
                     self.device.handle_control(request, t_rx=t_rx)
-                if len(request) >= 2:
+                if len(request) >= 2 and self._owed < self._owed_max:
                     # Delivered on the same schedule as any other response,
                     # because it IS one: sending it immediately would model a
                     # refusal that is never owed for any duration, and §9's
@@ -927,6 +933,8 @@ class LoopbackTransport(Transport):
                     asyncio.create_task(self._answer(bytes(
                         [request[0], request[1],
                          refdec.STATUS_VALUE["busy"]])))
+                # Over the cap the refusal itself has nowhere to go, so the
+                # request is discarded unanswered and unapplied (SPEC.md §9).
                 return
 
         response = self.device.handle_control(request, t_rx=t_rx)

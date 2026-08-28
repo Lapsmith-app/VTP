@@ -281,24 +281,26 @@ def main():
           f"the busy refusal must be queued behind the response it was "
           f"refused for, not dropped; queue holds {len(q)}")
 
-    # SPEC.md §9 -- the case that settled the verb. The first response has now
-    # reached the client and the refusal has NOT, so a device tracking what it
-    # owes as a flag would read itself free and apply the next request. It owes
-    # the refusal, so the next request is refused too.
+    # SPEC.md §9 -- the refusal is owed until it too has been SENT. The first
+    # response has gone out and the refusal has not, so it is still owed and
+    # the next request is refused as well. (Owing ends at the send: once the
+    # refusal goes out too, the device owes nothing and the next request is
+    # applied -- transport_selftest.py drives that half over the real pump,
+    # where the send is `update_value` rather than a call made here.)
     q.delivered()
     check(len(q) == 1,
-          f"delivering the first response must leave the refusal owed; queue "
+          f"sending the first response must leave the refusal owed; queue "
           f"holds {len(q)}")
     check(q.admit(9) == "busy",
-          "a request written while an undelivered busy refusal is still owed "
-          "MUST be refused: owing ends at the confirmation, not the send")
+          "a request written while a composed-but-unsent busy refusal is still "
+          "owed MUST be refused too")
     q.hold(9, bytes([0x02, 9, 5]))
 
-    # ...and the holding is bounded. §9 asks for two -- the response and one
-    # refusal -- and lets a device discard beyond that, so a client that keeps
-    # writing cannot size this queue.
+    # ...and the holding is bounded. §9 asks for two -- the one going out and
+    # one composed behind it -- and a device past that has no room to hold even
+    # the refusal, so the request is discarded rather than applied unanswerable.
     check(q.admit(10) == "full",
-          "a third request written while two responses are owed MAY be "
+          "a third request written while two responses are owed MUST be "
           "discarded unanswered; §9 bounds what a device has to hold")
     q.delivered()
     q.delivered()

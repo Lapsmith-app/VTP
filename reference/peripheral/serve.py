@@ -232,11 +232,13 @@ def _describe_request(value):
 # to say that with. §9.4 forbids both alternatives — silence, and applying a
 # request it cannot answer.
 #
-# So this queue holds TWO — the response and one refusal — which is what §9
-# requires and also all it requires. The refusal is a response and is owed
-# until confirmed like any other, so a client that keeps writing would keep
-# adding to a queue with no bound; §9 lets a device discard past the second,
-# which `admit` does by answering "full" once depth + 1 are held.
+# So this queue holds TWO, which is what §9 requires and also all it requires.
+# The link carries one indication at a time, so the second slot is where a
+# response composed while an earlier one is unconfirmed waits its turn -- and
+# §9 is explicit that a CONFORMING client's next request lands in exactly that
+# window, having arrived after the previous response reached it but before the
+# confirmation did. A `busy` refusal is a response and waits the same way.
+# Past two there is no room, and `admit` says so by answering "full".
 CONTROL_OUTSTANDING = 1
 CONTROL_QUEUE_DEPTH = CONTROL_OUTSTANDING
 
@@ -291,17 +293,21 @@ class ControlQueue:
         return self._out[0][1] if self._out else None
 
     def delivered(self):
-        """One response has reached the client, so it is no longer owed.
+        """One response has been sent, so it is no longer owed.
 
-        SPEC.md §9 — owing ends at the CONFIRMATION of the indication, not at
-        the send. This peripheral calls this from `update_value` returning
-        True, which under CoreBluetooth means the stack accepted the value for
-        transmission: a peripheral app is never told that a central confirmed
-        an indication, so the confirmation is not observable from here. The
-        window between the two is the one place this reference is weaker than
-        the specification it demonstrates, and it is a limit of the host stack
-        rather than a reading of §9. A device on a stack that surfaces the
-        confirmation MUST decrement there.
+        SPEC.md §9 — owing ends at the SEND: the response is handed to the
+        transport and the device has nothing further to do for it. The caller
+        is `update_value` returning True, which under CoreBluetooth means the
+        stack accepted the value for transmission, and that is exactly the
+        moment §9 names. Not the confirmation: a device whose obligation ran
+        that far would refuse a client that wrote as soon as the response
+        reached it, which §9 tells clients to do.
+
+        CoreBluetooth never tells a peripheral app that a central confirmed an
+        indication, so this reference could not implement the confirmation
+        reading even if §9 asked for it. It does not, and that is not a
+        coincidence -- §9 anchors on the one event every device can observe
+        about its own sending.
         """
         self._out.popleft()
 

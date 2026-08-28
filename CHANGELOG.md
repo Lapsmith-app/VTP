@@ -8,7 +8,7 @@ conformance vector.
 
 ## [Unreleased]
 
-### §9: owing a response ends at the confirmation, not the send
+### §9: owing a response ends at the send
 
 Reported by the first implementation outside this repository, from code review
 rather than a field failure. §9 used three words for one idea — a device
@@ -16,39 +16,53 @@ rather than a field failure. §9 used three words for one idea — a device
 request is refused when one is already "outstanding" — and they agree only
 while a single response is in flight. §9 creates the case where they disagree:
 the `busy` refusal is itself a response, so a device answering one request and
-refusing another is holding two, and "sent" and "confirmed" then pick out
-different moments and different behaviour for the next request.
+refusing another is holding two.
 
-**Settled on confirmed.** A response is owed from the moment its request is
-accepted until the indication carrying it has been confirmed. The delivery
-slot is physically singular — one outstanding indication per bearer — so a
-response awaiting confirmation still occupies the only means the device has of
-answering anything else; and the confirmation is an event both ends observe,
-where "sent" is a moment only the device sees and every stack places
-differently. The tag-reuse sentence loses "sent" and the §9.4 deliverability
-clause loses "already outstanding"; all three phrasings now say the same thing.
+**Settled on the send.** A response is owed from the moment its request is
+accepted until the device has handed it to the transport with nothing further
+to do. The reason is that the client's boundary is the *arrival*: §9 tells a
+client to write again as soon as the response reaches it, and ATT permits that
+write before the client's confirmation has gone out. Send, arrival and
+confirmation are three points in that order, so a device's completion point
+has to fall no later than the client's — the send does, the confirmation does
+not. A device owing until the confirmation would answer `busy` to a client
+that waited exactly as long as §9 told it to, and the retry would meet the
+same window. The tag-reuse sentence was therefore right as it stood; §9.4's
+deliverability clause and the `busy` obligation now say the same thing in the
+same words.
 
-**A `busy` refusal is a response, and owed like every other.** What a device
-tracks is a count and not a flag — a flag cleared when the first response is
-confirmed reads as free while the refusal is still undelivered, and the next
-request is applied where it should have been refused. That is a reachable
-interval, not a theoretical one: on a stack whose queued-request pump runs
-before the completed request's callback, the refusal is already on its way out
-when the flag clears.
+**A `busy` refusal is a response, and waits its turn like every other.** What a
+device tracks is a count and not a flag, because a device answering one
+request and refusing another owes both until both have gone out.
 
-**And it is bounded.** A device MUST be able to hold two — the response and one
-refusal — and MAY discard anything further unanswered and unapplied, so a
-client that keeps writing cannot size a device's queue.
+**One outstanding indication is a reason to hold a response, not to refuse a
+request.** A device MUST be able to hold one response beyond the one in
+flight, and that slot is not spare capacity: it is where a *conforming*
+client's next request lands, having arrived after the previous response
+reached it but before the confirmation did. Past that a device has no room and
+MUST discard the request unanswered and unapplied rather than apply one it
+cannot answer.
 
-No wire change: no field, enum value, UUID or conformance vector moves, and the
-`busy` description now says "still owed" rather than "already outstanding".
-Reasoning in RATIONALE §8.7; the reference peripheral already behaved this way
-and its selftest now covers the case directly. `control.busy_when_outstanding`
-is unchanged, with the reporter's finding recorded in it: ATT's one-request-
-per-bearer rule means `busy` is only reachable between the Write Response and
-the confirmation, so the check Observes rather than verdicts against any device
-that answers promptly, and a deeper pipeline would not change that.
+No wire change: no field, enum value, UUID or conformance vector moves, and
+the `busy` description now says "still owed" rather than "already
+outstanding". Reasoning in RATIONALE §8.7, which records that the first draft
+of this change chose the confirmation and why that was wrong — the premise
+(one outstanding indication per bearer) is true, and refusing rather than
+holding does not follow from it.
 
+The reference peripheral already behaved this way. `reference/peripheral/
+transport_selftest.py` now drives the case over the real pump, where the send
+is `update_value` returning True rather than an event the test supplies, and
+`reference/peripheral/selftest.py` covers the admission rule and the two-held
+bound directly. The harness loopback models owing as a count, serialises
+deliveries one at a time as the link does, and caps what it will hold — six
+back-to-back writes now produce two answers and two tasks rather than six.
+
+`control.busy_when_outstanding` is unchanged, with the reporter's finding
+recorded in it: ATT's one-request-per-bearer rule means `busy` is only
+reachable between the Write Response and the moment the device sends its
+answer, so the check Observes rather than verdicts against any device that
+answers promptly, and a deeper pipeline would not change that.
 
 ### §15 rewritten: response-paced, grouped, divided
 

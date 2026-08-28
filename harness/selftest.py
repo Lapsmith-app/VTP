@@ -389,8 +389,90 @@ def _skip_problems(report):
     return problems
 
 
+async def _model_device_problems():
+    """The loopback's own conformance to SPEC.md §9, driven directly.
+
+    Everything else in this file tests CHECKS against a device that can be
+    broken. This tests the unbroken device itself, because a model that cannot
+    exhibit a rule cannot be evidence that a check covers it -- and this
+    particular rule was got wrong once in exactly that way: refusals were
+    delivered on independent timers, so both responses landed together and the
+    interval SPEC.md §9 is about never existed here.
+    """
+    problems = []
+    ctrl = refdec.CHAR["control"]
+    busy = refdec.STATUS_VALUE["busy"]
+    ok = refdec.STATUS_VALUE["ok"]
+    sync = refdec.OPCODE["TIME_SYNC"]
+
+    # A conforming client: write, wait for the response to ARRIVE, write again.
+    # It must never be refused. SPEC.md §9 anchors owing on the send precisely
+    # so this holds -- a device owing until the confirmation would answer busy
+    # to a client that waited exactly as long as it was told to.
+    t = LoopbackTransport()
+    await t.connect()
+    seen = []
+    await t.subscribe(ctrl, lambda data, ts: seen.append(bytes(data)))
+    for tag in (1, 2, 3):
+        await t.write(ctrl, bytes([sync, tag]))
+        for _ in range(500):                       # wait for arrival, not more
+            if len(seen) >= tag:
+                break
+            await asyncio.sleep(0.001)
+    if [r[2] for r in seen] != [ok, ok, ok]:
+        problems.append(
+            f"a client that waited for each response before writing the next "
+            f"was answered {[r[2] for r in seen]}; SPEC.md §9 owes nothing "
+            f"once a response has been sent, so none of these may be busy")
+    await t.disconnect()
+
+    # A client that pipelines, three deep. The refusal to the second is itself
+    # a response and is still unsent when the first goes out, so the third is
+    # refused too.
+    t = LoopbackTransport()
+    await t.connect()
+    seen = []
+    await t.subscribe(ctrl, lambda data, ts: seen.append(bytes(data)))
+    await t.write(ctrl, bytes([sync, 1]))
+    await t.write(ctrl, bytes([sync, 2]))
+    for _ in range(500):
+        if seen:
+            break
+        await asyncio.sleep(0.001)
+    await t.write(ctrl, bytes([sync, 3]))
+    await asyncio.sleep(0.5)
+    if [r[2] for r in seen] != [ok, busy, busy]:
+        problems.append(
+            f"three pipelined requests were answered {[r[2] for r in seen]}; "
+            f"SPEC.md §9 owes the busy refusal until it too has been sent, so "
+            f"the third must be refused as well")
+    await t.disconnect()
+
+    # ...and the holding is bounded. SPEC.md §9 asks for one response beyond
+    # the one in flight and no more, so a client that keeps writing gets two
+    # answers and the rest are discarded -- not an unbounded pile of pending
+    # deliveries, which is a model device growing without limit under exactly
+    # the abuse a real one is bounded against.
+    t = LoopbackTransport()
+    await t.connect()
+    seen = []
+    await t.subscribe(ctrl, lambda data, ts: seen.append(bytes(data)))
+    for tag in range(1, 9):
+        await t.write(ctrl, bytes([sync, tag]))
+    high = t._owed
+    await asyncio.sleep(0.5)
+    if high > 2 or len(seen) != 2:
+        problems.append(
+            f"eight back-to-back requests left {high} response(s) owed and "
+            f"{len(seen)} answered; SPEC.md §9 bounds a device at the one "
+            f"going out and one behind it, and discards past that")
+    await t.disconnect()
+    return problems
+
+
 async def main():
     problems = _coverage_problems()
+    problems += await _model_device_problems()
 
     print("A conforming device")
     clean = await run(reconnect=True)
