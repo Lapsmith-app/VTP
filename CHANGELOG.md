@@ -64,6 +64,46 @@ reachable between the Write Response and the moment the device sends its
 answer, so the check Observes rather than verdicts against any device that
 answers promptly, and a deeper pipeline would not change that.
 
+**The harness now rejects a `busy` nobody asked for.** Reported by the same
+implementation, which had this defect and passed four harness runs with it:
+`busy` was asserted on in exactly one place and treated as a pass everywhere
+else, so the rule settled above had no check behind it.
+`control.no_busy_for_conforming_client` writes forty requests, each as soon as
+the previous response has arrived and never more than one outstanding — which
+is what §9 tells a client to do — and fails on any `busy`.
+`control.no_unprovoked_busy` reads the whole run's control history back at the
+end and fails on any `busy` answered to a request that did not overlap another,
+which turns every request the harness already makes into a witness for the rule
+at no new traffic. Which requests overlapped is read out of the write and
+arrival timestamps the correlation layer already records, not declared by the
+check that pipelined: `control.busy_when_outstanding` *intends* to pipeline,
+and against a device fast enough to answer the first request before the second
+is written it does not manage to — so a `busy` there refused a conforming write
+like any other, and is reported rather than excused. That check now reaches its
+Observe branch on the timing whatever status came back, instead of reading
+`busy` as a pass it had not earned. A pass on the first is worth less than a failure: the window it aims
+at closes when the host's stack emits its ATT confirmation, and CoreBluetooth
+does that on its own schedule without telling the application, so a green run
+says the device did not refuse a client writing that fast rather than that its
+boundary is right. A failure is unambiguous. Same class of limit as
+`control.busy_when_outstanding`'s Observe branch, and it wants a sniffer
+rather than a better host.
+
+The `owes_until_confirmed` fault seeds both: the loopback's decrement moves a
+round trip past the delivery, which is the defect as reported. A device with it
+for real refuses *every* client that writes on arrival, and every request this
+harness makes is written on arrival — so the unnarrowed fault fails fourteen
+checks and says only which one ran first. It is narrowed the way
+`drops_a_response` is and by the same predicate: eligible only on a well-formed
+`TIME_SYNC`, and spent on the first refusal it causes. That fixes the set of
+checks that meet it at the two named above, with
+`control.busy_when_outstanding` still passing, since its `busy` is a genuine
+pipeline and correct there. Spending it on the *refusal* rather than on the
+first eligible response is what keeps that true — a legitimately pipelined
+`busy` must not consume it. Deleting the dedicated check does not silence the
+fault: `control.time_sync` sends seven well-formed `TIME_SYNC`s back to back
+and meets it next, which is checked rather than assumed.
+
 ### §15 rewritten: response-paced, grouped, divided
 
 Pre-1.0 and with no third-party consumers, so the poll loop was fixed rather

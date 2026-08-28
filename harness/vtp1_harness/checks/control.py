@@ -211,12 +211,17 @@ async def control_busy_when_outstanding(s):
         raise Fail("the second of two pipelined requests was never answered. §9 "
                    "requires busy rather than silence: a device meeting a "
                    "client that pipelines has to have something true to say")
-    if second.status == refdec.STATUS_VALUE["busy"]:
-        return
     if second.t_write > first_response.t_recv:
         # The device answered the first before the second was written, so the
         # two were never outstanding together and there was nothing to detect.
         # A limit of testing from a host, not a finding.
+        #
+        # Tested BEFORE the status and not after. A `busy` reached this way is
+        # not evidence the device got the rule right: nothing was outstanding
+        # when that request was written, so it refused a conforming client and
+        # `control.no_unprovoked_busy` reports it as one. Returning a pass here
+        # because the status happened to read `busy` would credit a device for
+        # the answer while it was answering the wrong question.
         #
         # It is a STRUCTURAL limit, and worth knowing before anyone tries to
         # make this check verdict reliably. ATT allows one outstanding request
@@ -239,6 +244,8 @@ async def control_busy_when_outstanding(s):
             "the device answered the first request before the second was "
             "written, so nothing was ever pipelined and this could not be "
             "tested from here")
+    if second.status == refdec.STATUS_VALUE["busy"]:
+        return
     raise Fail(
         f"a request written while the device still owed a response was answered "
         f"{second.status_name}, not busy. §9 makes busy the one thing a device "
@@ -284,6 +291,125 @@ async def control_busy_not_applied(s):
     if probe.status != refdec.STATUS_VALUE["unknown_subscription"]:
         raise Skip(f"the probe unsubscribe was answered {probe.status_name}, "
                    f"so whether the busy request took effect cannot be told")
+
+
+@check(id="control.no_busy_for_conforming_client", section="9",
+       phase="control", severity="MUST", requires=("control",),
+       title="A client that writes on arrival is never answered busy")
+async def control_no_busy_for_conforming_client(s):
+    """The other half of `control.busy_when_outstanding`, and the half §9 is
+    written for.
+
+    That check pipelines and requires `busy`. This one does what §9 tells a
+    client to do -- one request outstanding, the next written as soon as the
+    response arrives -- and requires that `busy` never comes back. A device
+    that answers it is refusing a client that did nothing wrong.
+
+    The boundary is §9's: a response is owed until the device has SENT it, not
+    until its confirmation. A device that kept owing until the confirmation
+    refuses exactly this client, and would look correct to every other check
+    in this file.
+
+    A pass is worth less than a failure here, and deliberately so. The window
+    this aims at is between the response arriving at the host and the host's
+    stack emitting the ATT confirmation, and on macOS CoreBluetooth confirms on
+    its own schedule and never says when. If it confirms before this coroutine
+    is woken, the next write lands after the confirmation and a device with the
+    wrong boundary answers correctly anyway. So a pass says the device did not
+    refuse a client writing this fast; it does not say the boundary is right.
+    A failure says the boundary is wrong, and says it unambiguously. Same class
+    of limit as the Observe branch of `control.busy_when_outstanding`, and like
+    that one it wants a sniffer to settle rather than a better host.
+    """
+    c = _control(s)
+    # TIME_SYNC: owned by no capability, so every Control device answers it,
+    # and §9.4 lists it as safe to repeat -- each attempt is a fresh reading
+    # and nothing on the device changes. A device that does not implement it
+    # is control.time_sync's finding, not this one's; here it only has to be
+    # something the device answers, so fall back to the probe opcode.
+    opcode = refdec.OPCODE["TIME_SYNC"]
+    unsupported = refdec.STATUS_VALUE["unsupported_opcode"]
+    rounds = 40
+    for i in range(rounds):
+        try:
+            response = await c.request(opcode)
+        except ControlTimeout:
+            raise Fail(f"round {i + 1} of {rounds} was never answered. A "
+                       f"device MUST respond to every request it "
+                       f"applies") from None
+        if i == 0 and response.status == unsupported:
+            opcode = UNALLOCATED_OPCODE
+            continue
+        if response.status == refdec.STATUS_VALUE["busy"]:
+            raise Fail(
+                f"round {i + 1} of {rounds} was answered busy. Every request "
+                f"here was written after the previous response had ARRIVED, "
+                f"with one outstanding throughout -- which is what §9 tells a "
+                f"client to do. A response is owed until the device has SENT "
+                f"it, and a device still owing one the client has already "
+                f"received refuses a client that waited exactly as long as it "
+                f"was told to, and refuses the retry the same way",
+                response=response.raw.hex(), round=i + 1)
+
+
+def _overlapped(response, history):
+    """True if this request was written while another was still unanswered.
+
+    §9 permits `busy` in exactly one situation, and this is it stated in the
+    two timestamps the correlation layer already records: a request written
+    after the previous response had ARRIVED overlapped nothing, whoever wrote
+    it and whatever they meant to test.
+
+    Derived from the traffic rather than from a note left by the check that
+    pipelined. A note has to be left at the right moment to be right --
+    `control.busy_when_outstanding` writes its second request intending to
+    pipeline, and on a device fast enough to answer the first in between, it
+    does not manage to. A note left on intent would exempt that refusal; the
+    timestamps say it overlapped nothing, which is what §9 actually asks.
+    """
+    return any(other is not response
+               and other.t_write < response.t_write < other.t_recv
+               for other in history)
+
+
+@check(id="control.no_unprovoked_busy", section="9", phase="transport",
+       severity="MUST", requires=("control",),
+       title="No busy was answered to a request that did not pipeline")
+async def control_no_unprovoked_busy(s):
+    """Every other check in this run, read back as a witness for §9.
+
+    `control.busy_when_outstanding` is the only thing in this harness that
+    writes a request before the previous one is answered. Every other request
+    -- every subscribe, every rate, every probe, across every phase -- is a
+    conforming single-outstanding client, so a `busy` anywhere else in the
+    history is a device refusing a client that did nothing wrong. The traffic
+    is already recorded, so this costs no writes of its own.
+
+    Which requests overlapped is read out of the timestamps by `_overlapped`
+    rather than declared by the check that pipelined, so this holds that check
+    to the same rule as every other: a request it *meant* to pipeline, but
+    which a fast device answered before it was written, is a conforming write
+    like any other and a `busy` answered to it is reported here.
+
+    Placed in the `transport` phase rather than `control` so that it reads a
+    history with the whole interrogation in it. Requests made in the reconnect
+    phase run after this and are not covered.
+    """
+    c = _control(s)
+    busy = refdec.STATUS_VALUE["busy"]
+    unprovoked = [r for r in c.history
+                  if r.status == busy and not _overlapped(r, c.history)]
+    if not unprovoked:
+        return
+    named = ", ".join(f"{r.opcode_name} tag {r.tag}" for r in unprovoked[:6])
+    if len(unprovoked) > 6:
+        named += f", and {len(unprovoked) - 6} more"
+    raise Fail(
+        f"{len(unprovoked)} request(s) that did not pipeline were answered "
+        f"busy: {named}. Each was written after the previous response had "
+        f"arrived, so §9's one-outstanding rule was kept; a device owing a "
+        f"response past the moment it sent it refuses a conforming client",
+        responses=[r.raw.hex() for r in unprovoked[:6]])
 
 
 # ---------------------------------------------------------------------------
