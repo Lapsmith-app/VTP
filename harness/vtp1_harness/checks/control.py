@@ -201,12 +201,6 @@ async def control_busy_when_outstanding(s):
     # first is answered.
     first_tag, first_future = await c.send(UNALLOCATED_OPCODE)
     second = await _pipelined_second(s, c)
-    if second is not None and second.status == refdec.STATUS_VALUE["busy"]:
-        # The one refusal in this run that a conforming client did not earn,
-        # so `control.no_unprovoked_busy` can tell it from the rest. Recorded
-        # by identity and not by tag: a run reuses every tag several times
-        # over, and the exemption has to name this response and no other.
-        s.state.setdefault("provoked_busy", []).append(second)
     try:
         first_response = await c.await_response(
             UNALLOCATED_OPCODE, first_tag, first_future, timeout=5.0)
@@ -217,12 +211,17 @@ async def control_busy_when_outstanding(s):
         raise Fail("the second of two pipelined requests was never answered. §9 "
                    "requires busy rather than silence: a device meeting a "
                    "client that pipelines has to have something true to say")
-    if second.status == refdec.STATUS_VALUE["busy"]:
-        return
     if second.t_write > first_response.t_recv:
         # The device answered the first before the second was written, so the
         # two were never outstanding together and there was nothing to detect.
         # A limit of testing from a host, not a finding.
+        #
+        # Tested BEFORE the status and not after. A `busy` reached this way is
+        # not evidence the device got the rule right: nothing was outstanding
+        # when that request was written, so it refused a conforming client and
+        # `control.no_unprovoked_busy` reports it as one. Returning a pass here
+        # because the status happened to read `busy` would credit a device for
+        # the answer while it was answering the wrong question.
         #
         # It is a STRUCTURAL limit, and worth knowing before anyone tries to
         # make this check verdict reliably. ATT allows one outstanding request
@@ -245,6 +244,8 @@ async def control_busy_when_outstanding(s):
             "the device answered the first request before the second was "
             "written, so nothing was ever pipelined and this could not be "
             "tested from here")
+    if second.status == refdec.STATUS_VALUE["busy"]:
+        return
     raise Fail(
         f"a request written while the device still owed a response was answered "
         f"{second.status_name}, not busy. §9 makes busy the one thing a device "
@@ -351,6 +352,26 @@ async def control_no_busy_for_conforming_client(s):
                 response=response.raw.hex(), round=i + 1)
 
 
+def _overlapped(response, history):
+    """True if this request was written while another was still unanswered.
+
+    §9 permits `busy` in exactly one situation, and this is it stated in the
+    two timestamps the correlation layer already records: a request written
+    after the previous response had ARRIVED overlapped nothing, whoever wrote
+    it and whatever they meant to test.
+
+    Derived from the traffic rather than from a note left by the check that
+    pipelined. A note has to be left at the right moment to be right --
+    `control.busy_when_outstanding` writes its second request intending to
+    pipeline, and on a device fast enough to answer the first in between, it
+    does not manage to. A note left on intent would exempt that refusal; the
+    timestamps say it overlapped nothing, which is what §9 actually asks.
+    """
+    return any(other is not response
+               and other.t_write < response.t_write < other.t_recv
+               for other in history)
+
+
 @check(id="control.no_unprovoked_busy", section="9", phase="transport",
        severity="MUST", requires=("control",),
        title="No busy was answered to a request that did not pipeline")
@@ -364,16 +385,20 @@ async def control_no_unprovoked_busy(s):
     history is a device refusing a client that did nothing wrong. The traffic
     is already recorded, so this costs no writes of its own.
 
+    Which requests overlapped is read out of the timestamps by `_overlapped`
+    rather than declared by the check that pipelined, so this holds that check
+    to the same rule as every other: a request it *meant* to pipeline, but
+    which a fast device answered before it was written, is a conforming write
+    like any other and a `busy` answered to it is reported here.
+
     Placed in the `transport` phase rather than `control` so that it reads a
     history with the whole interrogation in it. Requests made in the reconnect
     phase run after this and are not covered.
     """
     c = _control(s)
-    provoked = s.state.get("provoked_busy") or []
     busy = refdec.STATUS_VALUE["busy"]
     unprovoked = [r for r in c.history
-                  if r.status == busy
-                  and not any(r is one for one in provoked)]
+                  if r.status == busy and not _overlapped(r, c.history)]
     if not unprovoked:
         return
     named = ", ".join(f"{r.opcode_name} tag {r.tag}" for r in unprovoked[:6])

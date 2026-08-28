@@ -72,10 +72,16 @@ else, so the rule settled above had no check behind it.
 the previous response has arrived and never more than one outstanding — which
 is what §9 tells a client to do — and fails on any `busy`.
 `control.no_unprovoked_busy` reads the whole run's control history back at the
-end and fails on any `busy` other than the one
-`control.busy_when_outstanding` deliberately provokes, which turns every
-request the harness already makes into a witness for the rule at no new
-traffic. A pass on the first is worth less than a failure: the window it aims
+end and fails on any `busy` answered to a request that did not overlap another,
+which turns every request the harness already makes into a witness for the rule
+at no new traffic. Which requests overlapped is read out of the write and
+arrival timestamps the correlation layer already records, not declared by the
+check that pipelined: `control.busy_when_outstanding` *intends* to pipeline,
+and against a device fast enough to answer the first request before the second
+is written it does not manage to — so a `busy` there refused a conforming write
+like any other, and is reported rather than excused. That check now reaches its
+Observe branch on the timing whatever status came back, instead of reading
+`busy` as a pass it had not earned. A pass on the first is worth less than a failure: the window it aims
 at closes when the host's stack emits its ATT confirmation, and CoreBluetooth
 does that on its own schedule without telling the application, so a green run
 says the device did not refuse a client writing that fast rather than that its

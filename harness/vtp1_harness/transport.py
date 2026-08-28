@@ -931,18 +931,24 @@ class LoopbackTransport(Transport):
             if "pipelines_silently" not in self.faults:
                 if "busy_but_applied" in self.faults:
                     self.device.handle_control(request, t_rx=t_rx)
-                if self._late_pending:
-                    # This refusal is the `owes_until_confirmed` defect
-                    # showing itself: the device is refusing a client only
-                    # because a decrement it already owed has not landed. One
-                    # instance is everything a check needs, so the fault is
-                    # spent here rather than left to refuse the rest of the
-                    # run. Spent on the REFUSAL and not on the first eligible
-                    # response, so that a legitimately pipelined `busy` --
-                    # control.busy_when_outstanding's, which runs earlier --
-                    # does not consume it.
-                    self._late_armed = False
                 if len(request) >= 2 and self._owed < self._owed_max:
+                    if self._late_pending:
+                        # This refusal is the `owes_until_confirmed` defect
+                        # showing itself: the device is refusing a client only
+                        # because a decrement it already owed has not landed.
+                        # One instance is everything a check needs, so the
+                        # fault is spent here rather than left to refuse the
+                        # rest of the run.
+                        #
+                        # Spent on the REFUSAL and not on the first eligible
+                        # response, so a legitimately pipelined `busy` --
+                        # control.busy_when_outstanding's, which runs earlier
+                        # -- does not consume it. And spent inside this branch
+                        # and not before it, so a request DISCARDED over the
+                        # cap does not consume it either: that request is
+                        # answered by nobody, so nothing observed the defect
+                        # and there is nothing to spend it on.
+                        self._late_armed = False
                     # Delivered on the same schedule as any other response,
                     # because it IS one: sending it immediately would model a
                     # refusal that is never owed for any duration, and §9's
@@ -1050,9 +1056,15 @@ class LoopbackTransport(Transport):
         # lock would also delay the next delivery, and a slower device is not
         # the mistake being modelled here.
         await asyncio.sleep(self._control_latency)
+        if lock is not self._deliver_lock:
+            # A different connection, and `connect` has already zeroed both
+            # counters. Decrementing either here would drive it NEGATIVE on a
+            # link this response never belonged to -- and a negative
+            # `_late_pending` reads as truthy, which would spend the fault
+            # before the check under test had written anything.
+            return
         self._late_pending -= 1
-        if lock is self._deliver_lock:
-            self._owed -= 1
+        self._owed -= 1
 
     def _deliver_control(self, response):
         cb = self._subs.get(refdec.CHAR["control"])

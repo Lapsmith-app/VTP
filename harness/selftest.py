@@ -195,6 +195,21 @@ CASCADING = {
         "whatever its own rule says",
 }
 
+#: Faults whose narrowing is itself the claim: they must break the checks named
+#: against them and NOTHING else.
+#:
+#: CAUGHT_BY asserts the named checks fail. It says nothing about the rest of
+#: the run, so a fault that quietly starts failing half the suite still passes
+#: the matrix -- and "caught by X" then means "X was among the fourteen", which
+#: is the accident-of-ordering claim this file exists to refuse.
+#: `owes_until_confirmed` is narrowed deliberately (see transport.py `_answer`:
+#: eligible only on a well-formed TIME_SYNC, spent on the first refusal it
+#: causes) because unnarrowed it refuses every conforming client and every
+#: request this harness makes is conforming. The narrowing is what makes the
+#: entry mean anything, and without this it could rot back into the cascade it
+#: was written to avoid with nothing to say so.
+ISOLATED = {"owes_until_confirmed"}
+
 #: Faults that are SCENARIO seeds rather than matrix entries: neither breaks
 #: a rule one check can catch on its own, so neither belongs in CAUGHT_BY.
 #: `obd_pid_never_answers` is a CONFORMING car whose polled PID nothing
@@ -312,6 +327,18 @@ def _coverage_problems():
     stray = sorted(set(CASCADING) - set(FAULTS))
     if stray:
         problems.append(f"CASCADING names fault(s) that do not exist: {stray}")
+    stray = sorted(ISOLATED - set(CAUGHT_BY))
+    if stray:
+        problems.append(
+            f"ISOLATED names fault(s) the matrix does not run: {stray}. A "
+            f"fault can only be held to breaking nothing BUT its own checks "
+            f"if something names what its own checks are")
+    both = sorted(ISOLATED & set(CASCADING))
+    if both:
+        problems.append(
+            f"fault(s) {both} are listed both ISOLATED and CASCADING, which "
+            f"are opposite claims: one says the fault breaks only its own "
+            f"checks, the other that it breaks most of the run")
 
     named = sorted(_all_named() - set(checks))
     if named:
@@ -470,6 +497,36 @@ async def _model_device_problems():
             f"{len(seen)} answered; SPEC.md §9 bounds a device at the one "
             f"going out and one behind it, and discards past that")
     await t.disconnect()
+
+    # ...and a deferred decrement does not outlive the link it belonged to.
+    # `owes_until_confirmed` defers one past the delivery, `connect` zeroes the
+    # counters, and a task still sleeping when the link drops would otherwise
+    # drive them negative on a connection its response never reached. A
+    # negative `_late_pending` reads as truthy, which spends the one-shot fault
+    # before the check under test writes anything -- so the fault would stop
+    # firing on any run that reconnects, silently, and the matrix would still
+    # be green because it only asserts the named checks FAIL.
+    t = LoopbackTransport(faults=["owes_until_confirmed"])
+    await t.connect()
+    await t.subscribe(ctrl, lambda data, ts: None)
+    await t.write(ctrl, bytes([sync, 1]))
+    await asyncio.sleep(t._control_latency * 1.5)   # sent; decrement deferred
+    if t._late_pending != 1:
+        problems.append(
+            f"the deferred decrement was not outstanding after the response "
+            f"had been sent (_late_pending {t._late_pending}); the fault this "
+            f"models cannot fire, so the checks named against it are not "
+            f"being tested by it")
+    await t.disconnect()
+    await t.connect()
+    await asyncio.sleep(t._control_latency * 3)     # past the deferred wake
+    if (t._late_pending, t._owed) != (0, 0):
+        problems.append(
+            f"a deferred decrement from a dropped link left _late_pending at "
+            f"{t._late_pending} and _owed at {t._owed} on the connection "
+            f"after it; a task whose lock has been replaced MUST touch "
+            f"neither")
+    await t.disconnect()
     return problems
 
 
@@ -538,6 +595,20 @@ async def main():
         # were on the commit that introduced the list, each broken by a fault
         # aimed at a different check -- which the disjointness check above
         # cannot see, because that only compares two tables against each other.
+        if fault in ISOLATED:
+            spread = sorted(
+                r.check.id for r in report.failures + report.warnings
+                if r.check.id not in checks_for(fault))
+            if spread:
+                problems.append(
+                    f"{fault} is listed ISOLATED and also broke {spread}. "
+                    f"Either the narrowing that made it isolated has come "
+                    f"undone -- in which case fix it rather than the table, "
+                    f"because the whole point of that narrowing is that "
+                    f"'caught by X' names a check and not a crowd -- or the "
+                    f"extra failures are real, and it belongs in CASCADING "
+                    f"with the excuse guard waived and the reason written "
+                    f"down")
         if fault in CASCADING:
             continue
         broke_an_excuse = sorted(
