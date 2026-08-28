@@ -1010,17 +1010,43 @@ Nothing on the control plane is latency-critical: subscriptions are installed
 once at connect, rates change when a user changes them, and `TIME_SYNC`
 measures the round trip it is already waiting for (RATIONALE §8.7).
 
+**A response is owed from the moment its request is accepted until the device
+has sent it** — handed it to the transport with nothing further for the device
+to do. A response it has not composed yet is owed too: `OBD_INFO` is answered
+only once its probe completes (§15.2), and its request is outstanding for the
+whole of that.
+
+**The send, and not the confirmation, because the client's boundary is the
+arrival.** A client writes again as soon as the response reaches it, and ATT
+permits that before its confirmation has gone out. A device that kept owing
+until the confirmation would answer `busy` to a client that had waited exactly
+as long as this section tells it to, and the retry would meet the same window
+again. A device's boundary has to fall no later than the client's; the send
+does, the confirmation does not (RATIONALE §8.7).
+
 A device MUST answer `busy` to a request that arrives while it still owes a
-response, and MUST NOT apply it. A client that receives `busy` has broken the
-rule above; it MUST wait for the outstanding response and MAY then retry, and
-MUST NOT treat the request as refused — `busy` says nothing about the request
+response, and MUST NOT apply it — unless it has no room to hold the refusal,
+in which case it MUST discard the request unanswered and unapplied rather than
+apply one it cannot answer. A client that receives `busy` has broken the rule
+above; it MUST wait for the outstanding response and MAY then retry, and MUST
+NOT treat the request as refused — `busy` says nothing about the request
 itself.
+
+**One outstanding indication is a reason to hold a response, not to refuse a
+request.** The link carries one indication at a time, so a response composed
+while an earlier one is still unconfirmed waits for that confirmation before
+it is sent. **A device MUST be able to hold one such response**, because that
+window is exactly where a conforming client's next request arrives. A `busy`
+refusal is a response and waits its turn the same way. Past that a device has
+no room, which is the discard above: a client writing faster than a bounded
+device can answer has already broken the one-outstanding rule, and holding
+more would let it size the device's memory.
 
 A client MUST NOT reuse a `tag` while a request bearing it is outstanding. It
 needs no enforcement: with one request outstanding, a second write is refused
-`busy` whatever tag it carries, so a device keeps no table of tags — it echoes
-the tag and forgets it. A tag becomes reusable as soon as its response has
-been sent.
+`busy` whatever tag it carries, so a device keeps no table of tags — each tag
+rides in the response composed for it and is gone once that response is sent.
+A tag becomes reusable as soon as the response bearing it has arrived.
 
 **`detail` is present if and only if `status` is `ok`.** A refused request is
 answered with exactly three bytes, and a client MUST NOT read the detail of a
@@ -1091,7 +1117,7 @@ remain unassigned in major version 1.
 | 2 | `bad_params` | Parameters malformed or out of range |
 | 3 | `table_full` | No free subscription slot |
 | 4 | `rate_exceeded` | Requested rate is above gps_max_rate_hz or imu_max_rate_hz (SPEC.md 9.6). Never used for CAN |
-| 5 | `busy` | A response is already outstanding; wait for it, then retry (SPEC.md 9) |
+| 5 | `busy` | A response is still owed; wait for it, then retry (SPEC.md 9) |
 | 6 | `needs_encryption` | Allocated, never sent: encryption is enforced by GATT permission (SPEC.md 10) |
 | 7 | `unknown_subscription` | No installed subscription with that id and mask |
 | *other* | *unknown* | MUST decode as unknown, never as a default |
@@ -1177,11 +1203,11 @@ Responses arrive by indication on that characteristic, so a write that precedes
 enablement is a request whose answer has nowhere to go.
 
 **A device MUST NOT apply a request it cannot answer.** If the response cannot
-be delivered — indications not enabled, or a response already outstanding — the
-request MUST NOT take effect, and the device MUST NOT count it as received.
-Deliverability is decided *before* dispatch, not after: a device that applies
-a request whose response is then lost leaves the client no way to find out
-what happened.
+be delivered — indications not enabled, or a response still owed from an
+earlier request — the request MUST NOT take effect, and the device MUST NOT
+count it as received. Deliverability is decided *before* dispatch, not after: a
+device that applies a request whose response is then lost leaves the client no
+way to find out what happened.
 
 **Every opcode in this specification is safe to retry:**
 

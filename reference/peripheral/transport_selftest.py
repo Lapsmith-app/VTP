@@ -283,6 +283,46 @@ def main():
           f"a refused control response MUST be retried until it lands, not "
           f"dropped; wire holds {got}")
 
+    # ---- Owing ends at the send, over the real pump (SPEC.md 9) ---------
+    # The isolated ControlQueue test in selftest.py calls delivered() by hand,
+    # so it pins the admission rule but not the wiring that drives it. This
+    # drives the REAL pump: the send is `update_value` returning True, and
+    # nothing here supplies that event on the queue's behalf.
+    peripheral, server, _ = build(gps_hz=0)
+    server.connect(subscribe=("control",))
+    run(peripheral, 5)
+    # Two writes before the pump has run: the first response is composed and
+    # UNSENT, so it is owed and the second is refused.
+    peripheral.write_request(
+        gattsim.FakeCharacteristic(serve.CHAR["control"]),
+        bytes([dev.CAN_RESET, 1]))
+    peripheral.write_request(
+        gattsim.FakeCharacteristic(serve.CHAR["control"]),
+        bytes([dev.CAN_RESET, 2]))
+    run(peripheral, 50)
+    got = server.sent("control")
+    check([(r[1], r[2]) for r in got] == [(1, 0), (2, 5)],
+          f"a request written while the first response was still unsent MUST "
+          f"be refused busy and queued behind it; wire holds "
+          f"{[(r[1], r[2]) for r in got]}")
+
+    # Both have now been SENT, so the device owes nothing and the next request
+    # is APPLIED. This is the case a confirmation-anchored device gets wrong:
+    # it would still be owing both, and would refuse a client that wrote
+    # exactly when SPEC.md 9 tells it to.
+    peripheral.write_request(
+        gattsim.FakeCharacteristic(serve.CHAR["control"]),
+        bytes([dev.CAN_SUBSCRIBE, 3]) + b"\xa0\x01\x00\x00\x00\x00\x00")
+    run(peripheral, 50)
+    got = server.sent("control")
+    check(len(got) == 3 and (got[2][1], got[2][2]) == (3, 0),
+          f"once every response has been sent the device owes nothing and the "
+          f"next request MUST be applied, not refused; wire holds "
+          f"{[(r[1], r[2]) for r in got]}")
+    check(len(peripheral.device.can_table()) == 1,
+          f"...and it MUST have taken effect: the subscription table holds "
+          f"{peripheral.device.can_table()}")
+
     # ---- OBD_INFO is answered only when the probe completes -------------
     # SPEC.md 15.2 -- the response reports a COMPLETED probe. The device
     # answers RESPONSE_PENDING and the pump collects the reply from

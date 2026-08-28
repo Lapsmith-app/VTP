@@ -217,6 +217,24 @@ async def control_busy_when_outstanding(s):
         # The device answered the first before the second was written, so the
         # two were never outstanding together and there was nothing to detect.
         # A limit of testing from a host, not a finding.
+        #
+        # It is a STRUCTURAL limit, and worth knowing before anyone tries to
+        # make this check verdict reliably. ATT allows one outstanding request
+        # per bearer, so a client cannot pipeline two Write Requests: the
+        # second is illegal until the first's Write Response arrives, and a
+        # device sends that as soon as its write handler returns. The window in
+        # which `busy` is reachable is therefore the gap between that Write
+        # Response and the moment the device SENDS the answer (SPEC.md 9) --
+        # roughly one connection interval -- and a device that answers promptly
+        # closes it before this harness can write into it. Reported by the
+        # first outside implementer, who reached it only by holding responses
+        # 300 ms behind a build-time fault.
+        #
+        # So this Observe is the honest outcome and not a gap to be plugged: a
+        # device fast enough to be unverifiable here is a device behaving well.
+        # Deepening the pipeline does not help -- a three-deep check has the
+        # same window and would Observe on every device rather than only fast
+        # ones.
         raise Observe(
             "the device answered the first request before the second was "
             "written, so nothing was ever pipelined and this could not be "
@@ -225,7 +243,7 @@ async def control_busy_when_outstanding(s):
         f"a request written while the device still owed a response was answered "
         f"{second.status_name}, not busy. §9 makes busy the one thing a device "
         f"can say when its single outstanding slot is occupied -- the "
-        f"alternatives §9.6 forbids are silence, and applying a request it "
+        f"alternatives §9.4 forbids are silence, and applying a request it "
         f"cannot answer", response=second.raw.hex())
 
 

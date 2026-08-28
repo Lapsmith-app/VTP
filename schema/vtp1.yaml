@@ -159,8 +159,15 @@ enums:
       # what a device says to a client that pipelines anyway. Kept rather than
       # removed with the queue it used to describe: without it a device meeting
       # such a client must choose between silence and applying a request it
-      # cannot answer, and 9.6 forbids both.
-      - {value: 5, name: busy,               desc: "A response is already outstanding; wait for it, then retry (SPEC.md 9)"}
+      # cannot answer, and 9.4 forbids both.
+      #
+      # A response is owed from acceptance until it is SENT (SPEC.md 9), and
+      # this refusal is itself a response owed that way -- so a device
+      # answering one request and refusing another owes two until both have
+      # gone out. Not until CONFIRMED: a client writes again as soon as the
+      # response reaches it, so a device owing that long would refuse one doing
+      # exactly what SPEC.md 9 asks.
+      - {value: 5, name: busy,               desc: "A response is still owed; wait for it, then retry (SPEC.md 9)"}
       - {value: 6, name: needs_encryption,   desc: "Allocated, never sent: encryption is enforced by GATT permission (SPEC.md 10)"}
       - {value: 7, name: unknown_subscription, desc: "No installed subscription with that id and mask"}
   sub_mode:
