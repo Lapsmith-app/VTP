@@ -83,12 +83,20 @@ boundary is right. A failure is unambiguous. Same class of limit as
 `control.busy_when_outstanding`'s Observe branch, and it wants a sniffer
 rather than a better host.
 
-The `owes_until_confirmed` fault seeds it: the loopback's decrement moves a
-round trip past the delivery, which is the defect as reported. It is listed as
-cascading, because a device owing past the send refuses *every* client that
-writes on arrival and every request this harness makes is written on arrival.
-The two checks above catch it because they are the generic conforming client,
-not because they are more sensitive than the rest.
+The `owes_until_confirmed` fault seeds both: the loopback's decrement moves a
+round trip past the delivery, which is the defect as reported. A device with it
+for real refuses *every* client that writes on arrival, and every request this
+harness makes is written on arrival — so the unnarrowed fault fails fourteen
+checks and says only which one ran first. It is narrowed the way
+`drops_a_response` is and by the same predicate: eligible only on a well-formed
+`TIME_SYNC`, and spent on the first refusal it causes. That fixes the set of
+checks that meet it at the two named above, with
+`control.busy_when_outstanding` still passing, since its `busy` is a genuine
+pipeline and correct there. Spending it on the *refusal* rather than on the
+first eligible response is what keeps that true — a legitimately pipelined
+`busy` must not consume it. Deleting the dedicated check does not silence the
+fault: `control.time_sync` sends seven well-formed `TIME_SYNC`s back to back
+and meets it next, which is checked rather than assumed.
 
 ### §15 rewritten: response-paced, grouped, divided
 

@@ -193,16 +193,6 @@ CASCADING = {
     "no_tag_echo":
         "no response can be correlated, so every check awaiting one fails "
         "whatever its own rule says",
-    "owes_until_confirmed":
-        "correlation still works, but the device refuses every conforming "
-        "request, so every check that makes one fails on the refusal rather "
-        "than on its own rule. This is not a fault that could be narrowed: a "
-        "device owing past the send refuses a client that writes on arrival, "
-        "and every request this harness makes is written on arrival, so the "
-        "two checks named against it catch it BECAUSE they are the generic "
-        "conforming client and not because they are more sensitive than the "
-        "rest. can.subscribe_ok is the one excuse this breaks, and it breaks "
-        "it by being exactly the device that excuse describes",
 }
 
 #: Faults that are SCENARIO seeds rather than matrix entries: neither breaks

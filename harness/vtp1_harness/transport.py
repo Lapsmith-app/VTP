@@ -289,7 +289,7 @@ FAULTS = {
     "clock_per_stream": "SPEC.md §8.1 — the streams are not on one clock",
     "drops_a_response": "SPEC.md §9 — a request is silently discarded rather than answered",
     "pipelines_silently": "SPEC.md §9 — a second request is applied instead of answered busy",
-    "owes_until_confirmed": "SPEC.md §9 — a response stays owed until its confirmation, so a client writing on arrival is refused busy",
+    "owes_until_confirmed": "SPEC.md §9 — a response stays owed until its confirmation, so a client writing on arrival is refused busy (narrowed to one refusal; see _answer)",
     "busy_but_applied": "SPEC.md §9 — a request answered busy is applied anyway",
     "list_reserved_nonzero": "SPEC.md §13.3 — a reserved declaration byte is not zero",
     "missing_characteristic": "SPEC.md §4.1 — a characteristic is absent rather than inert",
@@ -397,6 +397,8 @@ class LoopbackTransport(Transport):
         # response owed the same way, so a device answering one request and
         # refusing another owes two until both have gone out.
         self._owed = 0
+        self._late_armed = False
+        self._late_pending = 0
         # ...and no more than two, which is all §9 requires a device to hold:
         # the one going out and one composed behind it. Past that there is no
         # room, and §9 says discard rather than apply a request that cannot be
@@ -566,6 +568,10 @@ class LoopbackTransport(Transport):
             self.device._obd_transmit = lambda pid, now: None
         self._connected = True
         self._owed = 0
+        # `owes_until_confirmed` fires once per connection, and only while a
+        # deferred decrement is actually outstanding. See _answer.
+        self._late_armed = "owes_until_confirmed" in self.faults
+        self._late_pending = 0
         self._deliver_lock = asyncio.Lock()
         self._pending_ctl_request = None
         self._obd_info_answers = 0
@@ -925,6 +931,17 @@ class LoopbackTransport(Transport):
             if "pipelines_silently" not in self.faults:
                 if "busy_but_applied" in self.faults:
                     self.device.handle_control(request, t_rx=t_rx)
+                if self._late_pending:
+                    # This refusal is the `owes_until_confirmed` defect
+                    # showing itself: the device is refusing a client only
+                    # because a decrement it already owed has not landed. One
+                    # instance is everything a check needs, so the fault is
+                    # spent here rather than left to refuse the rest of the
+                    # run. Spent on the REFUSAL and not on the first eligible
+                    # response, so that a legitimately pipelined `busy` --
+                    # control.busy_when_outstanding's, which runs earlier --
+                    # does not consume it.
+                    self._late_armed = False
                 if len(request) >= 2 and self._owed < self._owed_max:
                     # Delivered on the same schedule as any other response,
                     # because it IS one: sending it immediately would model a
@@ -976,11 +993,22 @@ class LoopbackTransport(Transport):
             # control.no_busy_for_conforming_client -- and selftest.py names
             # both.
             return                                  # answered by nobody
+        # Narrowed to a well-formed TIME_SYNC for the same reason, and by the
+        # same predicate, as `drops_a_response` above: a real device with this
+        # defect owes late on EVERY response and refuses every client that
+        # writes on arrival, which is every request this harness makes -- so
+        # the unnarrowed fault fails fourteen checks and says only that it ran
+        # first. Narrowed, the set of checks that meet it is fixed:
+        # control.no_busy_for_conforming_client sends the first well-formed
+        # TIME_SYNC of a run, and control.time_sync -- which sends seven more
+        # back to back -- would meet it if that check were ever deleted.
+        late = (self._late_armed and len(request) == 2
+                and request[0] == refdec.OPCODE["TIME_SYNC"])
         response = self._corrupt_response(bytearray(response), request)
         self._owed += 1
-        asyncio.create_task(self._answer(bytes(response)))
+        asyncio.create_task(self._answer(bytes(response), late=late))
 
-    async def _answer(self, response):
+    async def _answer(self, response, late=False):
         """Deliver on the device's own schedule, not the caller's.
 
         The delay is what makes a request genuinely outstanding. Without it
@@ -1001,7 +1029,6 @@ class LoopbackTransport(Transport):
         count refuses the next request `busy` for no reason at all.
         """
         lock = self._deliver_lock
-        late = "owes_until_confirmed" in self.faults
         async with lock:
             await asyncio.sleep(self._control_latency)
             if lock is not self._deliver_lock:
@@ -1009,21 +1036,23 @@ class LoopbackTransport(Transport):
             self._deliver_control(response)
             if not late:
                 self._owed -= 1
-        if late:
-            # SPEC.md §9's boundary moved one round trip late: this device
-            # keeps owing until the ATT confirmation, which lands about that
-            # long after the response did. §9 puts the boundary at the send
-            # for exactly this reason -- a client writes again as soon as the
-            # response ARRIVES, so a device owing past that refuses `busy` to
-            # a client that waited precisely as long as it was told to.
-            #
-            # The lock is released before the wait on purpose. The defect is
-            # about when the device stops owing, not about holding the wire:
-            # keeping the lock would also delay the next delivery, and a
-            # slower device is not the mistake being modelled here.
-            await asyncio.sleep(self._control_latency)
-            if lock is self._deliver_lock:
-                self._owed -= 1
+                return
+            # `owes_until_confirmed` -- SPEC.md §9's boundary moved one round
+            # trip late: this device keeps owing until the ATT confirmation,
+            # which lands about that long after the response did. §9 puts the
+            # boundary at the send for exactly this reason -- a client writes
+            # again as soon as the response ARRIVES, so a device owing past
+            # that refuses `busy` to a client that waited precisely as long as
+            # it was told to.
+            self._late_pending += 1
+        # The lock is released before the wait on purpose. The defect is about
+        # when the device stops owing, not about holding the wire: keeping the
+        # lock would also delay the next delivery, and a slower device is not
+        # the mistake being modelled here.
+        await asyncio.sleep(self._control_latency)
+        self._late_pending -= 1
+        if lock is self._deliver_lock:
+            self._owed -= 1
 
     def _deliver_control(self, response):
         cb = self._subs.get(refdec.CHAR["control"])
