@@ -201,6 +201,12 @@ async def control_busy_when_outstanding(s):
     # first is answered.
     first_tag, first_future = await c.send(UNALLOCATED_OPCODE)
     second = await _pipelined_second(s, c)
+    if second is not None and second.status == refdec.STATUS_VALUE["busy"]:
+        # The one refusal in this run that a conforming client did not earn,
+        # so `control.no_unprovoked_busy` can tell it from the rest. Recorded
+        # by identity and not by tag: a run reuses every tag several times
+        # over, and the exemption has to name this response and no other.
+        s.state.setdefault("provoked_busy", []).append(second)
     try:
         first_response = await c.await_response(
             UNALLOCATED_OPCODE, first_tag, first_future, timeout=5.0)
@@ -284,6 +290,101 @@ async def control_busy_not_applied(s):
     if probe.status != refdec.STATUS_VALUE["unknown_subscription"]:
         raise Skip(f"the probe unsubscribe was answered {probe.status_name}, "
                    f"so whether the busy request took effect cannot be told")
+
+
+@check(id="control.no_busy_for_conforming_client", section="9",
+       phase="control", severity="MUST", requires=("control",),
+       title="A client that writes on arrival is never answered busy")
+async def control_no_busy_for_conforming_client(s):
+    """The other half of `control.busy_when_outstanding`, and the half §9 is
+    written for.
+
+    That check pipelines and requires `busy`. This one does what §9 tells a
+    client to do -- one request outstanding, the next written as soon as the
+    response arrives -- and requires that `busy` never comes back. A device
+    that answers it is refusing a client that did nothing wrong.
+
+    The boundary is §9's: a response is owed until the device has SENT it, not
+    until its confirmation. A device that kept owing until the confirmation
+    refuses exactly this client, and would look correct to every other check
+    in this file.
+
+    A pass is worth less than a failure here, and deliberately so. The window
+    this aims at is between the response arriving at the host and the host's
+    stack emitting the ATT confirmation, and on macOS CoreBluetooth confirms on
+    its own schedule and never says when. If it confirms before this coroutine
+    is woken, the next write lands after the confirmation and a device with the
+    wrong boundary answers correctly anyway. So a pass says the device did not
+    refuse a client writing this fast; it does not say the boundary is right.
+    A failure says the boundary is wrong, and says it unambiguously. Same class
+    of limit as the Observe branch of `control.busy_when_outstanding`, and like
+    that one it wants a sniffer to settle rather than a better host.
+    """
+    c = _control(s)
+    # TIME_SYNC: owned by no capability, so every Control device answers it,
+    # and §9.4 lists it as safe to repeat -- each attempt is a fresh reading
+    # and nothing on the device changes. A device that does not implement it
+    # is control.time_sync's finding, not this one's; here it only has to be
+    # something the device answers, so fall back to the probe opcode.
+    opcode = refdec.OPCODE["TIME_SYNC"]
+    unsupported = refdec.STATUS_VALUE["unsupported_opcode"]
+    rounds = 40
+    for i in range(rounds):
+        try:
+            response = await c.request(opcode)
+        except ControlTimeout:
+            raise Fail(f"round {i + 1} of {rounds} was never answered. A "
+                       f"device MUST respond to every request it "
+                       f"applies") from None
+        if i == 0 and response.status == unsupported:
+            opcode = UNALLOCATED_OPCODE
+            continue
+        if response.status == refdec.STATUS_VALUE["busy"]:
+            raise Fail(
+                f"round {i + 1} of {rounds} was answered busy. Every request "
+                f"here was written after the previous response had ARRIVED, "
+                f"with one outstanding throughout -- which is what §9 tells a "
+                f"client to do. A response is owed until the device has SENT "
+                f"it, and a device still owing one the client has already "
+                f"received refuses a client that waited exactly as long as it "
+                f"was told to, and refuses the retry the same way",
+                response=response.raw.hex(), round=i + 1)
+
+
+@check(id="control.no_unprovoked_busy", section="9", phase="transport",
+       severity="MUST", requires=("control",),
+       title="No busy was answered to a request that did not pipeline")
+async def control_no_unprovoked_busy(s):
+    """Every other check in this run, read back as a witness for §9.
+
+    `control.busy_when_outstanding` is the only thing in this harness that
+    writes a request before the previous one is answered. Every other request
+    -- every subscribe, every rate, every probe, across every phase -- is a
+    conforming single-outstanding client, so a `busy` anywhere else in the
+    history is a device refusing a client that did nothing wrong. The traffic
+    is already recorded, so this costs no writes of its own.
+
+    Placed in the `transport` phase rather than `control` so that it reads a
+    history with the whole interrogation in it. Requests made in the reconnect
+    phase run after this and are not covered.
+    """
+    c = _control(s)
+    provoked = s.state.get("provoked_busy") or []
+    busy = refdec.STATUS_VALUE["busy"]
+    unprovoked = [r for r in c.history
+                  if r.status == busy
+                  and not any(r is one for one in provoked)]
+    if not unprovoked:
+        return
+    named = ", ".join(f"{r.opcode_name} tag {r.tag}" for r in unprovoked[:6])
+    if len(unprovoked) > 6:
+        named += f", and {len(unprovoked) - 6} more"
+    raise Fail(
+        f"{len(unprovoked)} request(s) that did not pipeline were answered "
+        f"busy: {named}. Each was written after the previous response had "
+        f"arrived, so §9's one-outstanding rule was kept; a device owing a "
+        f"response past the moment it sent it refuses a conforming client",
+        responses=[r.raw.hex() for r in unprovoked[:6]])
 
 
 # ---------------------------------------------------------------------------

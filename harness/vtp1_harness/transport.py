@@ -289,6 +289,7 @@ FAULTS = {
     "clock_per_stream": "SPEC.md §8.1 — the streams are not on one clock",
     "drops_a_response": "SPEC.md §9 — a request is silently discarded rather than answered",
     "pipelines_silently": "SPEC.md §9 — a second request is applied instead of answered busy",
+    "owes_until_confirmed": "SPEC.md §9 — a response stays owed until its confirmation, so a client writing on arrival is refused busy",
     "busy_but_applied": "SPEC.md §9 — a request answered busy is applied anyway",
     "list_reserved_nonzero": "SPEC.md §13.3 — a reserved declaration byte is not zero",
     "missing_characteristic": "SPEC.md §4.1 — a characteristic is absent rather than inert",
@@ -966,11 +967,14 @@ class LoopbackTransport(Transport):
             self.device._obd_interval_ms = obd_poll_before[1]
         if "drops_a_response" in self.faults and len(request) == 2 and \
                 request[0] == refdec.OPCODE["TIME_SYNC"]:
-            # Only the well-formed one, so exactly one check meets it. A device
-            # that drops responses drops them for every request, and any check
-            # making that request would catch it -- which would make WHICH check
-            # reports it an accident of ordering rather than a property worth
-            # asserting.
+            # Only the well-formed one, so the set of checks that meet it is
+            # fixed rather than an accident of ordering. A device that drops
+            # responses drops them for every request, so a fault that dropped
+            # any of them would be reported by whichever check happened to run
+            # first. Narrowed to TIME_SYNC it is met by the two checks that
+            # send one -- control.time_sync and, before it,
+            # control.no_busy_for_conforming_client -- and selftest.py names
+            # both.
             return                                  # answered by nobody
         response = self._corrupt_response(bytearray(response), request)
         self._owed += 1
@@ -997,12 +1001,29 @@ class LoopbackTransport(Transport):
         count refuses the next request `busy` for no reason at all.
         """
         lock = self._deliver_lock
+        late = "owes_until_confirmed" in self.faults
         async with lock:
             await asyncio.sleep(self._control_latency)
             if lock is not self._deliver_lock:
                 return                              # a different connection
             self._deliver_control(response)
-            self._owed -= 1
+            if not late:
+                self._owed -= 1
+        if late:
+            # SPEC.md §9's boundary moved one round trip late: this device
+            # keeps owing until the ATT confirmation, which lands about that
+            # long after the response did. §9 puts the boundary at the send
+            # for exactly this reason -- a client writes again as soon as the
+            # response ARRIVES, so a device owing past that refuses `busy` to
+            # a client that waited precisely as long as it was told to.
+            #
+            # The lock is released before the wait on purpose. The defect is
+            # about when the device stops owing, not about holding the wire:
+            # keeping the lock would also delay the next delivery, and a
+            # slower device is not the mistake being modelled here.
+            await asyncio.sleep(self._control_latency)
+            if lock is self._deliver_lock:
+                self._owed -= 1
 
     def _deliver_control(self, response):
         cb = self._subs.get(refdec.CHAR["control"])

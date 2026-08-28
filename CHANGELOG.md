@@ -64,6 +64,32 @@ reachable between the Write Response and the moment the device sends its
 answer, so the check Observes rather than verdicts against any device that
 answers promptly, and a deeper pipeline would not change that.
 
+**The harness now rejects a `busy` nobody asked for.** Reported by the same
+implementation, which had this defect and passed four harness runs with it:
+`busy` was asserted on in exactly one place and treated as a pass everywhere
+else, so the rule settled above had no check behind it.
+`control.no_busy_for_conforming_client` writes forty requests, each as soon as
+the previous response has arrived and never more than one outstanding — which
+is what §9 tells a client to do — and fails on any `busy`.
+`control.no_unprovoked_busy` reads the whole run's control history back at the
+end and fails on any `busy` other than the one
+`control.busy_when_outstanding` deliberately provokes, which turns every
+request the harness already makes into a witness for the rule at no new
+traffic. A pass on the first is worth less than a failure: the window it aims
+at closes when the host's stack emits its ATT confirmation, and CoreBluetooth
+does that on its own schedule without telling the application, so a green run
+says the device did not refuse a client writing that fast rather than that its
+boundary is right. A failure is unambiguous. Same class of limit as
+`control.busy_when_outstanding`'s Observe branch, and it wants a sniffer
+rather than a better host.
+
+The `owes_until_confirmed` fault seeds it: the loopback's decrement moves a
+round trip past the delivery, which is the defect as reported. It is listed as
+cascading, because a device owing past the send refuses *every* client that
+writes on arrival and every request this harness makes is written on arrival.
+The two checks above catch it because they are the generic conforming client,
+not because they are more sensitive than the rest.
+
 ### §15 rewritten: response-paced, grouped, divided
 
 Pre-1.0 and with no third-party consumers, so the poll loop was fixed rather
