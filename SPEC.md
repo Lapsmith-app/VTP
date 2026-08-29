@@ -759,17 +759,55 @@ to a subscription naming one.
 
 A masked subscription may match several identifiers, and each is a different
 signal from a different sender. A device MUST therefore keep `periodic` state —
-the interval, and "the first matching frame" — **per matching identifier**,
-not per subscription: a shared interval lets whichever identifier arrives
-first consume it, so a client sees one signal out of a group it subscribed to
-as a group, and the failure looks like a quiet bus rather than a bug.
+the interval, and "the first matching frame" — **per (subscription,
+identifier) pair**. Not one set of state per subscription: a shared interval
+lets whichever identifier arrives first consume it, so a client sees one signal
+out of a group it subscribed to as a group, and the failure looks like a quiet
+bus rather than a bug. And not one set per identifier: state keyed by the
+identifier alone belongs to whichever subscription last matched it, so a second
+subscription covering one identifier of a masked group destroys the schedule of
+the first.
 
-Per-identifier state is bounded by the identifiers actually seen, which a
+**A displaced subscription keeps its schedule.** §9.2 decides which
+subscription governs a frame; it does not decide that the others have stopped
+applying. Scheduling state belongs to the subscription that owns it, and a
+subscription displaced from governance of an identifier — by a more specific
+subscription installed later, say — MUST retain that state and resume from it
+if governance returns, subject only to the bound below. A device that discards
+it forwards immediately on the identifier's next frame, inside an interval the
+client set and never withdrew.
+
+**A re-install that changes nothing changes nothing.** A `CAN_SUBSCRIBE` or
+`CAN_SUBSCRIBE_MASK` naming an `(id, mask)` already installed, with the same
+`mode` and the same `arg`, MUST leave that subscription's scheduling state
+exactly as it was: no interval restarts, and no first frame is owed. §9.4 makes
+every request here safe to retry, and a client retrying a request whose
+response was lost MUST NOT be paid for it with a frame inside the interval it
+asked for — the client cannot tell the two cases apart, so the device must
+make them identical.
+
+A re-install that changes `mode` or `arg` is a new instruction rather than a
+repetition. It MUST re-arm the first matching frame for every identifier the
+subscription matches, so a client that changes its mind sees a value without
+waiting out the new interval. Installation order is kept either way (§9.1).
+
+The number of such pairs is bounded by the identifiers actually seen, which a
 device cannot know when the subscription is installed. A device MAY bound the
-state it keeps; when the bound is reached it shed, exactly as for load (§6.3):
+state it keeps; when the bound is reached it sheds, exactly as for load (§6.3):
 frames it can no longer schedule are discarded, counted in `dropped`, and the
 shedding flag is set. A device MUST NOT silently forward such frames
 unscheduled, and MUST NOT drop the subscription.
+
+**What a bounded device sacrifices.** State retained for a displaced
+subscription is a rate limit nothing is currently using; a shed frame is a
+subscription the client installed and is hearing nothing from, including the
+first frame this section promises it. So a device that has reached its bound
+MUST reclaim state belonging to subscriptions that do not currently govern
+their identifier before it sheds a frame whose governing subscription has no
+state. Reclaiming costs one early frame if governance returns, and that cost is
+conformant: it is the exception the displacement rule above names. When every
+entry belongs to a governing subscription there is nothing left to reclaim,
+the device sheds, and which entry it then keeps is its own choice.
 
 ### 6.9 One bus
 
@@ -1134,7 +1172,9 @@ Subscription modes:
 <!-- END GENERATED: enum:sub_mode -->
 
 A device MUST reject a subscription that would exceed `can_subscription_slots`
-with `table_full`, rather than accepting it and silently discarding frames.
+with `table_full`, rather than accepting it and silently discarding frames. A
+re-install of an `(id, mask)` the table already holds exceeds nothing and MUST
+NOT be refused on capacity grounds (§9.1).
 
 ### 9.1 CAN subscriptions
 
@@ -1155,11 +1195,20 @@ extended `0x1A0` are two different frames from possibly two different ECUs. A
 client that wants both formats clears bit 29 in its `mask`.
 
 **A subscription is identified by its `(id, mask)` pair**, compared over bits
-0–29. Installing a subscription whose `id` and `mask` equal one already
-installed MUST update that subscription's `mode` and `arg` in place, keeping
-its installation order (§9.2); it MUST NOT consume a second slot. A client
-that reprograms unconditionally on every connection therefore cannot exhaust
-the table — which is the strategy §4 already forces on it.
+0–29 — the pair as the client wrote it, not `id & mask`. Two subscriptions
+whose masks are equal and whose `id`s differ only in bits that mask clears
+match the same frames, and are nevertheless two subscriptions: each occupies a
+slot and each is removed by the parameters that installed it. A client is
+answerable for the bytes it sent and nothing else.
+
+Installing a subscription whose `id` and `mask` equal one already installed
+MUST update that subscription's `mode` and `arg` in place, keeping its
+installation order (§9.2); it MUST NOT consume a second slot, and it MUST be
+answered `ok` whether or not the table is full — the free-slot check governs a
+subscription being created, and this creates none. A client that reprograms
+unconditionally on every connection therefore cannot exhaust the table — which
+is the strategy §4 already forces on it. What becomes of the subscription's
+scheduling state is §6.8: nothing at all when `mode` and `arg` are unchanged.
 
 `CAN_UNSUBSCRIBE` names the subscription the same way: it removes the one
 whose installed `id` and `mask` equal its parameters, and MUST be answered
@@ -1182,6 +1231,11 @@ so which subscription governs a frame is something a client can determine
 rather than discover. A device MUST NOT forward one frame once per matching
 subscription: duplicate frames on one bus-arrival timestamp are
 indistinguishable from a bus fault.
+
+This section decides which subscription forwards a frame, and nothing more. A
+subscription that loses an identifier to a more specific one is still
+installed, still covers the rest of what its mask matches, and keeps its
+schedule for the identifier it lost (§6.8).
 
 ### 9.3 Load
 
@@ -1213,7 +1267,7 @@ way to find out what happened.
 
 | Opcode | Why a retry is safe |
 | --- | --- |
-| `CAN_SUBSCRIBE`, `CAN_SUBSCRIBE_MASK` | §9.1 — the same `id` and `mask` update in place |
+| `CAN_SUBSCRIBE`, `CAN_SUBSCRIBE_MASK` | §9.1 — the same `id` and `mask` update in place, and §6.8 — an unchanged `mode` and `arg` leave the schedule untouched, so the retry costs no frame |
 | `CAN_UNSUBSCRIBE` | A second attempt answers `unknown_subscription`; the table is the same either way |
 | `CAN_RESET` | Clearing an empty table is clearing an empty table |
 | `GPS_SET_RATE`, `IMU_SET_RATE` | Setting a rate to the value it already holds |
