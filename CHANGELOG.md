@@ -60,6 +60,39 @@ peripheral now re-arms on a changed `mode` or `arg` and on nothing else, and
 identical retry, the pair identity, the transmission bits and the full-table
 re-install.
 
+### Harness: ten checks for the rules a byte vector cannot reach
+
+The same report noted that the conformance harness had nothing for any of
+this. It now has, and none of it needs a second CAN node — five ask the
+control plane a question, and five watch what the device's own bus traffic
+does under a table the harness reprograms:
+
+| Check | Section |
+| --- | --- |
+| `can.update_in_place_when_full` | §9.1 — a re-install on a full table is `ok` |
+| `can.transmission_bits_ignored` | §9.1 — bits 30 and 31 are not part of the identity |
+| `can.identity_is_the_pair` | §9.1 — two subscriptions differing only in ignored id bits are two subscriptions |
+| `can.unknown_mode_refused` | §6.8 — modes 2, 3 and above are `bad_params` and take no slot |
+| `can.no_rate_admission` | §9.3 — a catch-all subscription is not refused on rate grounds |
+| `can.periodic_first_then_rations` | §6.8 — the first matching frame, then the interval |
+| `can.identical_reinstall_costs_nothing` | §9.4 — a byte-identical retry forwards no frame |
+| `can.displaced_schedule_survives` | §6.8 — a displaced subscription keeps its rate limit |
+| `can.format_bit_is_identity` | §9.1 — a subscription on the other frame format matches nothing |
+| `can.dropped_excludes_declined` | §6.3 — `dropped` counts neither unmatched nor mode-declined frames |
+
+Each has a seeded fault in `transport.FAULTS` that makes it fail, as
+`harness/selftest.py` requires. `can.format_bit_is_identity` is the one that
+caught a defect in the field: a controller that keeps the frame format in a
+flags word rather than in the identifier (Zephyr's `can_frame.flags` among
+them) clears bit 29 for every frame on the bus, so extended subscriptions
+never match and a standard subscription on the same number delivers another
+ECU's traffic.
+
+The scheduling checks measure by bus-arrival timestamp rather than by arrival
+window: a batch is flushed on the device's own schedule (§6.2), so frames
+accepted before a control request are delivered after it, and counting by
+window reads those as new frames.
+
 ### §9: owing a response ends at the send
 
 Reported by the first implementation outside this repository, from code review

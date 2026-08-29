@@ -283,6 +283,17 @@ FAULTS = {
     "tie_break_latest": "SPEC.md §9.2 — equally specific masks tie-break to the latest installed",
     "can_duplicate_across_batches": "SPEC.md §9.2 — a forwarded frame is repeated in a later batch",
     "unknown_subscription_ok": "SPEC.md §9.1 — an unknown id and mask is answered ok",
+    "update_refused_when_full": "SPEC.md §9.1 — a re-install of an installed id and mask is refused table_full",
+    "transmission_bits_in_identity": "SPEC.md §9.1 — bits 30 and 31 are kept in the stored identity, so a subscription installed with them can never be named again",
+    "identity_folds_on_mask": "SPEC.md §9.1 — identity computed as id & mask rather than the pair the client wrote",
+    "unknown_mode_defaults": "SPEC.md §6.8 — an unassigned subscription mode is decoded as every_frame",
+    "rate_admission": "SPEC.md §9.3 — a CAN subscription is refused rate_exceeded on predicted load",
+    "no_first_frame": "SPEC.md §6.8 — periodic holds back the first matching frame",
+    "periodic_ignored": "SPEC.md §6.8 — periodic forwards every frame, ignoring arg",
+    "reinstall_rearms": "SPEC.md §6.8 — a byte-identical re-install re-arms the first frame",
+    "schedule_keyed_by_identifier": "SPEC.md §6.8 — scheduling state is keyed by identifier alone, so a new subscription takes over another's",
+    "format_bit_ignored": "SPEC.md §9.1 — matching ignores bit 29, so standard and extended frames of one number are the same frame",
+    "dropped_counts_declined": "SPEC.md §6.3 — a frame the subscription mode declined is counted in dropped",
     "stream_before_subscribe": "SPEC.md §9.1 — CAN frames arrive with no subscription installed",
     "caps_reserved_bits": "SPEC.md §4 — a reserved capability bit is set",
     "absent_field_nonzero": "SPEC.md §5.1 — a field whose validity bit is clear is not zero",
@@ -431,6 +442,9 @@ class LoopbackTransport(Transport):
         self._dup_entries = {}
         self._dup_shunt = 0
         self._pending_dup_unsub = None
+        # SPEC.md §9.1 — the (id, mask) pairs installed with bits 30 or 31 set,
+        # for the device that keeps those bits in what it stores.
+        self._decorated_subs = set()
 
     # -- lifecycle --------------------------------------------------------
 
@@ -532,6 +546,67 @@ class LoopbackTransport(Transport):
                            key=lambda ks: (-bin(ks[0][1]).count("1"),
                                            -ks[1]["order"]))[1]
             dev._governing = latest_wins
+        if "format_bit_ignored" in self.faults:
+            # SPEC.md §9.1 -- matching over bits 0-28 instead of 0-29. This is
+            # the integration defect a controller invites when it keeps the
+            # frame format in a flags word rather than in the identifier: every
+            # frame reaches the table with bit 29 clear, so an extended
+            # subscription matches nothing and a standard one on the same
+            # number takes the extended frames too.
+            dev = self.device
+            def format_blind(cid, _dev=dev):
+                bare = cid & 0x1FFFFFFF
+                matches = [(k, sub) for k, sub in _dev._subscriptions.items()
+                           if (bare & (k[1] & 0x1FFFFFFF))
+                           == (k[0] & k[1] & 0x1FFFFFFF)]
+                if not matches:
+                    return None
+                return min(matches,
+                           key=lambda ks: (-bin(ks[0][1]).count("1"),
+                                           ks[1]["order"]))[1]
+            dev._governing = format_blind
+        if {"no_first_frame", "periodic_ignored",
+                "dropped_counts_declined"} & self.faults:
+            # SPEC.md §6.8 -- the two halves of the mode contract, each broken
+            # on its own. `no_first_frame` starts a new identifier's state as
+            # though a frame had just been forwarded, so the client waits out
+            # an interval for the value it installed the subscription to see.
+            # `periodic_ignored` forwards everything and leaves `arg` as
+            # decoration.
+            #
+            # `dropped_counts_declined` is the third: the frame is declined
+            # correctly and then counted as a loss, so a working rate limit
+            # reports itself to the user as a broken bus (SPEC.md §6.3).
+            dev = self.device
+            hold = "no_first_frame" in self.faults
+            ration = "periodic_ignored" not in self.faults
+            count = "dropped_counts_declined" in self.faults
+            def admit(sub, cid, now, _dev=dev, _hold=hold, _ration=ration,
+                      _count=count):
+                state = sub["per_id"].get(cid)
+                if state is None:
+                    state = {"last": 0, "seen": 0, "emitted_at": 0}
+                    sub["per_id"][cid] = state
+                if _hold and state["seen"] == 0:
+                    # An identifier this subscription has never forwarded,
+                    # presented as one it has just forwarded. Keyed on `seen`
+                    # and not on creating the entry, because the frame
+                    # generator creates it first: written the other way the
+                    # hold reduced to `now < arg`, and lapsed silently on any
+                    # run that took longer than the interval.
+                    state["emitted_at"] = now
+                state["seen"] += 1
+                first = state["seen"] == 1 and not _hold
+                emit = True
+                if _ration and sub["mode"] == 1 and sub["arg"] and not first:
+                    emit = (now - state["emitted_at"]) >= sub["arg"] * 1000
+                if emit:
+                    state["emitted_at"] = now
+                elif _count:
+                    _dev._dropped["can"] = min(0xFFFF,
+                                               _dev._dropped["can"] + 1)
+                return emit
+            dev._admit = admit
         if "can_duplicate_across_batches" in self.faults:
             # SPEC.md §9.2 -- a forwarded frame is emitted again in the NEXT
             # batch, bus-arrival timestamp and all: cross-batch by
@@ -915,6 +990,101 @@ class LoopbackTransport(Transport):
                     [request[0], request[1],
                      refdec.STATUS_VALUE["table_full"]]))
                 return
+        if "update_refused_when_full" in self.faults and sub_key is not None \
+                and sub_key in getattr(self.device, "_subscriptions", {}):
+            slots = getattr(self.device, "CAN_SUBSCRIPTION_SLOTS", None) or \
+                _load_peripheral().CAN_SUBSCRIPTION_SLOTS
+            if len(self.device._subscriptions) >= slots:
+                # SPEC.md §9.1 -- the free-slot check run before the
+                # update-in-place check. It refuses exactly the client §4
+                # forces on it: the table is full BECAUSE it already holds
+                # what is being re-written.
+                self._deliver_control(bytes(
+                    [request[0], request[1],
+                     refdec.STATUS_VALUE["table_full"]]))
+                return
+
+        # SPEC.md §9.1 -- bits 30 and 31 kept in the stored identity. The
+        # device itself masks them, so the defect lives here: an install that
+        # carried them is remembered as a different name, and a removal that
+        # does not carry them finds nothing (and the other way round).
+        if "transmission_bits_in_identity" in self.faults:
+            if sub_key is not None:
+                bare = (sub_key[0] & refdec.MASK_EXACT, sub_key[1] & refdec.MASK_EXACT)
+                if (sub_key[0] | sub_key[1]) & 0xC0000000:
+                    self._decorated_subs.add(bare)
+                else:
+                    self._decorated_subs.discard(bare)
+            elif len(request) == 2 + refdec.OPCODE_PARAM_SIZE["CAN_UNSUBSCRIBE"] \
+                    and request[0] == refdec.OPCODE["CAN_UNSUBSCRIBE"]:
+                cid, mask = struct.unpack_from("<II", request, 2)
+                bare = (cid & refdec.MASK_EXACT, mask & refdec.MASK_EXACT)
+                decorated = bool((cid | mask) & 0xC0000000)
+                if decorated != (bare in self._decorated_subs):
+                    self._deliver_control(bytes(
+                        [request[0], request[1],
+                         refdec.STATUS_VALUE["unknown_subscription"]]))
+                    return
+
+        # SPEC.md §9.1 -- identity computed as `id & mask`. The two
+        # subscriptions a client wrote collapse into one, and its own removal
+        # of the second names nothing.
+        if "identity_folds_on_mask" in self.faults and len(request) >= 10:
+            if request[0] == refdec.OPCODE["CAN_SUBSCRIBE_MASK"] and \
+                    len(request) == 2 + refdec.OPCODE_PARAM_SIZE["CAN_SUBSCRIBE_MASK"]:
+                cid, mask = struct.unpack_from("<II", request, 2)
+                request = bytearray(request)
+                struct.pack_into("<I", request, 2, cid & mask)
+                request = bytes(request)
+                sub_key = self._parse_subscribe(request)
+            elif request[0] == refdec.OPCODE["CAN_UNSUBSCRIBE"] and \
+                    len(request) == 2 + refdec.OPCODE_PARAM_SIZE["CAN_UNSUBSCRIBE"]:
+                cid, mask = struct.unpack_from("<II", request, 2)
+                request = bytearray(request)
+                struct.pack_into("<I", request, 2, cid & mask)
+                request = bytes(request)
+
+        # SPEC.md §6.8 -- an unassigned mode decoded as a default rather than
+        # refused. The request reaching the device names every_frame, so it is
+        # answered ok and the slot is taken.
+        if "unknown_mode_defaults" in self.faults and sub_key is not None:
+            offset = 6 if request[0] == refdec.OPCODE["CAN_SUBSCRIBE"] else 10
+            if request[offset] > 1:
+                request = bytearray(request)
+                request[offset] = 0
+                request = bytes(request)
+
+        # SPEC.md §9.3 -- admission control on rate grounds, which this
+        # specification forbids outright: the load a mask produces is not
+        # knowable at install. A catch-all is the request such a device is
+        # surest about, and the one it is most wrong about.
+        if "rate_admission" in self.faults and sub_key is not None and \
+                (sub_key[1] & refdec.MASK_EXACT) == 0:
+            self._deliver_control(bytes(
+                [request[0], request[1],
+                 refdec.STATUS_VALUE["rate_exceeded"]]))
+            return
+
+        # SPEC.md §6.8 -- the schedule, and the three ways it is disturbed.
+        # All three act on the device's own per-(subscription, identifier)
+        # state ahead of dispatch, because each is a device that keeps that
+        # state somewhere else: a re-install that re-arms it, a new
+        # subscription that takes another's, and both are invisible in every
+        # response.
+        if "reinstall_rearms" in self.faults and sub_key is not None and \
+                sub_key in getattr(self.device, "_subscriptions", {}):
+            for state in self.device._subscriptions[sub_key]["per_id"].values():
+                state["seen"], state["emitted_at"] = 0, 0
+        if "schedule_keyed_by_identifier" in self.faults and \
+                sub_key is not None and \
+                sub_key not in getattr(self.device, "_subscriptions", {}):
+            cid = sub_key[0] & refdec.MASK_EXACT
+            mask = sub_key[1] & refdec.MASK_EXACT
+            for other in self.device._subscriptions.values():
+                for seen_id in [i for i in other["per_id"]
+                                if (i & mask) == (cid & mask)]:
+                    del other["per_id"][seen_id]
+
         if "duplicate_double_entry" in self.faults and len(request) >= 10 and \
                 request[0] == refdec.OPCODE["CAN_UNSUBSCRIBE"]:
             cid, mask = struct.unpack_from("<II", request, 2)

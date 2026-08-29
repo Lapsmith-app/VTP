@@ -703,3 +703,397 @@ async def can_earliest_installed_governs(s):
                 f"installed, whichever mode each carries")
     finally:
         await _restore_observation_table(s)
+
+
+# ---------------------------------------------------------------------------
+# SPEC.md §6.8 -- what a subscription's schedule is, and what disturbs it
+# ---------------------------------------------------------------------------
+
+#: A `periodic` interval longer than any window here, so exactly one frame is
+#: owed for a whole check: §6.8's first one. Every scheduling check below is
+#: built out of subscriptions that are silent after it, which is what makes a
+#: single arriving frame mean something.
+SLOW_MS = 60_000
+
+#: Slow enough that most of a busy identifier's frames are declined by the
+#: mode, fast enough that batches keep arriving to carry `dropped` out.
+RATIONED_MS = 200
+
+#: Long enough for anything a device accepted before a control request to reach
+#: the host: `dt` spans at most 655.35 ms (§6.1), so a conforming batch cannot
+#: hold a frame longer than that.
+SETTLE_S = 0.7
+
+
+def _decodes(item):
+    """Whether a notification is a batch this harness can read at all."""
+    try:
+        refdec.decode("can_batch", item.payload)
+    except refdec.Reject:
+        return False
+    return True
+
+
+def _mark_can(s, target):
+    """Where the CAN log ends, and the newest arrival of `target` in it.
+
+    Both at once, and with no `await` between them, because they are two halves
+    of one boundary: a frame is new if it arrived in a notification after the
+    mark AND carries a bus-arrival time later than anything already seen. The
+    index alone is not enough -- a batch is flushed on the device's own
+    schedule (§6.2), so frames accepted before a control request are delivered
+    after it, and a check counting by arrival window reads those as new. The
+    timestamp alone is not enough either: it is the device's clock, and nothing
+    here can name a moment on it except by having seen one.
+    """
+    items = s.streams["can"].items
+    mark, latest = len(items), 0
+    for item in items:
+        try:
+            batch = refdec.decode("can_batch", item.payload)
+        except refdec.Reject:
+            continue
+        for record in batch["records"]:
+            if record["id"] == target:
+                latest = max(latest, record["t_device_us"])
+    return mark, latest
+
+
+def _count_after(s, marker, target, extended=None):
+    """Frames of `target` the host holds that arrived after `marker`."""
+    mark, since = marker
+    count = 0
+    for item in s.streams["can"].items[mark:]:
+        try:
+            batch = refdec.decode("can_batch", item.payload)
+        except refdec.Reject:
+            continue
+        for record in batch["records"]:
+            if record["id"] != target or record["t_device_us"] <= since:
+                continue
+            if extended is not None and record["extended"] != extended:
+                continue
+            count += 1
+    return count
+
+
+async def _frames_after(s, marker, target, seconds, extended=None):
+    """Frames of `target` that arrived on the bus after `marker` was taken."""
+    await asyncio.sleep(seconds)
+    return _count_after(s, marker, target, extended=extended)
+
+
+async def _wait_for_frame(s, marker, target, timeout, step=0.2):
+    """Wait until a frame of `target` newer than `marker` has been delivered.
+
+    A boundary a later measurement can trust has to be an observed frame and
+    not a duration: nothing in §6.2 bounds how long a device may hold a batch
+    carrying one record, so a fixed sleep marks the boundary before the frame
+    it is waiting for and the next window counts that frame as something else.
+    """
+    waited = 0.0
+    while waited < timeout:
+        await asyncio.sleep(step)
+        waited += step
+        if _count_after(s, marker, target):
+            return True
+    return False
+
+
+async def _quiet_table(s, target):
+    """An empty table, and everything the device already accepted delivered.
+
+    Returns the marker the checks below measure from. Without the drain, a
+    frame accepted under the observation subscription arrives after the reset
+    and is counted as the first frame of whatever is installed next.
+    """
+    await s.control.request(refdec.OPCODE["CAN_RESET"])
+    await asyncio.sleep(SETTLE_S)
+    return _mark_can(s, target)
+
+
+@check(id="can.periodic_first_then_rations", section="6.8", phase="streams",
+       severity="MUST", requires=("control", "can"),
+       title="A periodic subscription forwards the first frame, then rations")
+async def can_periodic_first_then_rations(s):
+    """§6.8 — the first matching frame is forwarded in every mode, so a client
+    that installs a subscription and waits for a value to display never waits
+    for a second frame. Then the interval it asked for applies. The two halves
+    are one contract and a device can fail either without failing the other:
+    one leaves a display blank for a minute, the other ignores the rate limit
+    entirely."""
+    c = s.control
+    if c is None:
+        raise Skip("no control plane")
+    target = _busiest_id(s)
+    try:
+        # The identifier came from the observation window, which is already
+        # seconds old, and a signal can stop between the two: a gear-dependent
+        # frame, an intermittent ECU, an ignition switched off. Establish that
+        # it is still arriving under a subscription that owes every frame, so
+        # that silence under the periodic one below means the device held the
+        # first frame back rather than that there was none.
+        marker = await _quiet_table(s, target)
+        alive = await c.subscribe_can(target)
+        if not alive.ok:
+            raise Skip(f"could not install an every_frame subscription: "
+                       f"{alive.status_name}")
+        if await _frames_after(s, marker, target, 1.0) == 0:
+            raise Skip(f"0x{target:x} was busiest during the observation "
+                       f"window and is carrying nothing now; there is no first "
+                       f"frame for a periodic subscription to owe")
+        # A fresh install rather than a mode change on the live one, so this
+        # rests on §6.8's first frame alone and not on the re-arming rule.
+        marker = await _quiet_table(s, target)
+        installed = await c.subscribe_can(target, mode=1, arg=SLOW_MS)
+        if not installed.ok:
+            raise Skip(f"could not install a periodic subscription: "
+                       f"{installed.status_name}")
+        forwarded = await _frames_after(s, marker, target, 1.5)
+        if forwarded == 0:
+            raise Fail(
+                f"no frame of 0x{target:x} arrived in 1.5 s under a "
+                f"{SLOW_MS} ms periodic subscription on a bus carrying it. "
+                f"§6.8 forwards the first matching frame in every mode, so a "
+                f"client installing a subscription to display a value does not "
+                f"wait out the interval to see one")
+        if forwarded > 2:
+            raise Fail(
+                f"{forwarded} frames of 0x{target:x} arrived in 1.5 s under a "
+                f"{SLOW_MS} ms periodic subscription. §6.8 owes the first "
+                f"matching frame and then at most one per `arg` ms; this is "
+                f"the interval not being applied at all")
+    finally:
+        await _restore_observation_table(s)
+
+
+@check(id="can.identical_reinstall_costs_nothing", section="9.4",
+       phase="streams", severity="MUST", requires=("control", "can"),
+       title="A byte-identical re-install forwards no frame of its own")
+async def can_identical_reinstall_costs_nothing(s):
+    """§9.4 makes every request here safe to retry, and §6.8 promises a first
+    frame on install. A retry that changes neither `mode` nor `arg` is where
+    the two meet, and the difference is a frame inside the client's own rate
+    limit with nothing on the wire to explain it: a lost response and a
+    delivered one are identical at the client, so the device has to make the
+    two cases identical too. §6.8 does — an unchanged re-install changes
+    nothing at all, the schedule included."""
+    c = s.control
+    if c is None:
+        raise Skip("no control plane")
+    target = _busiest_id(s)
+    try:
+        marker = await _quiet_table(s, target)
+        installed = await c.subscribe_can(target, mode=1, arg=SLOW_MS)
+        if not installed.ok:
+            raise Skip(f"could not install a periodic subscription: "
+                       f"{installed.status_name}")
+        spent = await _frames_after(s, marker, target, 1.0)
+        if spent == 0:
+            raise Skip("the subscription forwarded no first frame, so there is "
+                       "no spent schedule for a retry to disturb "
+                       "(can.periodic_first_then_rations owns that rule)")
+        marker = _mark_can(s, target)
+        retry = await c.subscribe_can(target, mode=1, arg=SLOW_MS)
+        if not retry.ok:
+            raise Fail(f"re-installing an identical subscription was answered "
+                       f"{retry.status_name}", response=retry.raw.hex())
+        extra = await _frames_after(s, marker, target, 1.5)
+        if extra:
+            raise Fail(
+                f"{extra} frame(s) of 0x{target:x} arrived after a re-install "
+                f"that changed neither mode nor arg, a second into a "
+                f"{SLOW_MS} ms interval. §9.4 tells a client to retry a request "
+                f"whose response it did not receive; §6.8 makes that retry "
+                f"free, and this device charged a frame for it")
+    finally:
+        await _restore_observation_table(s)
+
+
+@check(id="can.displaced_schedule_survives", section="6.8", phase="streams",
+       severity="MUST", requires=("control", "can", "masked_subscriptions"),
+       title="A subscription displaced from governance keeps its rate limit")
+async def can_displaced_schedule_survives(s):
+    """§6.8 keys scheduling state per (subscription, identifier), and §9.2
+    decides which subscription forwards a frame rather than which ones still
+    apply. A device keying that state by the identifier alone hands it to
+    whichever subscription matched last: the broad one's interval is destroyed
+    on the way in, and removing the narrow one lets it forward immediately.
+    Reported from a vehicle as a once-a-minute subscription delivering three
+    frames in twenty milliseconds, every one of them well-formed.
+
+    Both subscriptions here are `periodic` and slow, so the only frame either
+    owes is its own first one. Anything arriving after the narrow one is
+    removed is the broad one's schedule having been reset behind the client's
+    back.
+    """
+    c = s.control
+    if c is None:
+        raise Skip("no control plane")
+    target = _busiest_id(s)
+    broad_mask = refdec.MASK_EXACT & ~0x1
+    try:
+        marker = await _quiet_table(s, target)
+        broad = await c.subscribe_can(target, mask=broad_mask, mode=1,
+                                      arg=SLOW_MS)
+        if not broad.ok:
+            raise Skip(f"could not install the broad periodic subscription: "
+                       f"{broad.status_name}")
+        if await _frames_after(s, marker, target, 1.0) == 0:
+            raise Skip("the broad subscription forwarded no first frame, so "
+                       "there is no spent schedule to displace "
+                       "(can.periodic_first_then_rations owns that rule)")
+        marker = _mark_can(s, target)
+        exact = await c.subscribe_can(target, mode=1, arg=SLOW_MS)
+        if not exact.ok:
+            raise Skip(f"could not install the displacing subscription: "
+                       f"{exact.status_name}")
+        # Its own first frame is owed, and the window below has to open AFTER
+        # it: waited for rather than slept through, because a device may hold
+        # a one-record batch for as long as it likes and a frame arriving
+        # after a fixed mark would be counted as the broad subscription
+        # forwarding.
+        if not await _wait_for_frame(s, marker, target, 5.0):
+            raise Skip("the displacing subscription forwarded no first frame "
+                       "within 5 s, so nothing marks the boundary this check "
+                       "measures from")
+        marker = _mark_can(s, target)
+        removed = await c.unsubscribe_can(target)
+        if not removed.ok:
+            raise Skip(f"could not remove the displacing subscription: "
+                       f"{removed.status_name}")
+        after = await _frames_after(s, marker, target, 1.5)
+        if after:
+            raise Fail(
+                f"{after} frame(s) of 0x{target:x} arrived as soon as the more "
+                f"specific subscription was removed. The broad {SLOW_MS} ms "
+                f"subscription was installed throughout and its interval had "
+                f"not elapsed: §6.8 keeps a displaced subscription's schedule, "
+                f"and §9.2 decides which subscription forwards a frame, not "
+                f"which ones have stopped applying")
+    finally:
+        await _restore_observation_table(s)
+
+
+@check(id="can.dropped_excludes_declined", section="6.3", phase="streams",
+       severity="MUST", requires=("control", "can"),
+       title="dropped counts accepted frames, not ones the mode declined")
+async def can_dropped_excludes_declined(s):
+    """§6.3 — `dropped` counts frames the device accepted and then discarded.
+    A frame no subscription matched was never accepted, and neither was one the
+    governing subscription's mode did not select (§6.8): counting either turns
+    a working rate limit into a permanent loss report, and a client that
+    surfaces `dropped` to its user tells them their bus is broken because they
+    asked for one frame a minute.
+
+    The interval is short enough that some frames are still forwarded, because
+    `dropped` rides on a batch and a subscription that forwards nothing sends
+    none: a device counting every declined frame would accumulate the evidence
+    and never deliver it. The window opens a second after the install, so a
+    count owed from the phase before this one — which rides on the next batch
+    with content (§6.2) — is not read as this subscription's.
+    """
+    c = s.control
+    if c is None:
+        raise Skip("no control plane")
+    target = _busiest_id(s)
+    shedding = 1 << refdec.bit("can_flags", "shedding")
+    try:
+        await _quiet_table(s, target)
+        pre = len(s.streams["can"].items)
+        installed = await c.subscribe_can(target, mode=1, arg=RATIONED_MS)
+        if not installed.ok:
+            raise Skip(f"could not install a periodic subscription: "
+                       f"{installed.status_name}")
+        await asyncio.sleep(1.5)
+        # A count owed from before this check rides on the next batch with
+        # content (§6.2), and the harness's own catch-all is exactly what
+        # makes a device shed. If no batch has arrived since the install, that
+        # count is still owed and the window below would read it as this
+        # subscription's.
+        if not any(_decodes(item) for item in s.streams["can"].items[pre:]):
+            raise Skip("no batch arrived between the install and the window, "
+                       "so a `dropped` count owed from before this check "
+                       "could still be riding on the next one")
+        mark = len(s.streams["can"].items)
+        await asyncio.sleep(2.0)
+        counted, offender = 0, None
+        for item in s.streams["can"].items[mark:]:
+            try:
+                batch = refdec.decode("can_batch", item.payload)
+            except refdec.Reject:
+                continue
+            if batch["header"]["flags"] & shedding:
+                raise Skip("the device reported it was shedding, which §6.3 "
+                           "does count in dropped; nothing here can separate "
+                           "that from the frames the mode declined")
+            if batch["header"]["dropped"]:
+                counted += batch["header"]["dropped"]
+                offender = offender or item
+        if counted:
+            raise Fail(
+                f"dropped counted {counted} frame(s) while one "
+                f"{RATIONED_MS} ms periodic subscription was installed and not "
+                f"shedding. Every frame in that window was forwarded, "
+                f"declined by the mode, or matched by nothing at all, and "
+                f"§6.3 counts none of the three: the two it excludes were "
+                f"never accepted, and the first was not discarded",
+                payload=offender.payload.hex())
+    finally:
+        await _restore_observation_table(s)
+
+
+@check(id="can.format_bit_is_identity", section="9.1", phase="streams",
+       severity="MUST", requires=("control", "can"),
+       title="A subscription naming the other frame format matches nothing")
+async def can_format_bit_is_identity(s):
+    """§9.1 — standard 0x1A0 and extended 0x1A0 are two different frames from
+    possibly two different ECUs, so bit 29 is matched like any other identity
+    bit. The defect this catches is an integration one and easy to make: a
+    controller that keeps the format in a flags word rather than in the
+    identifier (Zephyr's `can_frame.flags` among them) hands the device an id
+    with bit 29 clear for every frame on the bus. Extended subscriptions then
+    never match anything, and a standard subscription on the same number
+    quietly delivers another ECU's traffic — a correct-looking identifier with
+    the wrong payload behind it."""
+    c = s.control
+    if c is None:
+        raise Skip("no control plane")
+    # _busiest_id, and not the busiest (id, format) pair: the pair would
+    # choose a diagnostic response identifier on an OBD device, whose traffic
+    # this check's own CAN_RESET stops (SPEC.md §15.7). Nothing then arrives,
+    # and the check passes having never created the condition it tests.
+    target = _busiest_id(s)
+    good, _ = _decoded(s, "can")
+    formats = {}
+    for _, batch in good:
+        for record in batch["records"]:
+            if record["id"] == target:
+                formats[record["extended"]] = formats.get(record["extended"], 0) + 1
+    if not formats:
+        raise Skip(f"no frame of 0x{target:x} was decoded, so its format is "
+                   f"not known")
+    extended = max(formats, key=formats.get)
+    # The same number under the other format is a different frame, which this
+    # bus may or may not also carry. Either way the frames observed above MUST
+    # NOT arrive under a subscription naming it.
+    other = target if extended else target | (1 << 29)
+    try:
+        marker = await _quiet_table(s, target)
+        installed = await c.subscribe_can(other)
+        if not installed.ok:
+            raise Skip(f"could not install the other-format subscription: "
+                       f"{installed.status_name}")
+        wrong = await _frames_after(s, marker, target, 2.0, extended=extended)
+        if wrong:
+            named = "extended" if extended else "standard"
+            asked = "standard" if extended else "extended"
+            raise Fail(
+                f"{wrong} {named} frame(s) of 0x{target:x} arrived under a "
+                f"subscription naming the {asked} form of that identifier. "
+                f"§9.1 matches over bits 0-29 and bit 29 is the format bit: "
+                f"these are two different frames from possibly two different "
+                f"senders, and a client reading one as the other decodes the "
+                f"wrong payload behind a right-looking identifier")
+    finally:
+        await _restore_observation_table(s)

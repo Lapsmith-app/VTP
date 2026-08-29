@@ -561,6 +561,215 @@ async def can_table_full(s):
         s.state.pop("probe_installed", None)
 
 
+#: Identifiers used only by the identity checks below. Distinct from PROBE_ID
+#: so that a device that folds two subscriptions into one leaves the evidence
+#: under a name no other check installs.
+IDENTITY_ID = 0x7B0
+IDENTITY_SIBLING = 0x7B1
+
+
+@check(id="can.update_in_place_when_full", section="9.1", phase="control",
+       severity="MUST", requires=("control", "can"),
+       title="Re-installing an existing id and mask on a full table is answered ok")
+async def can_update_in_place_when_full(s):
+    """§9.1's update-in-place is not a courtesy the table's capacity revokes.
+
+    A device that checks for a free slot before it checks for an existing entry
+    refuses exactly the client §4 forces on it: one that reprograms
+    unconditionally on every connection, whose table is full *because* it holds
+    what is being re-written. can.subscribe_idempotent tests the same rule with
+    room to spare, which is the case that does not fail.
+    """
+    c = _control(s)
+    slots = s.info["can_subscription_slots"]
+    if slots > 64:
+        raise Skip(f"the device declares {slots} slots; filling them would take "
+                   f"longer than this check is worth")
+    base = 0x280
+    try:
+        await c.request(refdec.OPCODE["CAN_RESET"])
+        for i in range(slots):
+            response = await c.subscribe_can(base + i)
+            if not response.ok:
+                raise Skip(f"subscription {i + 1} of {slots} was answered "
+                           f"{response.status_name}, so the table never filled "
+                           f"and there is no full table to re-install into")
+        again = await c.subscribe_can(base)
+        if not again.ok:
+            raise Fail(
+                f"re-installing an (id, mask) the full table already holds was "
+                f"answered {again.status_name}. §9.1 updates it in place and "
+                f"creates no subscription, so no slot has to be free for it — "
+                f"and this is the request a client that reprograms on every "
+                f"connection sends",
+                response=again.raw.hex())
+    finally:
+        await c.request(refdec.OPCODE["CAN_RESET"])
+        s.state["installed"] = {}
+        s.state.pop("probe_installed", None)
+
+
+@check(id="can.transmission_bits_ignored", section="9.1", phase="control",
+       severity="MUST", requires=("control", "can"),
+       title="Bits 30 and 31 take no part in a subscription's identity")
+async def can_transmission_bits_ignored(s):
+    """§9.1 — CAN FD and RTR describe how a frame was transmitted, not which
+    frame it is. A device that keeps them in what it stores installs a
+    subscription its client can never name again: the removal it writes is a
+    different name than the one the device recorded."""
+    c = _control(s)
+    decorated = IDENTITY_ID | (1 << 30) | (1 << 31)
+    try:
+        installed = await c.subscribe_can(decorated)
+        if not installed.ok:
+            raise Fail(
+                f"a subscription whose id carries bits 30 and 31 was answered "
+                f"{installed.status_name}. §9.1 ignores both bits in `id` and "
+                f"in `mask` rather than refusing them",
+                response=installed.raw.hex())
+        removal = await c.unsubscribe_can(IDENTITY_ID)
+        if not removal.ok:
+            raise Fail(
+                f"a subscription installed with bits 30 and 31 set could not "
+                f"be removed by the same identifier without them "
+                f"({removal.status_name}). Those bits are not part of the "
+                f"identity, so a client that sets them has installed something "
+                f"it can never remove",
+                response=removal.raw.hex())
+        # And the other direction: the bits set on the REMOVAL of a
+        # subscription installed without them.
+        again = await c.subscribe_can(IDENTITY_ID)
+        if not again.ok:
+            raise Skip(f"could not re-install the probe: {again.status_name}")
+        decorated_removal = await c.unsubscribe_can(
+            decorated, mask=refdec.MASK_EXACT | 0xC0000000)
+        if not decorated_removal.ok:
+            raise Fail(
+                f"CAN_UNSUBSCRIBE carrying bits 30 and 31 was answered "
+                f"{decorated_removal.status_name} for a subscription that is "
+                f"installed. §9.1 ignores both bits on the way in and on the "
+                f"way out",
+                response=decorated_removal.raw.hex())
+    finally:
+        # Whatever this left installed -- including under a name only a device
+        # that kept bits 30 and 31 has -- goes now. A subscription leaked past
+        # here is forwarded in the streams phase and reported there as a frame
+        # no subscription covers.
+        await c.request(refdec.OPCODE["CAN_RESET"])
+
+
+@check(id="can.identity_is_the_pair", section="9.1", phase="control",
+       severity="MUST", requires=("control", "can", "masked_subscriptions"),
+       title="Two subscriptions differing only in ignored id bits are two subscriptions")
+async def can_identity_is_the_pair(s):
+    """§9.1 — the identity is the `(id, mask)` pair the client wrote, not
+    `id & mask`. The two installed here match exactly the same frames, and a
+    device that folds them silently discards the second install: the client's
+    own removal then names nothing, and a slot it believes it holds is gone."""
+    c = _control(s)
+    mask = refdec.MASK_EXACT & ~0xF
+    try:
+        first = await c.subscribe_can(IDENTITY_ID, mask=mask)
+        if not first.ok:
+            raise Skip(f"the first subscription was answered "
+                       f"{first.status_name}")
+        second = await c.subscribe_can(IDENTITY_SIBLING, mask=mask)
+        if not second.ok:
+            raise Fail(
+                f"a subscription whose id differs from an installed one only "
+                f"in bits their shared mask ignores was answered "
+                f"{second.status_name}. §9.1 compares the pair, so these are "
+                f"two subscriptions",
+                response=second.raw.hex())
+        removals = []
+        for can_id in (IDENTITY_ID, IDENTITY_SIBLING):
+            removals.append((can_id,
+                             await c.unsubscribe_can(can_id, mask=mask)))
+        missing = [(can_id, r) for can_id, r in removals if not r.ok]
+        if missing:
+            can_id, response = missing[0]
+            raise Fail(
+                f"0x{can_id:X} under mask 0x{mask:08X} was installed and then "
+                f"answered {response.status_name} on removal. Both installs "
+                f"were accepted, so a device that folded them by `id & mask` "
+                f"has one entry under a name the client never wrote",
+                response=response.raw.hex())
+    finally:
+        # As above: nothing this check installed survives it, whatever went
+        # wrong in the middle.
+        await c.request(refdec.OPCODE["CAN_RESET"])
+
+
+@check(id="can.unknown_mode_refused", section="6.8", phase="control",
+       severity="MUST", requires=("control", "can"),
+       title="A subscription naming an unassigned mode is refused and takes no slot")
+async def can_unknown_mode_refused(s):
+    """§6.8 — modes 2 and 3 were assigned by pre-1.0 drafts and remain
+    unassigned, and §11.4 makes an unknown enum unknown rather than a default.
+    The slot matters as much as the status: a device that answers `bad_params`
+    having already installed the entry has a table its client cannot account
+    for."""
+    c = _control(s)
+    # Identifiers inside the standard range, so a device that validates what
+    # it is asked to match refuses the MODE rather than the identifier.
+    for i, mode in enumerate((2, 3, 0xFF)):
+        can_id = 0x7C0 + i
+        response = await c.subscribe_can(can_id, mode=mode)
+        if response.status != refdec.STATUS_VALUE["bad_params"]:
+            if response.ok:
+                await c.unsubscribe_can(can_id)
+            raise Fail(
+                f"a subscription naming mode {mode} was answered "
+                f"{response.status_name}, not bad_params. §6.8 leaves the "
+                f"value unassigned and §11.4 forbids decoding it as a "
+                f"default — a client asking for a mode it read in a later "
+                f"specification MUST be told no",
+                response=response.raw.hex())
+        removal = await c.unsubscribe_can(can_id)
+        if removal.status != refdec.STATUS_VALUE["unknown_subscription"]:
+            await c.unsubscribe_can(can_id)
+            raise Fail(
+                f"a subscription refused bad_params for naming mode {mode} was "
+                f"nevertheless installed: removing it was answered "
+                f"{removal.status_name} rather than unknown_subscription. A "
+                f"refused request MUST NOT take effect (§9.4)",
+                response=removal.raw.hex())
+
+
+@check(id="can.no_rate_admission", section="9.3", phase="control",
+       severity="MUST", requires=("control", "can", "masked_subscriptions"),
+       title="A subscription covering the whole bus is not refused on rate grounds")
+async def can_no_rate_admission(s):
+    """§9.3 — a device MUST NOT refuse a CAN subscription on rate grounds. A
+    mask of zero at `every_frame` is the largest load a client can ask for and
+    the one a device is most tempted to predict, and the prediction cannot be
+    made: what the bus carries is not knowable at install time. It admits, and
+    sheds what it cannot forward (§6.3)."""
+    c = _control(s)
+    try:
+        await c.request(refdec.OPCODE["CAN_RESET"])
+        response = await c.subscribe_can(0, mask=0)
+        if response.status == refdec.STATUS_VALUE["rate_exceeded"]:
+            raise Fail(
+                "a catch-all subscription at every_frame was refused "
+                "rate_exceeded. §9.3 forbids refusing a CAN subscription on "
+                "rate grounds: the load it produces is not knowable at "
+                "install, so a device admits and sheds, reporting the loss in "
+                "`dropped` with the shedding flag set",
+                response=response.raw.hex())
+        if not response.ok:
+            raise Fail(
+                f"a catch-all subscription into an empty table was answered "
+                f"{response.status_name}. `can_subscription_slots` is a count "
+                f"of entries, and this is one entry",
+                response=response.raw.hex())
+    finally:
+        await c.unsubscribe_can(0, mask=0)
+        await c.request(refdec.OPCODE["CAN_RESET"])
+        s.state["installed"] = {}
+        s.state.pop("probe_installed", None)
+
+
 @check(id="control.applies_only_if_answerable", section="9.4", phase="control",
        severity="MUST", requires=("control", "can"), adversarial=True,
        title="A request whose response cannot be delivered is not applied")
