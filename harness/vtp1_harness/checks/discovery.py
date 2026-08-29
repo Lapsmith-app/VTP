@@ -231,10 +231,6 @@ async def dis_present(s):
         raise Fail(f"Device Information Service is present but {missing} "
                    f"{'is' if len(missing) == 1 else 'are'} empty or absent",
                    read=s.dis)
-    s.note("SPEC.md §2 makes the Device Information Service a MUST while 3.4 "
-           "makes it a SHOULD and explains why it is one. This harness follows "
-           "3.4, which is the section that argues its case; the two clauses "
-           "disagree and one of them needs amending.")
     raise Observe(", ".join(f"{k}={v!r}" for k, v in s.dis.items()), **s.dis)
 
 
