@@ -291,6 +291,7 @@ FAULTS = {
     "no_first_frame": "SPEC.md §6.8 — periodic holds back the first matching frame",
     "periodic_ignored": "SPEC.md §6.8 — periodic forwards every frame, ignoring arg",
     "reinstall_rearms": "SPEC.md §6.8 — a byte-identical re-install re-arms the first frame",
+    "reinstall_never_rearms": "SPEC.md §6.8 — a re-install that changes mode or arg is treated as a retry, so nothing re-arms",
     "schedule_keyed_by_identifier": "SPEC.md §6.8 — scheduling state is keyed by identifier alone, so a new subscription takes over another's",
     "format_bit_ignored": "SPEC.md §9.1 — matching ignores bit 29, so standard and extended frames of one number are the same frame",
     "dropped_counts_declined": "SPEC.md §6.3 — a frame the subscription mode declined is counted in dropped",
@@ -1075,6 +1076,19 @@ class LoopbackTransport(Transport):
                 sub_key in getattr(self.device, "_subscriptions", {}):
             for state in self.device._subscriptions[sub_key]["per_id"].values():
                 state["seen"], state["emitted_at"] = 0, 0
+        if "reinstall_never_rearms" in self.faults and sub_key is not None and \
+                sub_key in getattr(self.device, "_subscriptions", {}):
+            # The mirror image: the request reaches the device naming the mode
+            # and arg it already holds, so §6.8's "changes nothing" path is
+            # taken for a request that changed something. The answer is `ok`,
+            # the client's new interval is honoured nowhere, and the first
+            # frame it is owed never comes.
+            sub = self.device._subscriptions[sub_key]
+            offset = 6 if request[0] == refdec.OPCODE["CAN_SUBSCRIBE"] else 10
+            request = bytearray(request)
+            request[offset] = sub["mode"]
+            struct.pack_into("<H", request, offset + 1, sub["arg"])
+            request = bytes(request)
         if "schedule_keyed_by_identifier" in self.faults and \
                 sub_key is not None and \
                 sub_key not in getattr(self.device, "_subscriptions", {}):

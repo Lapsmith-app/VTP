@@ -60,11 +60,11 @@ peripheral now re-arms on a changed `mode` or `arg` and on nothing else, and
 identical retry, the pair identity, the transmission bits and the full-table
 re-install.
 
-### Harness: ten checks for the rules a byte vector cannot reach
+### Harness: eleven checks for the rules a byte vector cannot reach
 
 The same report noted that the conformance harness had nothing for any of
 this. It now has, and none of it needs a second CAN node — five ask the
-control plane a question, and five watch what the device's own bus traffic
+control plane a question, and six watch what the device's own bus traffic
 does under a table the harness reprograms:
 
 | Check | Section |
@@ -76,6 +76,7 @@ does under a table the harness reprograms:
 | `can.no_rate_admission` | §9.3 — a catch-all subscription is not refused on rate grounds |
 | `can.periodic_first_then_rations` | §6.8 — the first matching frame, then the interval |
 | `can.identical_reinstall_costs_nothing` | §9.4 — a byte-identical retry forwards no frame |
+| `can.changed_reinstall_rearms` | §6.8 — a changed `mode` or `arg` re-arms the first frame |
 | `can.displaced_schedule_survives` | §6.8 — a displaced subscription keeps its rate limit |
 | `can.format_bit_is_identity` | §9.1 — a subscription on the other frame format matches nothing |
 | `can.dropped_excludes_declined` | §6.3 — `dropped` counts neither unmatched nor mode-declined frames |
@@ -91,7 +92,16 @@ ECU's traffic.
 The scheduling checks measure by bus-arrival timestamp rather than by arrival
 window: a batch is flushed on the device's own schedule (§6.2), so frames
 accepted before a control request are delivered after it, and counting by
-window reads those as new frames.
+window reads those as new frames. Each one also establishes its own
+precondition rather than assuming it, because a device that is right must not
+be failed for a bus that is quiet: that the identifier is still arriving, that
+it arrives faster than the ration a `dropped` check needs it to exceed, that a
+batch arrived to carry a count out at all, and — for the displacement check —
+that the device is holding two schedules at once with nothing shed, since §6.8
+lets a device at its bound reclaim the very state that check measures. The
+identifier is subscribed to in the format it was seen in, so an all-extended
+bus (J1939, and most of what is not a passenger car) exercises these rather
+than skipping them.
 
 ### §9: owing a response ends at the send
 

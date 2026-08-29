@@ -72,6 +72,7 @@ CAUGHT_BY = {
     "no_first_frame": "can.periodic_first_then_rations",
     "periodic_ignored": "can.periodic_first_then_rations",
     "reinstall_rearms": "can.identical_reinstall_costs_nothing",
+    "reinstall_never_rearms": "can.changed_reinstall_rearms",
     "schedule_keyed_by_identifier": "can.displaced_schedule_survives",
     "format_bit_ignored": "can.format_bit_is_identity",
     "dropped_counts_declined": "can.dropped_excludes_declined",

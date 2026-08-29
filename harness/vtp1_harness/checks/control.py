@@ -667,6 +667,12 @@ async def can_identity_is_the_pair(s):
     device that folds them silently discards the second install: the client's
     own removal then names nothing, and a slot it believes it holds is gone."""
     c = _control(s)
+    slots = s.info["can_subscription_slots"]
+    if slots < 2:
+        raise Skip(f"the device declares {slots} subscription slot(s); two "
+                   f"distinct subscriptions do not fit, and refusing the "
+                   f"second table_full is the right answer rather than the "
+                   f"folding this looks for")
     mask = refdec.MASK_EXACT & ~0xF
     try:
         first = await c.subscribe_can(IDENTITY_ID, mask=mask)
@@ -681,6 +687,29 @@ async def can_identity_is_the_pair(s):
                 f"{second.status_name}. §9.1 compares the pair, so these are "
                 f"two subscriptions",
                 response=second.raw.hex())
+        # Both accepted is not both installed: a device that folded them
+        # answers ok twice and holds one entry. The arithmetic says which,
+        # when the table is small enough to fill -- with two of `slots` spent
+        # here, exactly `slots - 2` more may be accepted.
+        if slots <= 64:
+            for i in range(slots - 2):
+                filler = await c.subscribe_can(0x2C0 + i)
+                if not filler.ok:
+                    # Fewer entries than Info declares is can.table_full's
+                    # arithmetic, and failing it here would name the wrong
+                    # rule: this check can only speak about the pair.
+                    raise Skip(f"the table refused subscription {i + 3} of "
+                               f"{slots} ({filler.status_name}), so the "
+                               f"capacity for counting slots is not there "
+                               f"(can.table_full owns that)")
+            over = await c.subscribe_can(0x2C0 + slots)
+            if over.ok:
+                raise Fail(
+                    f"a {slots + 1}th subscription was accepted, so one of the "
+                    f"two that differ only in ignored id bits never took a "
+                    f"slot: §9.1 compares the pair, and folding them by "
+                    f"`id & mask` leaves the client a slot short of what Info "
+                    f"promises", response=over.raw.hex())
         removals = []
         for can_id in (IDENTITY_ID, IDENTITY_SIBLING):
             removals.append((can_id,
@@ -701,7 +730,7 @@ async def can_identity_is_the_pair(s):
 
 
 @check(id="can.unknown_mode_refused", section="6.8", phase="control",
-       severity="MUST", requires=("control", "can"),
+       severity="MUST", requires=("control", "can"), adversarial=True,
        title="A subscription naming an unassigned mode is refused and takes no slot")
 async def can_unknown_mode_refused(s):
     """§6.8 — modes 2 and 3 were assigned by pre-1.0 drafts and remain

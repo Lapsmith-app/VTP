@@ -878,6 +878,28 @@ def main():
           "matching frame; §6.8 forwards it in every mode, and a re-install "
           "that changes mode or arg is not a retry")
 
+    # The other half of the same rule: a changed MODE re-arms too. Every_frame
+    # to periodic is where that is visible -- the schedule this subscription
+    # has just been forwarding under is spent by definition, so a device that
+    # re-arms nothing holds the next frame for the whole new interval.
+    device.handle_control(bytes([dev.CAN_SUBSCRIBE, 35])
+                          + struct.pack("<IBH", 0x0C0,
+                                        dev.SUB_EVERY_FRAME, 0))
+    run(device, clock, 0.1)
+    mode_changed_at = clock[0]
+    device.handle_control(bytes([dev.CAN_SUBSCRIBE, 36])
+                          + struct.pack("<IBH", 0x0C0, dev.SUB_PERIODIC, 5000))
+    remoded = can_records(run(device, clock, 0.2), 0x0C0,
+                          since=mode_changed_at)
+    check(len(remoded) >= 1,
+          "changing mode on an installed subscription did not re-arm the "
+          "first matching frame: the client asked for a rate and got silence "
+          "for a whole interval (§6.8)")
+    check(len(remoded) == 1,
+          f"{len(remoded)} frames arrived in 200 ms of a 5000 ms interval "
+          f"after the mode changed; the re-armed first frame is one frame, "
+          f"and the interval applies from it")
+
     # SPEC.md §6.8 + §9.2 — a subscription DISPLACED from governance keeps its
     # schedule. Reported by the first firmware implementation: state keyed by
     # identifier alone rather than by (subscription, identifier), so installing

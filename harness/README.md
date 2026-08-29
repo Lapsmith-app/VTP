@@ -175,7 +175,10 @@ The §6.8 scheduling checks reprogram the table and then watch one identifier:
 they install a `periodic` subscription slow enough that the only frame it owes
 is §6.8's first one, and read what arrives after that. They need traffic on
 that identifier and nothing else — no second node, no injected frame — and they
-put the table back the way they found it. They measure by bus-arrival timestamp
+put the table back the way they found it. Each one watches the identifier
+arrive before it asserts anything, and skips rather than fails when the signal
+has stopped: a quiet bus is not a defect, and a check that cannot tell the
+difference is worse than no check. They measure by bus-arrival timestamp
 rather than by arrival window, because a batch is flushed on the device's own
 schedule (§6.2) and frames accepted before a control request are delivered
 after it.
