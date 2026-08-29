@@ -8,6 +8,101 @@ conformance vector.
 
 ## [Unreleased]
 
+### §6.8: a subscription's schedule belongs to the subscription
+
+Reported by the first firmware implementation, from human and LLM review of
+its own source. Six defects; none was reachable by a byte vector, because
+every frame involved is well-formed and the defect is in *when* the frames
+arrive. Three of them were the specification's fault, and this is what it now
+says.
+
+**The key is the `(subscription, identifier)` pair.** "Per matching
+identifier, not per subscription" was written to forbid one interval shared
+across a masked subscription's identifiers, and it reads as naming the whole
+key. Keyed by identifier alone, a subscription's rate limit is destroyed the
+moment another subscription matches one of its identifiers: removing the
+narrower one lets the broader one forward immediately, though it was installed
+throughout and its interval had not elapsed. A once-a-minute subscription
+delivered three frames in twenty milliseconds. §6.8 now names the pair, and
+says that a subscription §9.2 displaces from an identifier keeps its schedule
+for it — §9.2 decides which subscription forwards a frame, not which ones have
+stopped applying, and §9.2 now says so too.
+
+**A re-install that changes nothing changes nothing.** §9.1 made an identical
+re-install update `mode` and `arg` in place, §6.8 promised the first matching
+frame after an install, and §9.4 told clients that retrying a request whose
+response was lost is harmless. For a byte-identical retry the three did not
+agree, and the difference is a frame inside the client's own rate limit with
+nothing on the wire to explain it — a lost response and a delivered one are
+identical at the client. §9.4's promise wins: an unchanged `mode` and `arg`
+leave the schedule untouched. A re-install that changes either is a new
+instruction and re-arms the first frame.
+
+**A bounded device evicts displaced state before it sheds a live
+subscription.** §6.8 permitted a bound on per-identifier state and required
+shedding at it, without saying what to sacrifice — so a broad slow
+subscription could fill the pool and a newly installed exact subscription be
+shed forever, never receiving even its first frame, blocked by entries
+belonging to a subscription that could not use them. The costs are not
+symmetric: reclaiming a displaced entry costs one early frame if governance
+returns to it, and refusing to costs a live subscription its entire output.
+§6.8 states the order and says the early frame is conformant.
+
+Also in §9.1, both from the same report: the identity is the `(id, mask)` pair
+as the client wrote it and not `id & mask`, and a re-install MUST be answered
+`ok` on a full table — it creates no subscription, so there is no slot for the
+capacity check to refuse it.
+
+No wire change: no field, enum value, UUID or conformance vector moves.
+Reasoning in RATIONALE §8.4 and the contradictions section. The reference
+peripheral now re-arms on a changed `mode` or `arg` and on nothing else, and
+`reference/peripheral/selftest.py` covers the displacement sequence, the
+identical retry, the pair identity, the transmission bits and the full-table
+re-install.
+
+### Harness: eleven checks for the rules a byte vector cannot reach
+
+The same report noted that the conformance harness had nothing for any of
+this. It now has, and none of it needs a second CAN node — five ask the
+control plane a question, and six watch what the device's own bus traffic
+does under a table the harness reprograms:
+
+| Check | Section |
+| --- | --- |
+| `can.update_in_place_when_full` | §9.1 — a re-install on a full table is `ok` |
+| `can.transmission_bits_ignored` | §9.1 — bits 30 and 31 are not part of the identity |
+| `can.identity_is_the_pair` | §9.1 — two subscriptions differing only in ignored id bits are two subscriptions |
+| `can.unknown_mode_refused` | §6.8 — modes 2, 3 and above are `bad_params` and take no slot |
+| `can.no_rate_admission` | §9.3 — a catch-all subscription is not refused on rate grounds |
+| `can.periodic_first_then_rations` | §6.8 — the first matching frame, then the interval |
+| `can.identical_reinstall_costs_nothing` | §9.4 — a byte-identical retry forwards no frame |
+| `can.changed_reinstall_rearms` | §6.8 — a changed `mode` or `arg` re-arms the first frame |
+| `can.displaced_schedule_survives` | §6.8 — a displaced subscription keeps its rate limit |
+| `can.format_bit_is_identity` | §9.1 — a subscription on the other frame format matches nothing |
+| `can.dropped_excludes_declined` | §6.3 — `dropped` counts neither unmatched nor mode-declined frames |
+
+Each has a seeded fault in `transport.FAULTS` that makes it fail, as
+`harness/selftest.py` requires. `can.format_bit_is_identity` is the one that
+caught a defect in the field: a controller that keeps the frame format in a
+flags word rather than in the identifier (Zephyr's `can_frame.flags` among
+them) clears bit 29 for every frame on the bus, so extended subscriptions
+never match and a standard subscription on the same number delivers another
+ECU's traffic.
+
+The scheduling checks measure by bus-arrival timestamp rather than by arrival
+window: a batch is flushed on the device's own schedule (§6.2), so frames
+accepted before a control request are delivered after it, and counting by
+window reads those as new frames. Each one also establishes its own
+precondition rather than assuming it, because a device that is right must not
+be failed for a bus that is quiet: that the identifier is still arriving, that
+it arrives faster than the ration a `dropped` check needs it to exceed, that a
+batch arrived to carry a count out at all, and — for the displacement check —
+that the device is holding two schedules at once with nothing shed, since §6.8
+lets a device at its bound reclaim the very state that check measures. The
+identifier is subscribed to in the format it was seen in, so an all-extended
+bus (J1939, and most of what is not a passenger car) exercises these rather
+than skipping them.
+
 ### §9: owing a response ends at the send
 
 Reported by the first implementation outside this repository, from code review

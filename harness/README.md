@@ -36,7 +36,10 @@ It cannot ask a device a question. So nothing in this repository tested:
 | §8.2 | that `seq` starts at 0 on the first notification of a connection |
 | §8.1 | that the three streams are on one clock rather than three |
 | §9.1 | that the subscription table is empty after a reconnect |
+| §9.1 | that a subscription's identity is the `(id, mask)` pair the client wrote — bits 30 and 31 excluded, `id & mask` not substituted, and a re-install answered `ok` on a full table |
 | §9.2 | that a frame matching two subscriptions is forwarded once |
+| §6.8 | the whole of what a subscription's schedule *is*: the first matching frame, the interval after it, that a displaced subscription keeps both, and that a byte-identical re-install costs the client nothing |
+| §6.3 | that `dropped` counts frames the device accepted and discarded, and not ones it filtered as instructed |
 | §9.6 | that a rate answered `ok` is the rate Info then reports |
 | §13 | Monitor, which is a thing a device *receives* |
 | §5.1 | that a field whose validity bit is clear is actually zero |
@@ -142,6 +145,13 @@ Four things are permanently in it:
   reports obeys §9.7's rules. Whether the pack is actually two-thirds full is
   not observable from this side of the link, any more than §2's link
   parameters are.
+- **§6.8's bound, and the eviction order at it.** A device MAY bound the
+  scheduling state it keeps, and nothing distinguishes a device that has never
+  reached its bound from one that has no bound at all. What the harness would
+  need to reach it is thousands of distinct identifiers on the bus, which is
+  the vehicle's business rather than this tool's. The rule it cannot test is
+  that displaced state is reclaimed before a governing subscription's frame is
+  shed.
 - **§13.5's freshness expiry.** Every declared channel carries a `max_age` and
   the harness checks it is non-zero, but what happens when one lapses happens on
   the device's own display and puts nothing on the wire. Stop writing and watch
@@ -160,6 +170,26 @@ guess your identifiers, so name them:
 ```sh
 uv run vtp1-harness --can-id 0x1A0 --can-id 0x2C4
 ```
+
+The §6.8 scheduling checks reprogram the table and then watch one identifier:
+they install a `periodic` subscription slow enough that the only frame it owes
+is §6.8's first one, and read what arrives after that. They need traffic on
+that identifier and nothing else — no second node, no injected frame — and they
+put the table back the way they found it. Each one watches the identifier
+arrive before it asserts anything, and skips rather than fails when the signal
+has stopped: a quiet bus is not a defect, and a check that cannot tell the
+difference is worse than no check. They measure by bus-arrival timestamp
+rather than by arrival window, because a batch is flushed on the device's own
+schedule (§6.2) and frames accepted before a control request are delivered
+after it.
+
+What no desktop harness can do is put a frame on the bus, which bounds one
+check. `can.format_bit_is_identity` installs a subscription on the *other*
+format of an identifier the device is already forwarding and requires that
+nothing arrives under it — the half of §9.1 that a controller keeping the
+format in a flags word gets wrong. The other half, that an extended
+subscription matches extended frames, is only exercised if the vehicle
+carries them.
 
 ### Adversarial requests
 

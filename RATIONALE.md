@@ -444,7 +444,7 @@ one it cannot.
 subscription requires knowing every identifier in advance, which is exactly
 what a user reverse-engineering an unfamiliar car does not. One catch-all entry
 at a `periodic` rate is a survey of everything the bus carries, and the
-specificity ordering of SPEC.md §9.3 makes it compose: the catch-all governs
+specificity ordering of SPEC.md §9.2 makes it compose: the catch-all governs
 whatever the specific entries do not, so a client can log the whole bus slowly
 and take four identifiers at full rate at the same time, with no overlap and no
 duplicate frames. The precedence rule exists for this case, and this case is
@@ -607,21 +607,41 @@ need with a rate the client actually chose; it also produced a genuine
 specification bug, because `every_nth` with N of 1 selects exactly what
 `every_frame` selects and the two were treated differently by the (since
 removed) rate-admission rule. `on_change` was the single largest RAM demand in
-the CAN role: SPEC §6.8 requires mode state per *matching identifier*, and
-`on_change` alone needs a copy of the last forwarded payload — 8 to 64 bytes —
+the CAN role: SPEC §6.8 requires mode state per (subscription, identifier)
+pair, and `on_change` alone needs a copy of the last forwarded payload — 8 to 64 bytes —
 per identifier, on a mask that may cover the whole bus. Both modes are
 revivable in a later minor from the reserved enum values, against demonstrated
 need rather than symmetry.
 
-**Why per-identifier state may be bounded (SPEC §6.8).** A mask of zero matches
+**Why the schedule state may be bounded (SPEC §6.8).** A mask of zero matches
 every identifier on the bus, and a device cannot know at install time how many
-that is — so per-identifier `periodic` state is an unbounded demand on a
-bounded MCU. Earlier drafts left exhaustion unspecified, which is the worst
+that is — so `periodic` state per (subscription, identifier) pair is an
+unbounded demand on a bounded MCU. Earlier drafts left exhaustion unspecified, which is the worst
 available answer. Shedding is the mechanism the device already has: frames it
 can no longer schedule are counted in `dropped` with the shedding flag set,
 observable and degrading rather than silently wrong. Substituting unscheduled
 forwarding is forbidden because a client that asked for one frame in ten and
 silently gets all of them cannot tell a configuration bug from a flood.
+
+**Why the bound has an eviction rule (SPEC §6.8).** Permitting a bound and
+saying nothing about what to sacrifice at it leaves a device with two costs and
+no way to choose between them, and the first implementation found the bad half
+on a vehicle: a broad slow subscription filled the pool, an exact subscription
+installed afterwards could allocate nothing, and it was shed permanently —
+never receiving even the first frame SPEC §6.8 promises it. The entries
+blocking it belonged to a subscription that could not use them, because
+SPEC §9.2 had displaced it on exactly those identifiers.
+
+The two costs are not symmetric, which is what makes the rule statable. Evict a
+displaced entry and its owner over-delivers *once*, and only if governance
+returns to it, which requires the client to remove the subscription that took
+it. Refuse to evict and a subscription the client installed is silent for as
+long as the bound holds, which is indefinitely — and silent in the way
+SPEC §6.8 exists to prevent, since a quiet bus and a starved subscription look identical
+from the client. So displaced state goes first, and the specification says the
+early frame that may cost is conformant rather than leaving an implementer to
+discover the choice was theirs. Only when every entry is a governing one does
+the device shed, and then no rule can help it: every candidate is in use.
 
 ### 8.5 IMU (SPEC §7)
 
@@ -1319,6 +1339,35 @@ states. Every entry below was a place where two parts of the specification, or
 the specification and its own conformance suite, said different things — the
 class of defect that produces two implementations which each pass every test
 and cannot talk to each other. The full history is in CHANGELOG.md.
+
+**"Per matching identifier" read as naming the key, and it does not.**
+SPEC §6.8 says `periodic` state is kept per matching identifier, which exists
+to forbid one interval shared across a masked subscription's identifiers. The
+first implementation read it as the whole key — state keyed by identifier
+alone — and a subscription's rate limit was then destroyed the moment a second
+subscription matched one of its identifiers: removing the narrower one let the
+broader one forward immediately, though it had been installed throughout and
+its interval had not elapsed. A once-a-minute subscription delivered three
+frames in twenty milliseconds, every one of them well-formed. The key is the
+`(subscription, identifier)` pair, and SPEC §9.2 decides which subscription
+forwards a frame rather than which subscriptions still exist. No byte vector can reach
+this: every frame involved decodes perfectly, and the defect is in when they
+arrive.
+
+**A byte-identical retry and the first-frame promise disagreed.** SPEC §9.1
+makes a re-install update `mode` and `arg` in place, unconditionally, as an
+operation; SPEC §6.8 promises the first matching frame after an install;
+SPEC §9.4 tells
+a client it MAY retry any request whose response it did not receive and that
+doing so is harmless. For a retry that changes nothing, those three do not say
+whether the first frame re-arms — and the observable difference is an extra
+frame inside the client's own rate limit, with nothing on the wire to explain
+it, because a lost response and a delivered one are identical at the client.
+SPEC §9.4's guarantee is the one that has to hold: a request changing neither `mode`
+nor `arg` now changes nothing at all, the schedule included. A request that
+changes either is not a retry, and re-arms the first frame — which is also what
+a client changing its mind wants, since it is asking to see the signal on new
+terms.
 
 **A control response had three completion points and one of them was the
 client's.** SPEC §9 said a device "owes" a response, that a tag frees when its

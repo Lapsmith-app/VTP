@@ -1574,7 +1574,21 @@ class VtpDevice:
             # cannot exhaust the table.
             sub = self._subscriptions.get((cid, mask))
             if sub is not None:
-                sub.update(mode=mode, arg=arg)
+                # SPEC.md §6.8 — an identical re-install is a retry (§9.4) and
+                # MUST cost the client nothing: the schedule is left exactly as
+                # it was, so a client repeating a request whose response was
+                # lost is not paid with a frame inside its own interval. A
+                # changed mode or arg is a new instruction, and re-arms the
+                # first matching frame for every identifier this subscription
+                # matches. `last` is untouched either way: it belongs to the
+                # synthetic bus generator, not to §6.8's admission.
+                if (mode, arg) != (sub["mode"], sub["arg"]):
+                    for st in sub["per_id"].values():
+                        st["seen"], st["emitted_at"] = 0, 0
+                    sub.update(mode=mode, arg=arg)
+                # The capacity check below is deliberately AFTER this: §9.1
+                # makes a re-install create no subscription, so there is no
+                # slot for a full table to refuse it.
                 return reply(ST_OK)
 
             if len(self._subscriptions) >= CAN_SUBSCRIPTION_SLOTS:
@@ -1586,10 +1600,14 @@ class VtpDevice:
             self._install_counter += 1
             self._subscriptions[(cid, mask)] = {
                 "mode": mode, "arg": arg, "order": self._install_counter,
-                # SPEC.md §6.8 — mode state is per matching identifier, not per
-                # subscription. A mask covering three identifiers keeps three
-                # independent sets; sharing one would let whichever frame
-                # arrived first consume the interval for the whole group.
+                # SPEC.md §6.8 — mode state is keyed per (subscription,
+                # identifier) pair, which is why it hangs off the subscription
+                # rather than off a device-wide table of identifiers. One set
+                # for the whole subscription would let whichever frame arrived
+                # first consume the interval for the whole group; one set per
+                # identifier would hand this subscription's schedule to
+                # whichever other subscription matched it last, and destroy it
+                # again on the way back (§9.2).
                 "per_id": {},
             }
             return reply(ST_OK)

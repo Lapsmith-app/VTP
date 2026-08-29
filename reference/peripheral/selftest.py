@@ -58,6 +58,32 @@ def decode(characteristic, payload):
         return None
 
 
+def can_records(events, want_id=None, since=None):
+    """Every CAN record in what a run() returned, optionally one id's.
+
+    `since` filters on the BUS-ARRIVAL time rather than on which run collected
+    the record: a batch is flushed on its own schedule (SPEC.md §6.2), so a
+    frame accepted before some control request lands in the notifications
+    after it. A scheduling check that counts by arrival window rather than by
+    timestamp reads those as new frames and fails a device that is right.
+
+    The bound is exclusive: a frame stamped at the very instant a request was
+    written was accepted before it, and the generator emits on exactly the
+    tick a caller reads the clock on.
+    """
+    out = []
+    for characteristic, payload in events:
+        if characteristic != "can":
+            continue
+        batch = decode(characteristic, payload)
+        if batch is None:
+            continue
+        out.extend(r for r in batch["records"]
+                   if (want_id is None or r["id"] == want_id)
+                   and (since is None or r["t_device_us"] > since))
+    return out
+
+
 def run(device, clock, seconds, step_us=5_000):
     """Advance the injected clock and collect everything the device emits.
 
@@ -227,6 +253,78 @@ def main():
     check(gone[2] == dev.ST_OK, "CAN_UNSUBSCRIBE by (id, mask) was refused")
     check(device._governing(0x1A0 | (1 << 29)) is None,
           "the both-formats subscription was not removed")
+
+    # SPEC.md §9.1 — identity is the (id, mask) pair the client WROTE, not
+    # `id & mask`. Two subscriptions whose masks are equal and whose ids differ
+    # only in bits that mask clears match the same frames and are still two
+    # subscriptions: a device that folds them into one silently discards the
+    # second install, and the client's own removal then names nothing.
+    iclock = [0]
+    ident = dev.VtpDevice(now_us=lambda: iclock[0], gps_hz=0, imu_hz=0)
+    ident.on_connect()
+    coarse = 0x1FFFFFF0
+    first = ident.handle_control(bytes([dev.CAN_SUBSCRIBE_MASK, 1])
+                                 + struct.pack("<IIBH", 0x200, coarse,
+                                               dev.SUB_EVERY_FRAME, 0))
+    second = ident.handle_control(bytes([dev.CAN_SUBSCRIBE_MASK, 2])
+                                  + struct.pack("<IIBH", 0x201, coarse,
+                                                dev.SUB_EVERY_FRAME, 0))
+    check(first[2] == dev.ST_OK and second[2] == dev.ST_OK,
+          "two subscriptions differing only in id bits their mask ignores "
+          "were not both installed; §9.1 makes the pair the identity")
+    check(len(ident.can_table()) == 2,
+          f"the second install folded into the first: table holds "
+          f"{len(ident.can_table())} of 2 (§9.1 compares the pair, not id & mask)")
+    for cid in (0x200, 0x201):
+        gone = ident.handle_control(bytes([dev.CAN_UNSUBSCRIBE, 3])
+                                    + struct.pack("<II", cid, coarse))
+        check(gone[2] == dev.ST_OK,
+              f"CAN_UNSUBSCRIBE could not name 0x{cid:X} under the mask that "
+              f"installed it")
+
+    # SPEC.md §9.1 — bits 30 and 31 take no part in identity, in either
+    # direction. A device that keeps them in what it stores installs a
+    # subscription its client can never remove, because the removal it writes
+    # is a different name than the one the device recorded.
+    ident.handle_control(bytes([dev.CAN_SUBSCRIBE, 4])
+                         + struct.pack("<IBH", 0x0C0 | (1 << 30) | (1 << 31),
+                                       dev.SUB_EVERY_FRAME, 0))
+    check(ident.can_table() and ident.can_table()[0][0] == 0x0C0,
+          "a subscription installed with bits 30 and 31 set MUST be stored "
+          "under bits 0-29 alone (§9.1)")
+    removed = ident.handle_control(bytes([dev.CAN_UNSUBSCRIBE, 5])
+                                   + struct.pack("<II", 0x0C0,
+                                                 dev.MASK_EXACT))
+    check(removed[2] == dev.ST_OK,
+          "a subscription installed with bits 30 and 31 set could not be "
+          "removed by the same identifier without them: §9.1 ignores both "
+          "bits in `id` and in `mask`, so the client can never name it")
+
+    # SPEC.md §9.1 — a re-install creates no subscription, so a full table has
+    # no slot to refuse it. Checking capacity before the update-in-place is the
+    # defect this catches, and it refuses a client the reprogramming §4 forces
+    # on it: the table is full precisely because it already holds what the
+    # client is re-writing.
+    for i in range(dev.CAN_SUBSCRIPTION_SLOTS):
+        filled = ident.handle_control(bytes([dev.CAN_SUBSCRIBE, 6])
+                                      + struct.pack("<IBH", 0x300 + i,
+                                                    dev.SUB_EVERY_FRAME, 0))
+        check(filled[2] == dev.ST_OK,
+              f"filling the table stopped at {i} of "
+              f"{dev.CAN_SUBSCRIPTION_SLOTS} declared slots")
+    over = ident.handle_control(bytes([dev.CAN_SUBSCRIBE, 7])
+                                + struct.pack("<IBH", 0x400,
+                                              dev.SUB_EVERY_FRAME, 0))
+    check(over[2] == dev.ST_TABLE_FULL,
+          "the slot after capacity MUST be table_full")
+    again_full = ident.handle_control(bytes([dev.CAN_SUBSCRIBE, 8])
+                                      + struct.pack("<IBH", 0x300,
+                                                    dev.SUB_PERIODIC, 100))
+    check(again_full[2] == dev.ST_OK,
+          "re-installing an id and mask the FULL table already holds was "
+          "answered table_full; §9.1 updates it in place and consumes no slot")
+    check(len(ident.can_table()) == dev.CAN_SUBSCRIPTION_SLOTS,
+          "the re-install on a full table changed the table size")
 
     # ---- A masked subscription forwards every identifier it matches ------
     # SPEC.md §6.8 — mode state is per matching identifier. Shared state let
@@ -748,6 +846,100 @@ def main():
     check(len(first_frames) >= 1,
           "periodic held back the first matching frame: SPEC.md §6.8 forwards "
           "it in every mode, so a client need not wait for a second")
+
+    # SPEC.md §6.8 + §9.4 — a byte-identical re-install is a RETRY, and §9.4
+    # promises a client that repeating a request whose response was lost is
+    # harmless. The subscription above has just spent its first frame, so a
+    # schedule that re-arms here pays the client a frame inside the interval it
+    # set, with nothing on the wire to explain it: a lost response and a
+    # delivered one look the same from the client.
+    identical = device.handle_control(bytes([dev.CAN_SUBSCRIBE, 33])
+                                      + struct.pack("<IBH", 0x0C0,
+                                                    dev.SUB_PERIODIC, 5000))
+    check(identical[2] == dev.ST_OK,
+          "a byte-identical re-install MUST be answered ok")
+    reinstalled_at = clock[0]
+    retried = can_records(run(device, clock, 0.2), 0x0C0, since=reinstalled_at)
+    check(not retried,
+          f"{len(retried)} frame(s) arrived after a re-install that changed "
+          f"neither mode nor arg, a tenth of a second into a 5000 ms "
+          f"interval. §6.8 makes an unchanged re-install change nothing, "
+          f"schedule included")
+
+    # A changed `arg` is a new instruction rather than a repetition, so §6.8
+    # re-arms the first frame: a client that changes its mind sees a value
+    # without waiting out an interval it has only just chosen.
+    changed_at = clock[0]
+    device.handle_control(bytes([dev.CAN_SUBSCRIBE, 34])
+                          + struct.pack("<IBH", 0x0C0, dev.SUB_PERIODIC, 4000))
+    rearmed = can_records(run(device, clock, 0.2), 0x0C0, since=changed_at)
+    check(len(rearmed) >= 1,
+          "changing arg on an installed subscription did not re-arm the first "
+          "matching frame; §6.8 forwards it in every mode, and a re-install "
+          "that changes mode or arg is not a retry")
+
+    # The other half of the same rule: a changed MODE re-arms too. Every_frame
+    # to periodic is where that is visible -- the schedule this subscription
+    # has just been forwarding under is spent by definition, so a device that
+    # re-arms nothing holds the next frame for the whole new interval.
+    device.handle_control(bytes([dev.CAN_SUBSCRIBE, 35])
+                          + struct.pack("<IBH", 0x0C0,
+                                        dev.SUB_EVERY_FRAME, 0))
+    run(device, clock, 0.1)
+    mode_changed_at = clock[0]
+    device.handle_control(bytes([dev.CAN_SUBSCRIBE, 36])
+                          + struct.pack("<IBH", 0x0C0, dev.SUB_PERIODIC, 5000))
+    remoded = can_records(run(device, clock, 0.2), 0x0C0,
+                          since=mode_changed_at)
+    check(len(remoded) >= 1,
+          "changing mode on an installed subscription did not re-arm the "
+          "first matching frame: the client asked for a rate and got silence "
+          "for a whole interval (§6.8)")
+    check(len(remoded) == 1,
+          f"{len(remoded)} frames arrived in 200 ms of a 5000 ms interval "
+          f"after the mode changed; the re-armed first frame is one frame, "
+          f"and the interval applies from it")
+
+    # SPEC.md §6.8 + §9.2 — a subscription DISPLACED from governance keeps its
+    # schedule. Reported by the first firmware implementation: state keyed by
+    # identifier alone rather than by (subscription, identifier), so installing
+    # a narrower subscription destroyed the broader one's interval and removing
+    # it let the broader one forward immediately -- a once-a-minute
+    # subscription delivering three frames in twenty milliseconds, every one of
+    # them well-formed. Its own clock and device, because the sequence is a
+    # long one and nothing above should have to survive it.
+    dclock = [0]
+    displaced = dev.VtpDevice(now_us=lambda: dclock[0], gps_hz=0, imu_hz=0)
+    displaced.on_connect()
+    displaced.handle_control(bytes([dev.CAN_SUBSCRIBE_MASK, 40])
+                             + struct.pack("<IIBH", 0x0C0, 0x1FFFFF00,
+                                           dev.SUB_PERIODIC, 2000))
+    opening = can_records(run(displaced, dclock, 0.2), 0x0C0)
+    check(len(opening) == 1,
+          f"the broad periodic subscription forwarded {len(opening)} frame(s) "
+          f"in 200 ms of a 2000 ms interval; §6.8 gives it exactly the first")
+    displaced.handle_control(bytes([dev.CAN_SUBSCRIBE, 41])
+                             + struct.pack("<IBH", 0x0C0,
+                                           dev.SUB_EVERY_FRAME, 0))
+    governed = can_records(run(displaced, dclock, 0.3), 0x0C0)
+    check(len(governed) > 5,
+          f"the exact every_frame subscription installed second forwarded "
+          f"{len(governed)} frame(s) in 300 ms of 50 Hz traffic; §9.2 gives it "
+          f"the identifier")
+    removed_at = dclock[0]
+    displaced.handle_control(bytes([dev.CAN_UNSUBSCRIBE, 42])
+                             + struct.pack("<II", 0x0C0, dev.MASK_EXACT))
+    resumed = can_records(run(displaced, dclock, 0.5), 0x0C0, since=removed_at)
+    check(not resumed,
+          f"{len(resumed)} frame(s) arrived the moment the narrower "
+          f"subscription was removed. The broad one was installed throughout "
+          f"and its 2000 ms interval had not elapsed: §6.8 keeps a displaced "
+          f"subscription's schedule, and §9.2 decides which subscription "
+          f"forwards a frame, not which ones still apply")
+    later = can_records(run(displaced, dclock, 1.5), 0x0C0, since=removed_at)
+    check(len(later) >= 1,
+          "the displaced subscription never resumed once its interval "
+          "elapsed; retaining a schedule is not the same as silencing it")
 
     resp = device.handle_control(bytes([0xEE, 6]))
     check(resp[2] == dev.ST_UNSUPPORTED,
