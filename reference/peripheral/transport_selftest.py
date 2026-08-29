@@ -18,6 +18,7 @@ import asyncio
 import pathlib
 import struct
 import sys
+import time
 
 sys.dont_write_bytecode = True
 HERE = pathlib.Path(__file__).resolve().parent
@@ -57,6 +58,88 @@ def build(gps_hz=10, imu_hz=0, bless_semantics=False):
     server.on_ready = lambda: setattr(peripheral, "_ready", True)
     serve.CHAR_NAMES.update({v.lower(): k for k, v in serve.CHAR.items()})
     return peripheral, server, clock
+
+
+class SimulatedClock:
+    """The clock the pump schedules against, under the test's control.
+
+    The pump is the one thing in this file with a real-time contract: it must
+    reach `poll_hz`. Timing it with a wall clock would report how loaded the
+    machine is, which is the same objection gattsim answers for device time.
+    So the clock `Peripheral.run` reads is simulated instead -- a tick's work
+    advances it by a stated amount, `asyncio.sleep` advances it by exactly
+    what it was asked to sleep, and nothing else moves it. Whatever schedule
+    the pump then keeps is a property of its own arithmetic.
+    """
+
+    def __init__(self):
+        self.t = 0.0
+
+
+class _TimeShim:
+    """`serve.time`, with the two readings the pump takes made simulated."""
+
+    def __init__(self, clock):
+        self._clock = clock
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def monotonic(self):
+        return self._clock.t
+
+    def perf_counter(self):
+        return self._clock.t
+
+
+class _AsyncioShim:
+    """`serve.asyncio`, with `sleep` charging the simulated clock.
+
+    It still yields to the real event loop, so the loop's ordering -- which is
+    what every other check in this file is about -- is untouched.
+    """
+
+    def __init__(self, clock):
+        self._clock = clock
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    async def sleep(self, delay):
+        self._clock.t += max(0.0, delay)
+        await asyncio.sleep(0)
+
+
+def pump(work_s, ticks, poll_hz=200):
+    """Drive the real pump for `ticks` ticks against a simulated clock.
+
+    `work_s(n)` is charged to that clock as tick n's work, which is the thing
+    a loop that sleeps a fixed interval AFTER its work adds to its own period.
+    Returns `(marks, tick_hz)`: `marks[n]` is the clock at the start of tick
+    n, and `tick_hz` is the rate the pump itself reported.
+    """
+    clock = SimulatedClock()
+    real_time, real_asyncio = serve.time, serve.asyncio
+    serve.time, serve.asyncio = _TimeShim(clock), _AsyncioShim(clock)
+    try:
+        peripheral, server, _ = build(gps_hz=10)
+        server.connect(subscribe=("gps",))
+        # is_connected is awaited exactly once per tick, before the tick does
+        # anything, so it is where a tick's work can be charged.
+        inner, marks, n = server.is_connected, [], [0]
+
+        async def worked():
+            marks.append(clock.t)
+            clock.t += work_s(n[0])
+            n[0] += 1
+            return await inner()
+
+        server.is_connected = worked
+        asyncio.run(peripheral.run(poll_hz=poll_hz, screen_hz=10,
+                                   max_ticks=ticks))
+        return marks, peripheral._tick_hz
+    finally:
+        serve.time, serve.asyncio = real_time, real_asyncio
 
 
 def run(peripheral, ticks):
@@ -414,14 +497,64 @@ def main():
           f"the tracker should be carrying the central's identity, got "
           f"{peripheral._link.central!r}")
 
+    # ---- The pump reaches its target rate -------------------------------
+    # SPEC.md has nothing to say about this; every stream does. Each one is
+    # sized against poll_hz, so a pump that runs under it delivers every
+    # stream under its configured rate and reports none of them as short.
+    #
+    # The loop used to await a fixed `interval` at the END of the tick, after
+    # variable work, making the period `work + interval` -- it could approach
+    # the target from below but never reach it. Measured against a client, a
+    # nominal 200 Hz ran at ~172 and every stream came out ~14% under. The
+    # fix is an absolute deadline advanced by exactly `interval`, and it is
+    # invisible: nothing in the delivered bytes distinguishes the two, which
+    # is why it is pinned here rather than left to be noticed again.
+    marks, tick_hz = pump(lambda _n: 0.003, 401)
+    rate = (len(marks) - 1) / (marks[-1] - marks[0])
+    check(abs(rate - 200) < 2,
+          f"3 ms of work per tick at a 5 ms interval must still tick at "
+          f"200 Hz; got {rate:.1f}. A fixed sleep AFTER the work gives 125 "
+          f"here, because the work is added to the period instead of "
+          f"absorbed by it")
+    check(abs(tick_hz - 200) < 4,
+          f"the pump must report the rate it achieved; it reported "
+          f"{tick_hz:.1f} while ticking at {rate:.1f}")
+
+    # ---- Time lost while behind is not repaid as a burst ----------------
+    # The other half of the deadline: when a tick overruns, the missed ticks
+    # are abandoned and the deadline is taken from now. Carrying the debt
+    # instead would run the backlog back-to-back the moment the work eased --
+    # a burst of notifications the link never asked for, on a loop that has
+    # nothing else to give them room. 100 ticks of 12 ms overrun leaves a
+    # 700 ms debt; what follows must still be 200 Hz, not 345.
+    marks, _ = pump(lambda n: 0.012 if n < 100 else 0.0005, 401)
+    recovered = (len(marks) - 101) / (marks[-1] - marks[100])
+    check(abs(recovered - 200) < 2,
+          f"after falling 700 ms behind, the pump must resume at 200 Hz and "
+          f"not repay the debt in a burst; it ran the next 300 ticks at "
+          f"{recovered:.1f} Hz")
+
+    # ---- Falling behind is reported, not hidden -------------------------
+    # 12 ms of work cannot be ticked at 200 Hz by any scheduling, and the
+    # honest report of that is a rate below the target rather than a number
+    # copied from poll_hz. This is what makes can_bus_rates(), which models
+    # the ideal poll grid, checkable against what the pump actually did.
+    marks, tick_hz = pump(lambda _n: 0.012, 401)
+    rate = (len(marks) - 1) / (marks[-1] - marks[0])
+    check(abs(rate - 1 / 0.012) < 1 and abs(tick_hz - 1 / 0.012) < 1,
+          f"work that overruns the interval must show as a tick rate below "
+          f"the target: ran {rate:.1f}, reported {tick_hz:.1f}, expected "
+          f"{1 / 0.012:.1f}")
+
     if problems:
         print(f"\n{len(problems)} transport problem(s).", file=sys.stderr)
         return 1
     total = sum(len(v) for v in server.wire.values())
     print(f"Transport conforms: sequence integrity across subscription, "
           f"backpressure and reconnection; nothing outlives its link; control "
-          f"responses are retried; and the bless 0.3.0 subscription-as-link "
-          f"signal resets in the safe direction.")
+          f"responses are retried; the bless 0.3.0 subscription-as-link "
+          f"signal resets in the safe direction; and the pump holds its "
+          f"target rate under load without repaying lost time as a burst.")
     return 0
 
 

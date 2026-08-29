@@ -378,7 +378,7 @@ class VtpDevice:
 
     def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
                  circuit=None, monitor_channels=None, capabilities=None,
-                 obd_latency_us=None):
+                 can_scale=1.0, can_rates=None, obd_latency_us=None):
         self._clock = now_us or self._monotonic_us
         self.obd_latency_us = (self.OBD_ECU_LATENCY_US if obd_latency_us is None
                                else obd_latency_us)
@@ -396,6 +396,15 @@ class VtpDevice:
         self._mtu_observed = False
         self.gps_hz = gps_hz
         self.imu_hz = imu_hz
+        # The bus rates `_bus_frames` yields are the synthetic bus's natural
+        # ones and stay the documented truth (README "CAN layouts"). These two
+        # move what this build actually emits, so a load test can raise the bus
+        # without editing the model: `can_rates` replaces one id's rate
+        # outright, `can_scale` multiplies whatever is left. Neither can beat
+        # the pump -- an id emits at most one frame per poll, so the tick rate
+        # in `Peripheral.run` is the real ceiling.
+        self.can_scale = can_scale
+        self.can_rates = {int(k): float(v) for k, v in (can_rates or {}).items()}
         self.circuit = circuit or Circuit()
 
         # SPEC.md §8.2 — seq counts notifications on its own characteristic and
@@ -827,6 +836,42 @@ class VtpDevice:
                                      round(st["long_g"] * 100),
                                      round(st["yaw_rate"] * 10))
 
+    def _can_rate(self, cid, natural_hz):
+        """The rate this build emits `cid` at, after --can-rate/--can-scale.
+
+        An explicit per-id rate wins outright rather than being scaled as
+        well: two multipliers on one number is a thing to have to reason
+        about, and the flag reads as "this id, this rate".
+        """
+        rate = self.can_rates.get(cid, natural_hz * self.can_scale)
+        # Only so the interval below cannot divide by zero. A rate this low is
+        # indistinguishable from a silent id, which is what asking for 0 means.
+        return max(rate, 0.001)
+
+    def can_bus_rates(self, now=None, poll_hz=None):
+        """`(id, natural Hz, effective Hz)` for every id on the synthetic bus.
+
+        Reads `_bus_frames` rather than restating it, so a channel added there
+        cannot go missing here.
+
+        Given `poll_hz`, the effective rate is the one the pump can actually
+        deliver rather than the one asked for. A frame goes out on the first
+        poll at or after its interval elapses, so an interval that is not a
+        whole number of polls rounds UP to one: at 200 Hz, asking an id for
+        80 Hz gets 66.7, because 12.5 ms of interval waits for the poll at 15.
+        Reporting the request instead would overstate the bus by a fifth.
+        """
+        now = self.now_us() if now is None else now
+        rates = []
+        for cid, natural, _payload in self._bus_frames(now):
+            rate = self._can_rate(cid, natural)
+            if poll_hz:
+                step_us = 1_000_000 / poll_hz
+                polls = max(1, math.ceil(round(1_000_000 / rate) / step_us))
+                rate = 1_000_000 / (polls * step_us)
+            rates.append((cid, natural, rate))
+        return tuple(rates)
+
     def _can_capacity(self):
         header = 16
         return max(1, (self.notify_bytes - header) // (7 + 8))
@@ -1074,7 +1119,7 @@ class VtpDevice:
             # here while the §6.8 decision lives in _admit.
             st = sub["per_id"].setdefault(
                 cid, {"last": 0, "seen": 0, "emitted_at": 0})
-            interval = round(1_000_000 / rate_hz)
+            interval = round(1_000_000 / self._can_rate(cid, rate_hz))
             if now - st["last"] < interval:
                 continue
             st["last"] = now
