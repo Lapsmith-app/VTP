@@ -86,6 +86,7 @@ CAUGHT_BY = {
     "caps_reserved_bits": "info.reserved_capabilities",
     "absent_field_nonzero": "gps.absent_fields_zero",
     "clock_per_stream": "clock.one_clock",
+    "clock_diverges": "clock.one_rate",
     "drops_a_response": ("control.time_sync",
                          "control.no_busy_for_conforming_client"),
     "pipelines_silently": "control.busy_when_outstanding",

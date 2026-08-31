@@ -40,6 +40,7 @@ async def transport_unverifiable(s):
         "verified. This host's scheduler and Bluetooth stack sit between the "
         "device and every arrival time measured here, and they are worth tens "
         "of milliseconds against a clock specified in microseconds. What was "
-        "checked is that the timestamps are internally consistent, ordered, and "
-        "shared across the streams -- not that they are accurate.")
+        "checked is that the timestamps are internally consistent, ordered, "
+        "and shared across the streams -- in offset and in rate, to this "
+        "window's resolution -- not that they are accurate.")
     raise Observe("see the notes below the results")

@@ -26,6 +26,25 @@ TIMESTAMP = {
 #: far inside the gap a per-sensor timer produces.
 ONE_CLOCK_TOLERANCE_US = 1_000_000
 
+#: Two clocks whose relative RATE differs by more than this are not one clock
+#: either, whatever their offset. The defects in this class are scale errors —
+#: a millisecond counter reported as microseconds is a thousandfold, a
+#: 32.768 kHz tick counted as 32 kHz is 24,000 ppm — while honest disagreement
+#: between two crystals is tens of ppm, below what a run this short can see
+#: through host jitter. 5,000 ppm sits far above anything jitter can fake and
+#: far below the smallest defect in the class.
+DIVERGENCE_TOLERANCE_PPM = 5_000
+
+#: ...and the divergence must have accumulated to something no queueing spike
+#: can produce. The quarter-window medians move a few milliseconds under host
+#: jitter; 40 ms of one-direction movement is outside that, and the floor
+#: keeps a short window from turning those milliseconds into thousands of ppm.
+DIVERGENCE_FLOOR_US = 40_000
+
+#: Fewer notifications than this and a quarter-window's median is too few
+#: points to mean anything.
+DIVERGENCE_MIN_NOTIFICATIONS = 12
+
 PROBE_MASK_ALL = 0
 
 
@@ -398,6 +417,119 @@ async def clock_one_clock(s):
     raise Observe(
         f"the {len(present)} streams agree to within {spread / 1000:.1f} ms",
         spread_us=round(spread))
+
+
+#: Where each stream's device timestamp lives for RATE measurement. GPS and
+#: IMU anchor exactly as `TIMESTAMP` does; CAN anchors on the batch's LAST
+#: record rather than `t_base`, because t_base's distance from delivery
+#: includes the time the batch spent filling, which moves with bus traffic —
+#: a bus going quiet mid-run would read as the clock changing rate. The last
+#: record is one flush away from delivery whatever the traffic did.
+RATE_TIMESTAMP = dict(TIMESTAMP, can=lambda d: (
+    d["records"][-1]["t_device_us"] if d["records"]
+    else d["header"]["t_base"]))
+
+
+def _quarter_offsets(good, timestamp):
+    """(median host time, median offset) for each quarter of a stream's log.
+
+    The offset is device time minus host arrival time, in microseconds.
+    Medians on both axes, because BLE queueing spikes are one-sided and a
+    single held-back notification would otherwise read as the clock moving.
+    """
+    pairs = sorted((item.t_host, timestamp(decoded) - item.t_host * 1e6)
+                   for item, decoded in good)
+    out = []
+    for i in range(4):
+        chunk = pairs[i * len(pairs) // 4:(i + 1) * len(pairs) // 4]
+        out.append((statistics.median(h for h, _ in chunk),
+                    statistics.median(o for _, o in chunk)))
+    return out
+
+
+def _rate_between(early, late):
+    """Microseconds of offset movement per host second — which is ppm."""
+    (h0, o0), (h1, o1) = early, late
+    if h1 <= h0:
+        return None
+    return (o1 - o0) / (h1 - h0)
+
+
+@check(id="clock.one_rate", section="8.1", phase="streams", severity="MUST",
+       title="The streams' clocks do not diverge over the run")
+async def clock_one_rate(s):
+    """§8.1 — one clock is a rate claim as much as an epoch claim.
+    `clock.one_clock` compares where the streams' clocks ARE; this compares
+    how fast they RUN, because the defect reported from the field is a device
+    whose CAN and GPS timestamps agree at connect and walk apart from there —
+    a per-sensor timer with its offset zeroed at boot, which stays inside the
+    offset tolerance for the length of a harness run and costs a client more
+    alignment error every minute a session lasts.
+
+    The host clock is the common ruler and its own rate cancels: it is the
+    same host in both terms, so two device streams on one clock move together
+    whatever the host's crystal does. Host jitter does not cancel, which is
+    what the medians, the floor and the tolerance are for. And a divergence
+    is a TREND, not a step: it has to be present in the first half of the run
+    and the second half alike, which is what separates a diverging clock from
+    a one-time change in delivery latency — a bus finding traffic mid-run —
+    that moves the medians once and never again."""
+    rates = {}
+    for name in s.STREAMS:
+        if not s.has(name) or \
+                len(s.streams[name]) < DIVERGENCE_MIN_NOTIFICATIONS:
+            continue
+        good, _ = _decoded(s, name)
+        if len(good) < DIVERGENCE_MIN_NOTIFICATIONS:
+            continue
+        q = _quarter_offsets(good, RATE_TIMESTAMP[name])
+        overall = _rate_between(q[0], q[3])
+        early, late = _rate_between(q[0], q[1]), _rate_between(q[2], q[3])
+        if None not in (overall, early, late):
+            rates[name] = (overall, early, late, q[3][0] - q[0][0])
+    if len(rates) < 2:
+        raise Skip("fewer than two streams produced enough notifications to "
+                   "compare clock rates")
+    worst = None
+    names = sorted(rates)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            ppm = rates[a][0] - rates[b][0]
+            if worst is None or abs(ppm) > abs(worst[2]):
+                worst = (a, b, ppm)
+    a, b, ppm = worst
+    early = rates[a][1] - rates[b][1]
+    late = rates[a][2] - rates[b][2]
+    gap = min(rates[a][3], rates[b][3])
+    persistent = (early * ppm > 0 and late * ppm > 0
+                  and min(abs(early), abs(late))
+                  > DIVERGENCE_TOLERANCE_PPM / 2)
+    if abs(ppm) > DIVERGENCE_TOLERANCE_PPM and \
+            abs(ppm) * gap > DIVERGENCE_FLOOR_US and persistent:
+        # Each stream is perfectly self-consistent, the offset between them is
+        # small for as long as anyone tests by hand, and every payload
+        # decodes. Only the trend gives it away, and the trend never stops:
+        # alignment is wrong by more at the end of a session than at the
+        # start, which no per-payload check anywhere downstream can see.
+        raise Fail(
+            f"the {a} and {b} clocks diverge at {abs(ppm):,.0f} ppm: their "
+            f"relationship to this host's clock moved "
+            f"{abs(ppm) * gap / 1000:.0f} ms apart over {gap:.1f} s, in the "
+            f"first half of the run and the second alike. §8.1 timestamps "
+            f"every stream against ONE clock, so whatever offset two streams "
+            f"show must not GROW — at this rate a client aligning {a} to {b} "
+            f"is wrong by another {abs(ppm) * 3600 / 1e6:,.1f} s for every "
+            f"hour of a session",
+            rates_ppm={n: round(r) for n, (r, *_) in rates.items()},
+            pair=[a, b], gap_s=round(gap, 2))
+    resolution = max(DIVERGENCE_TOLERANCE_PPM, DIVERGENCE_FLOOR_US / gap)
+    raise Observe(
+        f"the {len(rates)} streams' clock rates agree to within "
+        f"{abs(ppm):,.0f} ppm over {gap:.1f} s (divergence below "
+        f"{resolution:,.0f} ppm is inside this window's jitter; crystal-grade "
+        f"drift is tens of ppm and needs a longer --seconds to see)",
+        rates_ppm={n: round(r) for n, (r, *_) in rates.items()},
+        resolution_ppm=round(resolution))
 
 
 @check(id="loss.dropped", section="8.3", phase="streams", severity="OBSERVE",

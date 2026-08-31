@@ -34,7 +34,7 @@ It cannot ask a device a question. So nothing in this repository tested:
 | §9 | the entire control plane — what a device *answers*, not what a client decodes, including `busy` when a client pipelines and the requirement that a request refused `busy` did not take effect |
 | §4.1 | that the attribute table is the fixed one, and that an absent capability leaves an *inert* characteristic rather than no characteristic |
 | §8.2 | that `seq` starts at 0 on the first notification of a connection |
-| §8.1 | that the three streams are on one clock rather than three |
+| §8.1 | that the three streams are on one clock rather than three — in offset, and in rate: a per-sensor timer zeroed at boot agrees at connect and diverges from there |
 | §9.1 | that the subscription table is empty after a reconnect |
 | §9.1 | that a subscription's identity is the `(id, mask)` pair the client wrote — bits 30 and 31 excluded, `id & mask` not substituted, and a re-install answered `ok` on a full table |
 | §9.2 | that a frame matching two subscriptions is forwarded once |
@@ -139,7 +139,11 @@ Four things are permanently in it:
 - **§8.1's clock discipline and §6.1's timing bounds.** The host's scheduler and
   Bluetooth stack sit between the device and every arrival time measured here,
   and they are worth tens of milliseconds against a clock specified in
-  microseconds. Ordering and internal consistency are checked; accuracy is not.
+  microseconds. Ordering and internal consistency are checked — the streams
+  keeping one *rate* included, down to a few thousand ppm over a default
+  window — but accuracy is not, and crystal-grade drift of tens of ppm needs
+  a far longer `--seconds` to rise above that jitter; the report says what
+  its window could resolve.
 - **§9.7's numbers themselves.** The harness checks that a device declaring
   `power` answers `GET_POWER`, that it reports something valid, and that what it
   reports obeys §9.7's rules. Whether the pack is actually two-thirds full is
