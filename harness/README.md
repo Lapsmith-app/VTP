@@ -140,10 +140,13 @@ Four things are permanently in it:
   Bluetooth stack sit between the device and every arrival time measured here,
   and they are worth tens of milliseconds against a clock specified in
   microseconds. Ordering and internal consistency are checked — the streams
-  keeping one *rate* included, down to about a percent over a default
-  window — but accuracy is not, and crystal-grade drift of tens of ppm needs
-  a far longer `--seconds` to rise above that jitter; the report says what
-  its window could resolve.
+  keeping one *rate* included, to a bar of about one percent — but accuracy
+  is not. A longer `--seconds` sharpens a short window toward that bar and
+  never past it: delivery latency honestly moves by real fractions of a
+  second, so crystal-grade drift of tens of ppm is invisible to an
+  arrival-time ruler at any window length, and the report says so rather
+  than promising it. Measuring below the bar is a bench measurement on the
+  device's own side of the radio.
 - **§9.7's numbers themselves.** The harness checks that a device declaring
   `power` answers `GET_POWER`, that it reports something valid, and that what it
   reports obeys §9.7's rules. Whether the pack is actually two-thirds full is

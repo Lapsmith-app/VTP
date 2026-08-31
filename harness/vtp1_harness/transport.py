@@ -448,9 +448,11 @@ class LoopbackTransport(Transport):
         # for the device that keeps those bits in what it stores.
         self._decorated_subs = set()
         # SPEC.md §8.1 — where the diverging CAN clock last agreed with the
-        # real one. Anchored on the first batch seen (and re-anchored across a
-        # reconnect, when the device clock restarts), because the defect this
+        # real one: the connection's first batch, because the defect this
         # models drifts from a shared epoch rather than starting offset.
+        # Reset in connect() with the other per-connection state — the device
+        # clock restarts with the connection, and an anchor surviving a link
+        # drop hands the next connection a first batch already offset.
         self._diverge_t0 = None
 
     # -- lifecycle --------------------------------------------------------
@@ -520,6 +522,12 @@ class LoopbackTransport(Transport):
             # identifier.
             self.device._seq = {k: 100 for k in self.device._seq}
         self._seen_a_connection = True
+        # SPEC.md §8.1 — the diverging clock's anchor is per-connection: the
+        # device clock restarts with the device, so a surviving anchor would
+        # start the new connection's first batch already offset by the whole
+        # previous connection's drift. selftest._diverge_anchor_problems
+        # holds this to account.
+        self._diverge_t0 = None
         if "stream_before_subscribe" in self.faults:
             # A device that streams what nobody asked for: one subscription
             # matching every identifier, installed by the device itself.
@@ -1654,10 +1662,7 @@ class LoopbackTransport(Transport):
             rate = 1.04
             off = refdec.offset("can_header", "t_base")
             t = struct.unpack_from("<Q", payload, off)[0]
-            if self._diverge_t0 is None or t < self._diverge_t0:
-                # Re-anchored when t moves backwards past the anchor: the
-                # device clock restarts at zero on a reconnect, and a stale
-                # anchor would send t_base negative.
+            if self._diverge_t0 is None:
                 self._diverge_t0 = t
             drifted = self._diverge_t0 + round((t - self._diverge_t0) * rate)
             struct.pack_into("<Q", payload, off, drifted)
