@@ -8,6 +8,37 @@ conformance vector.
 
 ## [Unreleased]
 
+### Harness: a diverging clock is caught by its rate, not its offset
+
+Reported from a device in the field: CAN and GPS timestamps that agree at
+connect and walk apart from there — a per-sensor timer whose count happens to
+start with the others', which is the per-sensor clock §8.1 forbids, wearing
+the one disguise `clock.one_clock` cannot see through. The offset stays
+inside any workable tolerance for the length of a harness run; what never
+stops is the trend, and by the end of a session the cross-channel alignment
+this protocol exists to make into arithmetic is off by seconds.
+
+`clock.one_rate` compares every pair of streams at matched moments — each
+notification against the other stream's nearest-in-time one — so the host
+clock, the common ruler, cancels exactly whatever the two logs' densities
+do. The verdict is the slope the relative offset holds through BOTH halves
+of the window the pair shares: a trend, not a step, so a one-time change in
+delivery latency can neither fake a divergence nor cancel a genuine one out
+of an endpoint-to-endpoint slope, and is reported as the step it is. A pair
+fails above 10,000 ppm accumulated past 40 ms. The batched streams anchor
+on a batch's newest item rather than `t_base`, which timestamps the oldest
+and moves with fill time and batch size — for CAN, newest by timestamp, not
+position, since §6 orders only record 0. The scale errors this class is
+made of — a millisecond counter reported as microseconds, a 32.768 kHz tick
+counted as 32 kHz (24,000 ppm) — sit far above the bar; a conforming
+device's residual latency movement measures a few thousand ppm, and because
+that movement is bounded in real fractions of a second rather than in ppm,
+the bar does not drop with a longer window: crystal-to-crystal disagreement
+(tens of ppm) is invisible to an arrival-time ruler at any length, and the
+report says so rather than promising it. Seeded as `clock_diverges` in
+`transport.FAULTS` — a CAN timer mis-scaled by 4%, `dt` ticks included,
+re-anchored on every connection — as `harness/selftest.py` requires.
+
 ### §6.8: a subscription's schedule belongs to the subscription
 
 Reported by the first firmware implementation, from human and LLM review of

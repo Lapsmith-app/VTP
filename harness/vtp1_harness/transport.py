@@ -299,6 +299,7 @@ FAULTS = {
     "caps_reserved_bits": "SPEC.md §4 — a reserved capability bit is set",
     "absent_field_nonzero": "SPEC.md §5.1 — a field whose validity bit is clear is not zero",
     "clock_per_stream": "SPEC.md §8.1 — the streams are not on one clock",
+    "clock_diverges": "SPEC.md §8.1 — the CAN clock runs at its own rate: it agrees with the others at connect and walks away from there",
     "drops_a_response": "SPEC.md §9 — a request is silently discarded rather than answered",
     "pipelines_silently": "SPEC.md §9 — a second request is applied instead of answered busy",
     "owes_until_confirmed": "SPEC.md §9 — a response stays owed until its confirmation, so a client writing on arrival is refused busy (narrowed to one refusal; see _answer)",
@@ -446,6 +447,13 @@ class LoopbackTransport(Transport):
         # SPEC.md §9.1 — the (id, mask) pairs installed with bits 30 or 31 set,
         # for the device that keeps those bits in what it stores.
         self._decorated_subs = set()
+        # SPEC.md §8.1 — where the diverging CAN clock last agreed with the
+        # real one: the connection's first batch, because the defect this
+        # models drifts from a shared epoch rather than starting offset.
+        # Reset in connect() with the other per-connection state — the device
+        # clock restarts with the connection, and an anchor surviving a link
+        # drop hands the next connection a first batch already offset.
+        self._diverge_t0 = None
 
     # -- lifecycle --------------------------------------------------------
 
@@ -514,6 +522,12 @@ class LoopbackTransport(Transport):
             # identifier.
             self.device._seq = {k: 100 for k in self.device._seq}
         self._seen_a_connection = True
+        # SPEC.md §8.1 — the diverging clock's anchor is per-connection: the
+        # device clock restarts with the device, so a surviving anchor would
+        # start the new connection's first batch already offset by the whole
+        # previous connection's drift. selftest._diverge_anchor_problems
+        # holds this to account.
+        self._diverge_t0 = None
         if "stream_before_subscribe" in self.faults:
             # A device that streams what nobody asked for: one subscription
             # matching every identifier, installed by the device itself.
@@ -1636,6 +1650,37 @@ class LoopbackTransport(Transport):
             off = refdec.offset("imu_header", "t_base")
             t = struct.unpack_from("<Q", payload, off)[0]
             struct.pack_into("<Q", payload, off, t + 3_600_000_000)
+        if "clock_diverges" in self.faults and stream == "can":
+            # The same mistake with the offset zeroed at boot: a per-sensor
+            # timer whose count happens to start with the others', so
+            # clock.one_clock sees agreement for the length of a run while
+            # every second of session adds alignment error. 4% is a scale
+            # error's neighbourhood (a 32.768 kHz tick counted as 32 kHz is
+            # 2.4%), and small enough that the median OFFSET stays inside
+            # clock.one_clock's tolerance over a default-length run — the
+            # point of this fault is a device only the rate gives away.
+            rate = 1.04
+            off = refdec.offset("can_header", "t_base")
+            t = struct.unpack_from("<Q", payload, off)[0]
+            if self._diverge_t0 is None:
+                self._diverge_t0 = t
+            drifted = self._diverge_t0 + round((t - self._diverge_t0) * rate)
+            struct.pack_into("<Q", payload, off, drifted)
+            # Every tick this clock produces is mis-scaled, dt included: the
+            # defect modelled is the timer, not one field. Leaving dt alone
+            # would let t_base and a batch's last record carry identical
+            # drift, and the check's choice to anchor on the last record
+            # would never be the thing this fault holds to account.
+            pos = refdec.size("can_header")
+            record = refdec.size("can_record")
+            len_off = refdec.offset("can_record", "len")
+            for _ in range(payload[refdec.offset("can_header", "count")]):
+                if pos + record > len(payload):
+                    break
+                dt = struct.unpack_from("<H", payload, pos)[0]
+                struct.pack_into("<H", payload, pos,
+                                 min(0xFFFF, round(dt * rate)))
+                pos += record + payload[pos + len_off]
         if "stream_truncated" in self.faults and stream == "gps":
             # SPEC.md §5 — a record is its size. Every other notification, so
             # the run still has well-formed ones for everything downstream of

@@ -18,6 +18,7 @@ Two questions, and the second is the one that matters.
 """
 import asyncio
 import pathlib
+import struct
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -86,6 +87,7 @@ CAUGHT_BY = {
     "caps_reserved_bits": "info.reserved_capabilities",
     "absent_field_nonzero": "gps.absent_fields_zero",
     "clock_per_stream": "clock.one_clock",
+    "clock_diverges": "clock.one_rate",
     "drops_a_response": ("control.time_sync",
                          "control.no_busy_for_conforming_client"),
     "pipelines_silently": "control.busy_when_outstanding",
@@ -542,9 +544,48 @@ async def _model_device_problems():
     return problems
 
 
+async def _diverge_anchor_problems():
+    """The diverging-clock seed re-anchors on every connection.
+
+    The fault models a timer that shares the streams' epoch, so its anchor is
+    the connection's FIRST batch. An anchor surviving a link drop hands the
+    next connection a first batch already offset by the whole previous
+    connection's accumulated drift — a defect in the seed itself, which the
+    matrix cannot see: it only asserts that the named check fails, and a
+    pre-offset first batch makes it fail harder, for the wrong reason. The
+    new connection's first batch is deliberately stamped LATER than the old
+    anchor, which is the case a reset guard comparing values cannot catch.
+    """
+    off = refdec.offset("can_header", "t_base")
+
+    def stamped(t_base):
+        payload = bytearray(refdec.size("can_header"))
+        struct.pack_into("<Q", payload, off, t_base)
+        return payload
+
+    problems = []
+    t = LoopbackTransport(faults=["clock_diverges"])
+    await t.connect()
+    t._apply_stream_faults("can", stamped(1_000_000))       # the anchor
+    t._apply_stream_faults("can", stamped(9_000_000))       # drift accrues
+    await t.disconnect()
+    await t.connect()
+    fresh = stamped(5_000_000)          # a new clock, above the old anchor
+    t._apply_stream_faults("can", fresh)
+    got = struct.unpack_from("<Q", fresh, off)[0]
+    await t.disconnect()
+    if got != 5_000_000:
+        problems.append(
+            f"clock_diverges carried its anchor across a reconnect: the new "
+            f"connection's first batch was rewritten from 5000000 to {got}, "
+            f"beginning already offset by the previous connection's drift")
+    return problems
+
+
 async def main():
     problems = _coverage_problems()
     problems += await _model_device_problems()
+    problems += await _diverge_anchor_problems()
 
     print("A conforming device")
     clean = await run(reconnect=True)
