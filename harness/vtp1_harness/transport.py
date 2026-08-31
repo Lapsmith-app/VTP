@@ -1651,6 +1651,7 @@ class LoopbackTransport(Transport):
             # 2.4%), and small enough that the median OFFSET stays inside
             # clock.one_clock's tolerance over a default-length run — the
             # point of this fault is a device only the rate gives away.
+            rate = 1.04
             off = refdec.offset("can_header", "t_base")
             t = struct.unpack_from("<Q", payload, off)[0]
             if self._diverge_t0 is None or t < self._diverge_t0:
@@ -1658,8 +1659,23 @@ class LoopbackTransport(Transport):
                 # device clock restarts at zero on a reconnect, and a stale
                 # anchor would send t_base negative.
                 self._diverge_t0 = t
-            drifted = self._diverge_t0 + round((t - self._diverge_t0) * 1.04)
+            drifted = self._diverge_t0 + round((t - self._diverge_t0) * rate)
             struct.pack_into("<Q", payload, off, drifted)
+            # Every tick this clock produces is mis-scaled, dt included: the
+            # defect modelled is the timer, not one field. Leaving dt alone
+            # would let t_base and a batch's last record carry identical
+            # drift, and the check's choice to anchor on the last record
+            # would never be the thing this fault holds to account.
+            pos = refdec.size("can_header")
+            record = refdec.size("can_record")
+            len_off = refdec.offset("can_record", "len")
+            for _ in range(payload[refdec.offset("can_header", "count")]):
+                if pos + record > len(payload):
+                    break
+                dt = struct.unpack_from("<H", payload, pos)[0]
+                struct.pack_into("<H", payload, pos,
+                                 min(0xFFFF, round(dt * rate)))
+                pos += record + payload[pos + len_off]
         if "stream_truncated" in self.faults and stream == "gps":
             # SPEC.md §5 — a record is its size. Every other notification, so
             # the run still has well-formed ones for everything downstream of

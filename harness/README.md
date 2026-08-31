@@ -140,7 +140,7 @@ Four things are permanently in it:
   Bluetooth stack sit between the device and every arrival time measured here,
   and they are worth tens of milliseconds against a clock specified in
   microseconds. Ordering and internal consistency are checked — the streams
-  keeping one *rate* included, down to a few thousand ppm over a default
+  keeping one *rate* included, down to about a percent over a default
   window — but accuracy is not, and crystal-grade drift of tens of ppm needs
   a far longer `--seconds` to rise above that jitter; the report says what
   its window could resolve.

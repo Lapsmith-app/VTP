@@ -29,11 +29,12 @@ ONE_CLOCK_TOLERANCE_US = 1_000_000
 #: Two clocks whose relative RATE differs by more than this are not one clock
 #: either, whatever their offset. The defects in this class are scale errors —
 #: a millisecond counter reported as microseconds is a thousandfold, a
-#: 32.768 kHz tick counted as 32 kHz is 24,000 ppm — while honest disagreement
-#: between two crystals is tens of ppm, below what a run this short can see
-#: through host jitter. 5,000 ppm sits far above anything jitter can fake and
-#: far below the smallest defect in the class.
-DIVERGENCE_TOLERANCE_PPM = 5_000
+#: 32.768 kHz tick counted as 32 kHz is 24,000 ppm. Below the bar sit the
+#: honest movements: two crystals disagree by tens of ppm, and a conforming
+#: device's batch-fill latency measures a few thousand ppm of apparent rate
+#: against the jitter-free loopback when the bus load swings. 10,000 ppm
+#: sits between the two with margin on both sides.
+DIVERGENCE_TOLERANCE_PPM = 10_000
 
 #: ...and the divergence must have accumulated to something no queueing spike
 #: can produce. The quarter-window medians move a few milliseconds under host
@@ -41,8 +42,8 @@ DIVERGENCE_TOLERANCE_PPM = 5_000
 #: keeps a short window from turning those milliseconds into thousands of ppm.
 DIVERGENCE_FLOOR_US = 40_000
 
-#: Fewer notifications than this and a quarter-window's median is too few
-#: points to mean anything.
+#: Fewer notifications than this — inside the window a compared pair of
+#: streams shares — and a quarter's median is too few points to mean anything.
 DIVERGENCE_MIN_NOTIFICATIONS = 12
 
 PROBE_MASK_ALL = 0
@@ -430,15 +431,14 @@ RATE_TIMESTAMP = dict(TIMESTAMP, can=lambda d: (
     else d["header"]["t_base"]))
 
 
-def _quarter_offsets(good, timestamp):
-    """(median host time, median offset) for each quarter of a stream's log.
+def _quarter_offsets(pairs):
+    """(median host time, median offset) for each quarter of one series.
 
-    The offset is device time minus host arrival time, in microseconds.
-    Medians on both axes, because BLE queueing spikes are one-sided and a
-    single held-back notification would otherwise read as the clock moving.
+    `pairs` is (host seconds, offset µs) in host-time order, where the offset
+    is device time minus host arrival time. Medians on both axes, because BLE
+    queueing spikes are one-sided and a single held-back notification would
+    otherwise read as the clock moving.
     """
-    pairs = sorted((item.t_host, timestamp(decoded) - item.t_host * 1e6)
-                   for item, decoded in good)
     out = []
     for i in range(4):
         chunk = pairs[i * len(pairs) // 4:(i + 1) * len(pairs) // 4]
@@ -455,6 +455,56 @@ def _rate_between(early, late):
     return (o1 - o0) / (h1 - h0)
 
 
+def _quarter_rates(pairs):
+    """One series' overall, early and late rates and the gap they span."""
+    q = _quarter_offsets(pairs)
+    overall = _rate_between(q[0], q[3])
+    early, late = _rate_between(q[0], q[1]), _rate_between(q[2], q[3])
+    if None in (overall, early, late):
+        return None
+    return overall, early, late, q[3][0] - q[0][0]
+
+
+def _pair_divergence(series_a, series_b):
+    """How two streams' clock rates differ, over the window BOTH occupied.
+
+    Trimmed to the shared host-time span before quartering, because the logs
+    do not start together — CAN begins when the observe phase installs a
+    subscription, GPS and IMU at the connection — and a latency step in the
+    part of the run only one stream witnessed would otherwise be amortised
+    into a rate the other stream could never share, read as divergence.
+
+    `persistent` is the step-versus-trend verdict: a diverging clock is off
+    by the same rate in the first half of the shared window and the second
+    alike, while a one-time change in delivery latency — a bus finding
+    traffic mid-run — moves the medians once and never again.
+    """
+    lo = max(series_a[0][0], series_b[0][0])
+    hi = min(series_a[-1][0], series_b[-1][0])
+    a = [p for p in series_a if lo <= p[0] <= hi]
+    b = [p for p in series_b if lo <= p[0] <= hi]
+    if min(len(a), len(b)) < DIVERGENCE_MIN_NOTIFICATIONS:
+        return None
+    rates_a, rates_b = _quarter_rates(a), _quarter_rates(b)
+    if rates_a is None or rates_b is None:
+        return None
+    ppm = rates_a[0] - rates_b[0]
+    sign = 1 if ppm >= 0 else -1
+    return {
+        "ppm": ppm,
+        "gap": min(rates_a[3], rates_b[3]),
+        "persistent": min((rates_a[1] - rates_b[1]) * sign,
+                          (rates_a[2] - rates_b[2]) * sign)
+                      > DIVERGENCE_TOLERANCE_PPM / 2,
+    }
+
+
+def _diverged(measured):
+    """Past the rate bar, and accumulated past what a spike can produce."""
+    return (abs(measured["ppm"]) > DIVERGENCE_TOLERANCE_PPM
+            and abs(measured["ppm"]) * measured["gap"] > DIVERGENCE_FLOOR_US)
+
+
 @check(id="clock.one_rate", section="8.1", phase="streams", severity="MUST",
        title="The streams' clocks do not diverge over the run")
 async def clock_one_rate(s):
@@ -469,67 +519,83 @@ async def clock_one_rate(s):
     The host clock is the common ruler and its own rate cancels: it is the
     same host in both terms, so two device streams on one clock move together
     whatever the host's crystal does. Host jitter does not cancel, which is
-    what the medians, the floor and the tolerance are for. And a divergence
-    is a TREND, not a step: it has to be present in the first half of the run
-    and the second half alike, which is what separates a diverging clock from
-    a one-time change in delivery latency — a bus finding traffic mid-run —
-    that moves the medians once and never again."""
-    rates = {}
+    what the medians, the floor, the tolerance and `_pair_divergence`'s
+    shared window and persistence verdict are for. Every pair is judged, not
+    just the widest: a genuine divergence must not hide behind a noisier
+    pair's one-time step."""
+    series = {}
     for name in s.STREAMS:
-        if not s.has(name) or \
-                len(s.streams[name]) < DIVERGENCE_MIN_NOTIFICATIONS:
+        if not s.has(name):
             continue
         good, _ = _decoded(s, name)
         if len(good) < DIVERGENCE_MIN_NOTIFICATIONS:
             continue
-        q = _quarter_offsets(good, RATE_TIMESTAMP[name])
-        overall = _rate_between(q[0], q[3])
-        early, late = _rate_between(q[0], q[1]), _rate_between(q[2], q[3])
-        if None not in (overall, early, late):
-            rates[name] = (overall, early, late, q[3][0] - q[0][0])
-    if len(rates) < 2:
+        series[name] = sorted(
+            (item.t_host, RATE_TIMESTAMP[name](decoded) - item.t_host * 1e6)
+            for item, decoded in good)
+    if len(series) < 2:
         raise Skip("fewer than two streams produced enough notifications to "
                    "compare clock rates")
-    worst = None
-    names = sorted(rates)
+    names = sorted(series)
+    measured = {}
     for i, a in enumerate(names):
         for b in names[i + 1:]:
-            ppm = rates[a][0] - rates[b][0]
-            if worst is None or abs(ppm) > abs(worst[2]):
-                worst = (a, b, ppm)
-    a, b, ppm = worst
-    early = rates[a][1] - rates[b][1]
-    late = rates[a][2] - rates[b][2]
-    gap = min(rates[a][3], rates[b][3])
-    persistent = (early * ppm > 0 and late * ppm > 0
-                  and min(abs(early), abs(late))
-                  > DIVERGENCE_TOLERANCE_PPM / 2)
-    if abs(ppm) > DIVERGENCE_TOLERANCE_PPM and \
-            abs(ppm) * gap > DIVERGENCE_FLOOR_US and persistent:
+            divergence = _pair_divergence(series[a], series[b])
+            if divergence is not None:
+                measured[(a, b)] = divergence
+    if not measured:
+        raise Skip("no two streams share a window long enough to compare "
+                   "clock rates")
+    pairs_ppm = {f"{a}/{b}": round(d["ppm"]) for (a, b), d in measured.items()}
+
+    failing = {pair: d for pair, d in measured.items()
+               if _diverged(d) and d["persistent"]}
+    if failing:
+        (a, b), d = max(failing.items(), key=lambda kv: abs(kv[1]["ppm"]))
+        ppm, gap = abs(d["ppm"]), d["gap"]
         # Each stream is perfectly self-consistent, the offset between them is
         # small for as long as anyone tests by hand, and every payload
         # decodes. Only the trend gives it away, and the trend never stops:
         # alignment is wrong by more at the end of a session than at the
         # start, which no per-payload check anywhere downstream can see.
         raise Fail(
-            f"the {a} and {b} clocks diverge at {abs(ppm):,.0f} ppm: their "
-            f"relationship to this host's clock moved "
-            f"{abs(ppm) * gap / 1000:.0f} ms apart over {gap:.1f} s, in the "
-            f"first half of the run and the second alike. §8.1 timestamps "
+            f"the {a} and {b} clocks diverge at {ppm:,.0f} ppm: their "
+            f"relationship to this host's clock moved {ppm * gap / 1000:.0f} "
+            f"ms apart over the {gap:.1f} s window both streams cover, in "
+            f"the first half of it and the second alike. §8.1 timestamps "
             f"every stream against ONE clock, so whatever offset two streams "
             f"show must not GROW — at this rate a client aligning {a} to {b} "
-            f"is wrong by another {abs(ppm) * 3600 / 1e6:,.1f} s for every "
-            f"hour of a session",
-            rates_ppm={n: round(r) for n, (r, *_) in rates.items()},
-            pair=[a, b], gap_s=round(gap, 2))
+            f"is wrong by another {ppm * 3600 / 1e6:,.1f} s for every hour "
+            f"of a session",
+            pairs_ppm=pairs_ppm, pair=[a, b], gap_s=round(gap, 2))
+
+    gap = min(d["gap"] for d in measured.values())
     resolution = max(DIVERGENCE_TOLERANCE_PPM, DIVERGENCE_FLOOR_US / gap)
+    stepped = {pair: d for pair, d in measured.items() if _diverged(d)}
+    if stepped:
+        # Above the bar and NOT persistent: the offset moved once, in part of
+        # the window, which is a delivery-latency change and not a clock
+        # rate. Said in its own words, because "agree to within N" with N
+        # above the stated resolution is a contradiction a reader should
+        # never have to resolve.
+        (a, b), d = max(stepped.items(), key=lambda kv: abs(kv[1]["ppm"]))
+        raise Observe(
+            f"the {a} and {b} offsets moved "
+            f"{abs(d['ppm']) * d['gap'] / 1000:.0f} ms apart in a step "
+            f"rather than a trend — present in only part of the shared "
+            f"window, which is a delivery-latency change, not a clock rate. "
+            f"No persistent divergence above {resolution:,.0f} ppm was "
+            f"measured; if this device is suspect, a longer --seconds "
+            f"separates the two decisively",
+            pairs_ppm=pairs_ppm, resolution_ppm=round(resolution))
+    worst = max(abs(d["ppm"]) for d in measured.values())
     raise Observe(
-        f"the {len(rates)} streams' clock rates agree to within "
-        f"{abs(ppm):,.0f} ppm over {gap:.1f} s (divergence below "
-        f"{resolution:,.0f} ppm is inside this window's jitter; crystal-grade "
-        f"drift is tens of ppm and needs a longer --seconds to see)",
-        rates_ppm={n: round(r) for n, (r, *_) in rates.items()},
-        resolution_ppm=round(resolution))
+        f"the {len(series)} streams' clock rates agree to within "
+        f"{worst:,.0f} ppm over their shared {gap:.1f} s window (a "
+        f"divergence below {resolution:,.0f} ppm — or one confined to part "
+        f"of the window — is inside this run's jitter; crystal-grade drift "
+        f"is tens of ppm and needs a longer --seconds to see)",
+        pairs_ppm=pairs_ppm, resolution_ppm=round(resolution))
 
 
 @check(id="loss.dropped", section="8.3", phase="streams", severity="OBSERVE",
