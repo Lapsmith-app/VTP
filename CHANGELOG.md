@@ -8,6 +8,66 @@ conformance vector.
 
 ## [Unreleased]
 
+### Harness: §9's window cannot be measured from a host, and a check was verdicting as though it could
+
+Raised in review of the entry below, which is where the reproduction comes
+from. It was not introduced there: the same experiment run against the code
+before it fails the same way, and one more besides.
+
+`control.busy_when_outstanding` decided whether its two requests had ever been
+outstanding together from two host timestamps — the moment the second request
+was written, and the moment the first response was *received*:
+
+    overlapped = second.t_write <= first_response.t_recv
+
+§9's boundary is not the second of those. A response is owed until the device
+has SENT it, and a host cannot see the send; it sees its own callback, which on
+macOS CoreBluetooth schedules on its own and never reports. Between those two
+moments the device owes nothing, and a client writing there is a conforming
+client that must be answered `ok`. The harness read that `ok` as a device
+applying a request it should have refused, and Failed it. It took one event
+loop turn of delivery latency against the promptest device in the tree — the
+`answers_before_the_next_write` seed below, which sends inside its write
+handler — to produce the failure.
+
+Both of the unknowns run the same way. The response was sent before it arrived,
+and the second request reached the device after it was written, so a request
+written after the previous response ARRIVED was written after it was SENT.
+An overlap can be excluded from a host. None can be proven from one, at any
+latency, because every measurable delay is also what a conforming device
+answering inside its write handler leaves behind.
+
+So the check no longer verdicts on that branch. It reports the answer it got
+and says the slot's state could not be told from here. Its Fails are now the
+ones a host can stand behind — a request of either pair left unanswered, which
+§9.4 forbids whatever was owed — and its pass is the device's own testimony,
+`busy`. What is given up is named rather than papered over: a device that
+applies a pipelined request and answers `ok` is reported here and not failed,
+because from a host it leaves the same trace as a device that had already
+answered. Settling it needs the send timestamped — a sniffer, or a `t_sent`
+field in `control_response` that a later minor could add.
+
+The same ruler read the other way is sound, and is now named for the direction
+it holds in: `_overlapped` is `_overlap_excluded`, returning true only where
+the previous response had already arrived. `control.no_unprovoked_busy` fails a
+`busy` only on those, so a held-up delivery there costs a finding missed rather
+than a device failed for something it did not do.
+
+`transport.FAULTS` gains `host_callback_lands_late`, which is not a device
+defect at all: it holds each control delivery one scheduler turn, which is what
+a host stack does. Stacked on `answers_before_the_next_write` it is a response
+sent before the second request and received after it — every timestamp the
+harness owns saying the device was still owing, and the device not owing.
+`harness/selftest.py` runs the prompt-device scenario twice, with the host slow
+and with it not, and requires the same two verdicts from both: what a report
+says must not turn on when the host got round to the callback.
+
+`pipelines_silently` now models a device that applies the pipelined request and
+answers nobody, rather than one that answers `ok`. The `ok` half is the half no
+host can see, so a seed claiming it was caught was really asserting the timing
+accident that made the two devices look different; what is left is a violated
+MUST whether or not anything was owed when the request arrived.
+
 ### Harness: a device too quick to pipeline against is not a device in violation
 
 Reported from the first firmware implementation, which met it as one MUST
@@ -37,7 +97,7 @@ first measured: whether the requests genuinely overlapped, and what the second
 was answered. It Skips unless that answer was `busy`, and says which of the two
 it was — the same structural limit the Observe already explains, in the same
 words. What is recorded is the timestamps and not the check's intent, for the
-reason `_overlapped` gives: a `busy` answered to a request that in the event
+reason `_overlap_excluded` gives: a `busy` answered to a request that in the event
 overlapped nothing is still a refusal of a conforming client, and
 `control.no_unprovoked_busy` still reports it.
 

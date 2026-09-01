@@ -241,8 +241,17 @@ ISOLATED = {"owes_until_confirmed"}
 #: pipelining report that limit rather than a violation -- an Observe and a
 #: Skip, and in particular NOT the Fail that a device fast enough to be
 #: unverifiable used to earn (issue #46).
+#: `host_callback_lands_late` is the same claim with the excuse taken away.
+#: It is not a device defect: it holds each control delivery one scheduler
+#: turn, which is the host stack doing what host stacks do, and stacked on the
+#: seed above it produces a response SENT before the second request and
+#: RECEIVED after it. Every timestamp the harness owns then says the device was
+#: still owing, and it was not (issue #48). The required verdicts are the same
+#: two, which is the point: what the report says must not turn on when the
+#: host got round to the callback.
 SCENARIO_FAULTS = {"obd_pid_never_answers", "obd_reprobe_refused",
-                   "answers_before_the_next_write"}
+                   "answers_before_the_next_write",
+                   "host_callback_lands_late"}
 
 #: Only these faults are about state surviving a link drop, and only their runs
 #: need to pay for the reconnection.
@@ -590,7 +599,23 @@ async def _diverge_anchor_problems():
     return problems
 
 
-async def _prompt_device_problems():
+#: The runs `_prompt_device_problems` makes, and the line each earns.
+#:
+#: Both are the SAME conforming device and both must produce the same two
+#: verdicts. They differ only in when the host got round to the callback, which
+#: is the one thing about this exchange the harness measures and the one thing
+#: that says nothing about the device.
+PROMPT_SCENARIOS = (
+    (("answers_before_the_next_write",),
+     "a device too quick to pipeline against is reported as untestable, not "
+     "as in violation"),
+    (("answers_before_the_next_write", "host_callback_lands_late"),
+     "...and still is when the host holds the delivery until after the next "
+     "write"),
+)
+
+
+async def _prompt_device_problems(faults):
     """A device too quick to pipeline against is not a device in violation.
 
     `control.busy_when_outstanding` writes a second request meaning to have it
@@ -611,10 +636,19 @@ async def _prompt_device_problems():
     again. Nothing else removes it once `control.busy_not_applied` stops
     probing, and a slot held for the rest of the connection is a slot
     `can.table_full` is counting a few checks later.
+
+    Run twice, over `PROMPT_SCENARIOS`. The second run stacks a host that holds
+    every control delivery one scheduler turn, which moves `t_recv` past the
+    second write and leaves every timestamp the harness owns saying the device
+    was still owing a response it had in fact already sent. That is issue #48,
+    and it is not reachable by making the device worse: the device is byte for
+    byte the first run's, and only the host changed. A harness that verdicts
+    differently across these two runs is verdicting on its own scheduling.
     """
     problems = []
     left_installed = []
-    transport = LoopbackTransport(faults=["answers_before_the_next_write"])
+    scenario = "+".join(faults)
+    transport = LoopbackTransport(faults=list(faults))
     target = (await transport.scan(0))[0]
 
     def on_result(result):
@@ -635,31 +669,30 @@ async def _prompt_device_problems():
     for check_id, want in expected.items():
         result = result_for(report, check_id)
         if result is None:
-            problems.append(f"answers_before_the_next_write: {check_id} did "
-                            f"not run")
+            problems.append(f"{scenario}: {check_id} did not run")
         elif result.status is not want:
             problems.append(
                 f"a conforming device that answers before the harness can "
-                f"write again was reported {result.status.value} by "
-                f"{check_id}: {result.message}. Nothing was ever pipelined "
-                f"against it, so the only honest verdict is "
-                f"{want.value}")
+                f"write again ({scenario}) was reported {result.status.value} "
+                f"by {check_id}: {result.message}. Nothing was ever pipelined "
+                f"against it, so the only honest verdict is {want.value}")
     if report.aborted:
         # Without this the two results above are enough to report success on a
         # run that never reached the end: they come from the control phase, and
         # everything that would have failed after it never ran.
-        problems.append(f"the prompt-device scenario run aborted: "
-                        f"{report.aborted}")
+        problems.append(f"the {scenario} run aborted: {report.aborted}")
     also_broken = sorted(r.check.id for r in
                          report.failures + report.warnings + report.errors)
     if also_broken:
         problems.append(
-            f"a conforming device that answers promptly was reported "
-            f"fail/warn/error on {also_broken}; answering quickly breaks no "
-            f"rule in SPEC.md")
+            f"a conforming device that answers promptly ({scenario}) was "
+            f"reported fail/warn/error on {also_broken}; answering quickly "
+            f"breaks no rule in SPEC.md, and neither does a host that takes "
+            f"its time")
     if not left_installed:
-        problems.append("control.busy_not_applied never reported, so nothing "
-                        "could be said about what the pair left installed")
+        problems.append(f"{scenario}: control.busy_not_applied never "
+                        f"reported, so nothing could be said about what the "
+                        f"pair left installed")
     elif left_installed[0]:
         problems.append(
             f"the subscription the pipelined request installed was left "
@@ -767,11 +800,11 @@ async def main():
     # tool-worse-than-no-tool case in this file's header) and a stacked run
     # that must FAIL for the right stated reason.
     print("\nTargeted scenarios")
-    prompt = await _prompt_device_problems()
-    problems += prompt
-    if not prompt:
-        print("  ok   a device too quick to pipeline against is reported as "
-              "untestable, not as in violation")
+    for faults, headline in PROMPT_SCENARIOS:
+        prompt = await _prompt_device_problems(faults)
+        problems += prompt
+        if not prompt:
+            print(f"  ok   {headline}")
 
     quiet = await run(faults=["obd_pid_never_answers"])
     result = result_for(quiet, "obd.poll_and_flag")

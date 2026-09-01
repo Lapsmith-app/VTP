@@ -301,7 +301,7 @@ FAULTS = {
     "clock_per_stream": "SPEC.md §8.1 — the streams are not on one clock",
     "clock_diverges": "SPEC.md §8.1 — the CAN clock runs at its own rate: it agrees with the others at connect and walks away from there",
     "drops_a_response": "SPEC.md §9 — a request is silently discarded rather than answered",
-    "pipelines_silently": "SPEC.md §9 — a second request is applied instead of answered busy",
+    "pipelines_silently": "SPEC.md §9.4 — a second request written while a response is owed is applied, and answered by nobody",
     "owes_until_confirmed": "SPEC.md §9 — a response stays owed until its confirmation, so a client writing on arrival is refused busy (narrowed to one refusal; see _answer)",
     "busy_but_applied": "SPEC.md §9 — a request answered busy is applied anyway",
     "list_reserved_nonzero": "SPEC.md §13.3 — a reserved declaration byte is not zero",
@@ -370,17 +370,19 @@ FAULTS = {
     "obd_accepts_bad_group": "SPEC.md §15.4.1 — a group of seven PIDs, and a group left open past the end of the list, are both answered ok",
     "obd_ignores_group_minimum": "SPEC.md §15.4.2 — every group is transmitted every pass whatever minimum interval it was given",
     "obd_splits_groups": "SPEC.md §15.4.1 — bit 7 is parsed and answered ok, then the group's PIDs are scheduled individually: half the rate the client asked for, with nothing on the wire to say so",
-    # The three below are SCENARIO seeds, not matrix faults: none violates a
+    # The four below are SCENARIO seeds, not matrix faults: none violates a
     # rule any single check can catch on its own. The first is a CONFORMING
     # car whose polled PID nothing answers (§15.4 makes that gap legal, so the
     # claim under test is that obd.poll_and_flag does NOT fail it); the second
     # only means anything stacked on the first, where the diagnostic re-probe
     # it refuses MUST turn the indeterminate skip into a failure. The third is
-    # a conforming device that is simply fast. See harness/selftest.py's
-    # targeted-scenario section.
+    # a conforming device that is simply fast, and the fourth is not a device
+    # defect at all -- it is the HOST, and it is only ever stacked on the
+    # third. See harness/selftest.py's targeted-scenario section.
     "obd_pid_never_answers": "a car that answers every probe and never the polled PID — legal silence (SPEC.md §15.4), which no check may Fail",
     "obd_reprobe_refused": "SPEC.md §15.2 — the first OBD_INFO of a connection answers ok and every later one is refused bad_params",
     "answers_before_the_next_write": "a device that answers inside its write handler — conforming, and quick enough that no client can pipeline against it (SPEC.md §9), which no check may Fail",
+    "host_callback_lands_late": "not the device: the host stack holds each control delivery a scheduler turn, so `t_recv` lands after the next write — which no check may read as the device still owing (SPEC.md §9)",
 }
 
 
@@ -1128,38 +1130,54 @@ class LoopbackTransport(Transport):
         # model, for the same reason serve.py holds it in the transport: it is
         # a property of the response path, not of what the opcode does.
         if self._owed:
-            if "pipelines_silently" not in self.faults:
-                if "busy_but_applied" in self.faults:
-                    self.device.handle_control(request, t_rx=t_rx)
-                if len(request) >= 2 and self._owed < self._owed_max:
-                    if self._late_pending:
-                        # This refusal is the `owes_until_confirmed` defect
-                        # showing itself: the device is refusing a client only
-                        # because a decrement it already owed has not landed.
-                        # One instance is everything a check needs, so the
-                        # fault is spent here rather than left to refuse the
-                        # rest of the run.
-                        #
-                        # Spent on the REFUSAL and not on the first eligible
-                        # response, so a legitimately pipelined `busy` --
-                        # control.busy_when_outstanding's, which runs earlier
-                        # -- does not consume it. And spent inside this branch
-                        # and not before it, so a request DISCARDED over the
-                        # cap does not consume it either: that request is
-                        # answered by nobody, so nothing observed the defect
-                        # and there is nothing to spend it on.
-                        self._late_armed = False
-                    # Delivered on the same schedule as any other response,
-                    # because it IS one: sending it immediately would model a
-                    # refusal that is never owed for any duration, and §9's
-                    # rule is about the interval in which it is.
-                    self._owed += 1
-                    asyncio.create_task(self._answer(bytes(
-                        [request[0], request[1],
-                         refdec.STATUS_VALUE["busy"]])))
-                # Over the cap the refusal itself has nowhere to go, so the
-                # request is discarded unanswered and unapplied (SPEC.md §9).
+            if "pipelines_silently" in self.faults:
+                # SPEC.md §9.4, both of the alternatives it forbids at once:
+                # the request is applied while a response is still owed, and
+                # nobody answers it.
+                #
+                # Silence rather than the `ok` this seeded until issue #48.
+                # A device that pipelines and answers `ok` leaves a host
+                # exactly the trace a conforming device leaves when its answer
+                # went out before the second write and the stack held the
+                # delivery -- so that device cannot be caught from here, and a
+                # seed claiming it was caught was really asserting the timing
+                # accident that made the two look different. What is left is
+                # the half a host can see: a request that was never answered
+                # is a violated MUST whether or not anything was owed when it
+                # arrived.
+                self.device.handle_control(request, t_rx=t_rx)
                 return
+            if "busy_but_applied" in self.faults:
+                self.device.handle_control(request, t_rx=t_rx)
+            if len(request) >= 2 and self._owed < self._owed_max:
+                if self._late_pending:
+                    # This refusal is the `owes_until_confirmed` defect
+                    # showing itself: the device is refusing a client only
+                    # because a decrement it already owed has not landed.
+                    # One instance is everything a check needs, so the
+                    # fault is spent here rather than left to refuse the
+                    # rest of the run.
+                    #
+                    # Spent on the REFUSAL and not on the first eligible
+                    # response, so a legitimately pipelined `busy` --
+                    # control.busy_when_outstanding's, which runs earlier
+                    # -- does not consume it. And spent inside this branch
+                    # and not before it, so a request DISCARDED over the
+                    # cap does not consume it either: that request is
+                    # answered by nobody, so nothing observed the defect
+                    # and there is nothing to spend it on.
+                    self._late_armed = False
+                # Delivered on the same schedule as any other response,
+                # because it IS one: sending it immediately would model a
+                # refusal that is never owed for any duration, and §9's
+                # rule is about the interval in which it is.
+                self._owed += 1
+                asyncio.create_task(self._answer(bytes(
+                    [request[0], request[1],
+                     refdec.STATUS_VALUE["busy"]])))
+            # Over the cap the refusal itself has nowhere to go, so the
+            # request is discarded unanswered and unapplied (SPEC.md §9).
+            return
 
         response = self.device.handle_control(request, t_rx=t_rx)
         if response is None:
@@ -1278,6 +1296,29 @@ class LoopbackTransport(Transport):
         self._owed -= 1
 
     def _deliver_control(self, response):
+        if "host_callback_lands_late" in self.faults:
+            # The HOST, not the device. Everything else in this table is a
+            # peripheral getting a rule wrong; this is the stack above the
+            # application holding a delivery it has already received, which
+            # CoreBluetooth does on its own schedule and never reports.
+            #
+            # A scheduler turn is enough to reproduce what issue #48 is about,
+            # because the harness writes its second request without awaiting
+            # anything in between: the callback runs, and `t_recv` is stamped,
+            # after that write. Every real delay is longer. Stacked on a
+            # conforming device it produces the case the §9 checks may not
+            # verdict on -- a response that was SENT before the second request
+            # and RECEIVED after it.
+            asyncio.get_running_loop().call_soon(self._deliver_control_now,
+                                                 response)
+            return
+        self._deliver_control_now(response)
+
+    def _deliver_control_now(self, response):
+        # The subscription is read here rather than at the call above, so a
+        # delivery deferred past a dropped link finds no callback and lands
+        # nowhere -- which is what a stack with a queued indication does when
+        # the connection goes.
         cb = self._subs.get(refdec.CHAR["control"])
         if cb is not None:
             cb(response, asyncio.get_running_loop().time())

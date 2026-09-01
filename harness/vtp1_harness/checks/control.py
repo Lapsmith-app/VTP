@@ -40,12 +40,12 @@ BUSY_PROBE_ID = 0x7A1
 #: fails a device for the one thing `control.busy_when_outstanding` says in the
 #: same breath it could not test.
 #:
-#: What is recorded is what the timestamps said and not what the check meant to
-#: do, for the reason `_overlapped` gives: a note left on intent would excuse a
-#: `busy` answered to a request that in the event overlapped nothing, which §9
-#: does not excuse. This note is only how the measurement reaches the check
-#: that needs it -- the history records a status and a tag, not which request
-#: was the pipelined one.
+#: What is recorded is what the timestamps said and not what the check meant
+#: to do, for the reason `_overlap_excluded` gives: a note left on intent would
+#: excuse a `busy` answered to a request that in the event overlapped nothing,
+#: which §9 does not excuse. This note is only how the measurement reaches the
+#: check that needs it -- the history records a status and a tag, not which
+#: request was the pipelined one.
 BUSY_PROBE_STATE = "busy_probe"
 
 
@@ -229,13 +229,32 @@ async def control_busy_when_outstanding(s):
     except ControlTimeout:
         first_response = None
     complete = second is not None and first_response is not None
-    overlapped = complete and second.t_write <= first_response.t_recv
+    # The one thing two host timestamps can settle about §9's window, and they
+    # settle it in one direction only.
+    #
+    # §9 owes a response until the device has SENT it. `t_recv` is the moment
+    # the HOST's callback ran, which is later by however long the stack held
+    # the delivery -- on macOS CoreBluetooth schedules that itself and tells
+    # the application nothing about it. The second request's own journey runs
+    # the same way: it reaches the device later than the moment recorded here.
+    # Both unknowns lengthen the same gap and neither can be measured from
+    # above the host stack, so:
+    #
+    #   written after the response ARRIVED  =>  written after it was SENT
+    #
+    # and an overlap can be EXCLUDED from a host. The converse does not hold at
+    # any latency: a second request written before the response arrived may
+    # still have reached a device that had already sent it, which is what a
+    # conforming device answering inside its write handler does every time.
+    # That is why the branch below that would need a proven overlap reports a
+    # measurement instead of a verdict.
+    overlap_excluded = complete and second.t_write > first_response.t_recv
     # Recorded before the cleanup below, which writes a request of its own and
     # can fail on a device that has stopped answering: what the pair did is
     # already known here, and `control.busy_not_applied` needs it whatever
     # happens next.
     if complete:
-        s.state[BUSY_PROBE_STATE] = {"overlapped": overlapped,
+        s.state[BUSY_PROBE_STATE] = {"overlap_excluded": overlap_excluded,
                                      "status": second.status,
                                      "status_name": second.status_name}
     # Also before the verdicts, and not after them. The subscription is
@@ -253,7 +272,7 @@ async def control_busy_when_outstanding(s):
         raise Fail("the second of two pipelined requests was never answered. §9 "
                    "requires busy rather than silence: a device meeting a "
                    "client that pipelines has to have something true to say")
-    if not overlapped:
+    if overlap_excluded:
         # The device answered the first before the second was written, so the
         # two were never outstanding together and there was nothing to detect.
         # A limit of testing from a host, not a finding.
@@ -287,13 +306,39 @@ async def control_busy_when_outstanding(s):
             "written, so nothing was ever pipelined and this could not be "
             "tested from here")
     if second.status == refdec.STATUS_VALUE["busy"]:
+        # The device's own testimony that its slot was still occupied, which is
+        # the only evidence there is that the window was open: nothing above
+        # the host stack watched it open or close, and the device saying `busy`
+        # is the device saying it was in it.
         return
-    raise Fail(
-        f"a request written while the device still owed a response was answered "
-        f"{second.status_name}, not busy. §9 makes busy the one thing a device "
-        f"can say when its single outstanding slot is occupied -- the "
-        f"alternatives §9.4 forbids are silence, and applying a request it "
-        f"cannot answer", response=second.raw.hex())
+    # And here the harness stops short of a verdict, which is the whole of what
+    # this check gave up.
+    #
+    # A Fail on this branch has to assert that the device still owed the first
+    # response when the second request reached it, and `overlap_excluded` above
+    # is the argument that a host cannot assert it. What used to stand in for
+    # it -- `second.t_write <= first_response.t_recv` -- is also true of a
+    # conforming device that sent its answer inside its write handler and whose
+    # delivery the host stack then held for one scheduler turn. That is not an
+    # exotic shape; it is the ordinary one, and reading it as a violation
+    # failed devices that had done exactly what §9 asks (issue #48).
+    #
+    # What is given up is real and worth naming: a device that applies a
+    # pipelined request and answers `ok` is reported here rather than failed,
+    # because from a host it leaves the same trace as a device that had already
+    # answered. The neighbouring MUSTs are still verdicted -- silence above,
+    # and a device that says `busy` and applies the request anyway by
+    # `control.busy_not_applied` -- but this one needs the send timestamped. A
+    # sniffer settles it; so would a `t_sent` field in `control_response`,
+    # which is the sort of thing a later minor could add.
+    raise Observe(
+        f"the second of two pipelined requests was answered "
+        f"{second.status_name}. §9 makes busy the one thing a device can say "
+        f"while its single outstanding slot is occupied, and whether that "
+        f"slot was still occupied cannot be told from here: the first "
+        f"response had not reached the host, but a device that had already "
+        f"SENT it owed nothing and was right to answer as it did",
+        response=second.raw.hex())
 
 
 async def _remove_busy_probe(s, c):
@@ -351,10 +396,17 @@ async def control_busy_not_applied(s):
     It can only run where that check produced a refusal, so it reads what that
     check recorded before it writes anything. An installed subscription is only
     evidence of anything if the request that installed it was answered `busy`:
-    on the Observe path nothing was ever outstanding, `ok` was correct, and a
-    device is doing exactly what §9 asks when the probe finds it there. Reading
-    the table without that question first fails a conforming device, and fails
-    it most reliably on the promptest ones.
+    where the answer was `ok` nothing was refused, and a device that had
+    already sent its first response is doing exactly what §9 asks when the
+    probe finds the subscription there. Reading the table without that question
+    first fails a conforming device, and fails it most reliably on the
+    promptest ones.
+
+    The status gate is what carries this, and the overlap gate above it is kept
+    for what it says rather than for what it excludes: whether the requests
+    overlapped cannot be settled from a host in the direction that would
+    matter here (see `control.busy_when_outstanding`), and a device that was
+    never refused has no refusal for the table to contradict.
     """
     c = _control(s)
     pipelined = s.state.get(BUSY_PROBE_STATE)
@@ -363,7 +415,7 @@ async def control_busy_not_applied(s):
                    "writes did not complete -- one of the two requests went "
                    "unanswered, which that check reports -- so there is no "
                    "refusal to hold to")
-    if not pipelined["overlapped"]:
+    if pipelined["overlap_excluded"]:
         raise Skip("the device answered the first request before the second "
                    "was written, so nothing was ever pipelined: that request "
                    "was an ordinary conforming one, nothing was owed when it "
@@ -416,8 +468,8 @@ async def control_no_busy_for_conforming_client(s):
     wrong boundary answers correctly anyway. So a pass says the device did not
     refuse a client writing this fast; it does not say the boundary is right.
     A failure says the boundary is wrong, and says it unambiguously. Same class
-    of limit as the Observe branch of `control.busy_when_outstanding`, and like
-    that one it wants a sniffer to settle rather than a better host.
+    of limit as the Observe branches of `control.busy_when_outstanding`, and
+    like those it wants a sniffer to settle rather than a better host.
     """
     c = _control(s)
     # TIME_SYNC: owned by no capability, so every Control device answers it,
@@ -450,13 +502,30 @@ async def control_no_busy_for_conforming_client(s):
                 response=response.raw.hex(), round=i + 1)
 
 
-def _overlapped(response, history):
-    """True if this request was written while another was still unanswered.
+def _overlap_excluded(response, history):
+    """True if this request certainly overlapped nothing that was still owed.
 
-    §9 permits `busy` in exactly one situation, and this is it stated in the
-    two timestamps the correlation layer already records: a request written
-    after the previous response had ARRIVED overlapped nothing, whoever wrote
-    it and whatever they meant to test.
+    §9 permits `busy` in exactly one situation, and this is that situation
+    ruled out, stated in the two timestamps the correlation layer already
+    records: a request written after every earlier response had ARRIVED was
+    written after every one of them had been SENT, whoever wrote it and
+    whatever they meant to test.
+
+    The same ruler `control.busy_when_outstanding` reads, and read in the
+    direction it holds in. `t_recv` is the host's callback and §9's boundary
+    is the device's send, which is earlier by an amount nothing above the host
+    stack can measure, so arrival proves the send and non-arrival proves
+    nothing. Exclusion is therefore sound and inclusion is not, and this is
+    only ever asked in the excluding direction: `control.no_unprovoked_busy`
+    reports the refusals this returns True for and says nothing about the
+    rest.
+
+    The error that remains runs the safe way. A delivery the host held onto
+    pushes `t_recv` later, which returns False for a request that in fact
+    overlapped nothing, which lets a `busy` that genuinely refused a conforming
+    client go unreported. That is a finding missed rather than a device failed
+    for something it did not do -- the direction to be wrong in, and the same
+    trade `control.busy_when_outstanding` makes on its `ok` branch.
 
     Derived from the traffic rather than from a note left by the check that
     pipelined. A note has to be left at the right moment to be right --
@@ -465,9 +534,9 @@ def _overlapped(response, history):
     does not manage to. A note left on intent would exempt that refusal; the
     timestamps say it overlapped nothing, which is what §9 actually asks.
     """
-    return any(other is not response
-               and other.t_write < response.t_write < other.t_recv
-               for other in history)
+    return not any(other is not response
+                   and other.t_write < response.t_write < other.t_recv
+                   for other in history)
 
 
 @check(id="control.no_unprovoked_busy", section="9", phase="transport",
@@ -483,11 +552,12 @@ async def control_no_unprovoked_busy(s):
     history is a device refusing a client that did nothing wrong. The traffic
     is already recorded, so this costs no writes of its own.
 
-    Which requests overlapped is read out of the timestamps by `_overlapped`
-    rather than declared by the check that pipelined, so this holds that check
-    to the same rule as every other: a request it *meant* to pipeline, but
-    which a fast device answered before it was written, is a conforming write
-    like any other and a `busy` answered to it is reported here.
+    Which requests certainly overlapped nothing is read out of the timestamps
+    by `_overlap_excluded` rather than declared by the check that pipelined, so
+    this holds that check to the same rule as every other: a request it *meant*
+    to pipeline, but which a fast device answered before it was written, is a
+    conforming write like any other and a `busy` answered to it is reported
+    here.
 
     Placed in the `transport` phase rather than `control` so that it reads a
     history with the whole interrogation in it. Requests made in the reconnect
@@ -496,7 +566,7 @@ async def control_no_unprovoked_busy(s):
     c = _control(s)
     busy = refdec.STATUS_VALUE["busy"]
     unprovoked = [r for r in c.history
-                  if r.status == busy and not _overlapped(r, c.history)]
+                  if r.status == busy and _overlap_excluded(r, c.history)]
     if not unprovoked:
         return
     named = ", ".join(f"{r.opcode_name} tag {r.tag}" for r in unprovoked[:6])
