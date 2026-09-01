@@ -644,6 +644,12 @@ async def _prompt_device_problems():
                 f"{check_id}: {result.message}. Nothing was ever pipelined "
                 f"against it, so the only honest verdict is "
                 f"{want.value}")
+    if report.aborted:
+        # Without this the two results above are enough to report success on a
+        # run that never reached the end: they come from the control phase, and
+        # everything that would have failed after it never ran.
+        problems.append(f"the prompt-device scenario run aborted: "
+                        f"{report.aborted}")
     also_broken = sorted(r.check.id for r in
                          report.failures + report.warnings + report.errors)
     if also_broken:

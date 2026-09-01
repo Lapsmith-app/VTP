@@ -9,7 +9,7 @@ import asyncio
 import struct
 
 from .. import refdec
-from ..session import ControlEchoMismatch, ControlTimeout
+from ..session import ControlTimeout
 from ..transport import DeviceRefused, TransportError
 from . import Fail, Observe, Skip, check
 
@@ -227,18 +227,32 @@ async def control_busy_when_outstanding(s):
         first_response = await c.await_response(
             UNALLOCATED_OPCODE, first_tag, first_future, timeout=5.0)
     except ControlTimeout:
+        first_response = None
+    complete = second is not None and first_response is not None
+    overlapped = complete and second.t_write <= first_response.t_recv
+    # Recorded before the cleanup below, which writes a request of its own and
+    # can fail on a device that has stopped answering: what the pair did is
+    # already known here, and `control.busy_not_applied` needs it whatever
+    # happens next.
+    if complete:
+        s.state[BUSY_PROBE_STATE] = {"overlapped": overlapped,
+                                     "status": second.status,
+                                     "status_name": second.status_name}
+    # Also before the verdicts, and not after them. The subscription is
+    # installed the moment the device answers `ok`, whatever became of the
+    # first request, so a cleanup that runs only on the paths reaching the end
+    # of this check leaves a device that dropped the first response holding a
+    # slot for the rest of the connection -- failing here, correctly, and then
+    # failing `can.table_full` for a reason nothing in that report can explain.
+    if s.has("can") and second is not None and second.ok:
+        await _remove_busy_probe(s, c)
+    if first_response is None:
         raise Fail("the first of two pipelined requests was never answered. A "
-                   "device MUST respond to every request it applies") from None
+                   "device MUST respond to every request it applies")
     if second is None:
         raise Fail("the second of two pipelined requests was never answered. §9 "
                    "requires busy rather than silence: a device meeting a "
                    "client that pipelines has to have something true to say")
-    overlapped = second.t_write <= first_response.t_recv
-    s.state[BUSY_PROBE_STATE] = {"overlapped": overlapped,
-                                 "status": second.status,
-                                 "status_name": second.status_name}
-    if s.has("can") and second.ok:
-        await _remove_busy_probe(s, c)
     if not overlapped:
         # The device answered the first before the second was written, so the
         # two were never outstanding together and there was nothing to detect.
@@ -292,20 +306,22 @@ async def _remove_busy_probe(s, c):
     a refusal to contradict, and where there was none it does not write at all.
     A subscription left behind holds a slot for the rest of the connection, and
     `can.table_full` a few checks later is counting slots.
+
+    Nothing is caught here. This is housekeeping, but it is housekeeping done
+    by writing a request, and §9's MUSTs attach to the request and not to the
+    reason it was written: a device that never answers it, or echoes the wrong
+    opcode, has violated §9 whatever this check was about, and `Runner._one`
+    already reports both as a failure with that rationale attached. Swallowing
+    them here would leave the run reporting an Observe and a Skip, and
+    `conforms` true, over a MUST the harness had watched go by.
     """
-    try:
-        removal = await c.unsubscribe_can(BUSY_PROBE_ID)
-    except (ControlTimeout, ControlEchoMismatch, DeviceRefused,
-            TransportError) as exc:
-        reason = str(exc)
-    else:
-        if removal.ok:
-            return
-        reason = f"the unsubscribe was answered {removal.status_name}"
+    removal = await c.unsubscribe_can(BUSY_PROBE_ID)
+    if removal.ok:
+        return
     s.note(f"the subscription this harness pipelined was installed, "
-           f"correctly, and could not be taken back again ({reason}); one "
-           f"subscription slot may be occupied for the rest of this "
-           f"connection")
+           f"correctly, and the unsubscribe taking it back was answered "
+           f"{removal.status_name}; one subscription slot may be occupied "
+           f"for the rest of this connection")
 
 
 async def _pipelined_second(s, c):
@@ -343,8 +359,10 @@ async def control_busy_not_applied(s):
     c = _control(s)
     pipelined = s.state.get(BUSY_PROBE_STATE)
     if pipelined is None:
-        raise Skip("the request control.busy_when_outstanding pipelines was "
-                   "never answered, so there is no refusal to hold to")
+        raise Skip("the pipelined exchange control.busy_when_outstanding "
+                   "writes did not complete -- one of the two requests went "
+                   "unanswered, which that check reports -- so there is no "
+                   "refusal to hold to")
     if not pipelined["overlapped"]:
         raise Skip("the device answered the first request before the second "
                    "was written, so nothing was ever pipelined: that request "
