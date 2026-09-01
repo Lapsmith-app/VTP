@@ -744,6 +744,19 @@ async def main():
             problems.append(f"a {profile} device was reported "
                             f"{result.status.value} on {result.check.id}: "
                             f"{result.message}")
+        # An abort is not a verdict, and it is not among the failures either:
+        # Runner.run records it on the report rather than raising, and
+        # `errors` only counts checks that ran. A run that died in
+        # session.open therefore has an empty result list, prints zeroes
+        # across the board and appends nothing -- so the roles this profile
+        # exists to test go unexamined and the file still says ok. The clean
+        # run above is held to both of these; there is no reason these are
+        # not.
+        if report.aborted:
+            problems.append(f"the {profile} run aborted: {report.aborted}")
+        elif not counts["pass"]:
+            problems.append(f"not one check passed against a {profile} "
+                            f"device; something is not running")
 
     print("\nA device with one specific defect")
     width = max(len(f) for f in ordered)
