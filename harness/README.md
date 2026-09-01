@@ -239,12 +239,12 @@ uv run vtp1-harness --fault list
 uv run vtp1-harness --loopback --fault seq_starts_at_one
 ```
 
-Each entry in `transport.FAULTS` is a real mistake — a sequence number that
-starts at 1, a `TIME_SYNC` that reads its clock once and reports it as both
-timestamps, a subscription table that survives a reconnect, a `capabilities`
-word missing a bit another bit requires, a request answered `busy` and applied
-anyway — and each exists
-because some check here claims to catch it. It is the argument
+Almost every entry in `transport.FAULTS` is a real mistake — a sequence
+number that starts at 1, a `TIME_SYNC` that reads its clock once and reports
+it as both timestamps, a subscription table that survives a reconnect, a
+`capabilities` word missing a bit another bit requires, a request answered
+`busy` and applied anyway — and each exists because some check here claims to
+catch it. It is the argument
 `tools/check_corpus.py` makes about the byte vectors, applied to the rules that
 live outside them: a check nothing can break is a check that does not work, and
 it will pass silently forever.
@@ -254,6 +254,12 @@ the one that matters:
 
 - No fault may be defined with no check named against it — otherwise the fault
   is a claim nobody is holding to account.
+- The exceptions are the **scenario seeds** (`selftest.SCENARIO_FAULTS`), which
+  are not mistakes: a conforming car whose polled PID nothing answers, a device
+  that answers inside its write handler, a host stack that holds a delivery a
+  scheduler turn. They exist to hold the harness to what it must *not* report,
+  and the targeted section of the selftest states the verdict each must
+  produce rather than naming a check that fails.
 - **No MUST or SHOULD may exist with no fault against it**, unless
   `selftest.NOT_SEEDED` says why none is possible. Without this half,
   `transport.FAULTS` decides what "detects every defect it claims" means, and

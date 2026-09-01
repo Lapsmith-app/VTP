@@ -92,6 +92,7 @@ CAUGHT_BY = {
     "drops_a_response": ("control.time_sync",
                          "control.no_busy_for_conforming_client"),
     "pipelines_silently": "control.busy_when_outstanding",
+    "pipelined_answered_bad_params": "control.busy_when_outstanding",
     "owes_until_confirmed": ("control.no_busy_for_conforming_client",
                              "control.no_unprovoked_busy"),
     "busy_but_applied": "control.busy_not_applied",
@@ -223,7 +224,11 @@ CASCADING = {
 #: request this harness makes is conforming. The narrowing is what makes the
 #: entry mean anything, and without this it could rot back into the cascade it
 #: was written to avoid with nothing to say so.
-ISOLATED = {"owes_until_confirmed"}
+#: `pipelined_answered_bad_params` is narrow by construction -- it can only
+#: fire while a response is owed, and `control.busy_when_outstanding` is the
+#: only thing here that writes while one is -- so holding it to breaking that
+#: check and nothing else is the claim, not a hope.
+ISOLATED = {"owes_until_confirmed", "pipelined_answered_bad_params"}
 
 #: Faults that are SCENARIO seeds rather than matrix entries: neither breaks
 #: a rule one check can catch on its own, so neither belongs in CAUGHT_BY.
@@ -241,8 +246,17 @@ ISOLATED = {"owes_until_confirmed"}
 #: pipelining report that limit rather than a violation -- an Observe and a
 #: Skip, and in particular NOT the Fail that a device fast enough to be
 #: unverifiable used to earn (issue #46).
+#: `host_callback_lands_late` is the same claim with the excuse taken away.
+#: It is not a device defect: it holds each control delivery one scheduler
+#: turn, which is the host stack doing what host stacks do, and stacked on the
+#: seed above it produces a response SENT before the second request and
+#: RECEIVED after it. Every timestamp the harness owns then says the device was
+#: still owing, and it was not (issue #48). The required verdicts are the same
+#: two, which is the point: what the report says must not turn on when the
+#: host got round to the callback.
 SCENARIO_FAULTS = {"obd_pid_never_answers", "obd_reprobe_refused",
-                   "answers_before_the_next_write"}
+                   "answers_before_the_next_write",
+                   "host_callback_lands_late"}
 
 #: Only these faults are about state surviving a link drop, and only their runs
 #: need to pay for the reconnection.
@@ -410,6 +424,82 @@ EXPECTED_SKIPS = {
     "can.matches_subscription":
         "the harness subscribes with a mask that matches every frame",
 }
+
+
+#: Which MUST and SHOULD checks report a MEASUREMENT rather than a bare pass on
+#: a conforming device, and what each one measures.
+#:
+#: The complement of EXPECTED_SKIPS, and the same argument in the other
+#: direction. Several checks here Fail on a violation and Observe on success,
+#: because the number they arrived at is worth printing: the negotiated MTU,
+#: which power fields the device says are valid, how far the stream clocks ran
+#: apart. That is deliberate -- and it also means `observe` and `pass` are both
+#: ordinary outcomes of a clean run, so a MUST that quietly stops verdicting
+#: reads as one that passed.
+#:
+#: So every MUST and SHOULD must PASS on the reference peripheral unless it is
+#: named here, and every check named here must OBSERVE.
+#: `control.busy_when_outstanding` is the case that asked for this. It has two
+#: Observe branches, for two things a host cannot settle (issue #48), and one
+#: pass; inverting the predicate that chooses between them sends the clean run
+#: down a reporting branch, and until this table there was nothing to notice
+#: that the check had stopped verdicting on every device.
+EXPECTED_OBSERVES = {
+    "dis.present": "the three Device Information strings",
+    "power.something_valid": "which power fields the device says are valid",
+    "obd.probe": "the request identifier, and the ECUs that answered it",
+    "obd.capacities": "how many PIDs fit in one poll set",
+    "gps.decodes": "how many notifications arrived, all of them decoded",
+    "can.decodes": "the same, for CAN",
+    "imu.decodes": "the same, for IMU",
+    "clock.one_clock": "how far apart the streams' clocks read",
+    "clock.one_rate": "how far apart their rates ran, in ppm",
+    "link.att_mtu": "the negotiated ATT MTU, and what it leaves per packet",
+}
+
+
+def _verdict_problems(report):
+    """A MUST that has stopped verdicting reads as a MUST that passed.
+
+    `_skip_problems` covers the checks that said nothing at all. This covers
+    the ones that said something and asserted nothing: on a device with every
+    role, a MUST either passes or reports a measurement, and which of the two
+    is a property of the check rather than of the device. Nothing was holding
+    that property, so a predicate inverted in a way that pushes every device
+    onto a reporting branch left a green run behind it.
+
+    Held in both directions, like the tables above it: an entry here that has
+    started passing is an entry to delete, because a list that is not true of
+    the clean run stops being read.
+    """
+    problems = []
+    observed = set()
+    for result in report.results:
+        if result.check.severity not in ("MUST", "SHOULD"):
+            continue                    # an OBSERVE check asserts nothing
+        if result.check.id in EXPECTED_SKIPS:
+            continue                    # `_skip_problems` holds those
+        if result.status not in (Status.PASS, Status.OBSERVE):
+            continue                    # a failure, reported where it belongs
+        if result.status is Status.OBSERVE:
+            observed.add(result.check.id)
+        want = (Status.OBSERVE if result.check.id in EXPECTED_OBSERVES
+                else Status.PASS)
+        if result.status is not want:
+            problems.append(
+                f"on a conforming device, {result.check.id} "
+                f"({result.check.severity}) reported {result.status.value} "
+                f"where {want.value} was "
+                f"expected: {result.message}. A MUST that reports instead of "
+                f"verdicting has stopped testing its rule; either it should "
+                f"pass here, or EXPECTED_OBSERVES should say what it measures")
+    gone = sorted(set(EXPECTED_OBSERVES) - observed)
+    if gone:
+        problems.append(
+            f"check(s) {gone} are listed as reporting a measurement on a "
+            f"conforming device and did not. Remove them -- an expectation "
+            f"that is not true of the clean run stops being read")
+    return problems
 
 
 def _skip_problems(report):
@@ -590,7 +680,31 @@ async def _diverge_anchor_problems():
     return problems
 
 
-async def _prompt_device_problems():
+#: The runs `_prompt_device_problems` makes, and the line each earns.
+#:
+#: Both are the SAME conforming device and both must produce the same two
+#: verdicts. They differ only in when the host got round to the callback, which
+#: is the one thing about this exchange the harness measures and the one thing
+#: that says nothing about the device.
+#:
+#: Each names the `overlap_excluded` the run must reach, which is what makes
+#: the second run a test of anything. Both runs require the same two statuses,
+#: so asserting only those passes whether or not the seeded host does anything
+#: at all -- a no-op `host_callback_lands_late` is still an Observe and still a
+#: Skip. The evidence says which branch produced them: the prompt host arrives
+#: before the second write and excludes the overlap; the slow one does not, and
+#: it is only on that path that the check had been failing a conforming device.
+PROMPT_SCENARIOS = (
+    (("answers_before_the_next_write",), True,
+     "a device too quick to pipeline against is reported as untestable, not "
+     "as in violation"),
+    (("answers_before_the_next_write", "host_callback_lands_late"), False,
+     "...and still is when the host holds the delivery until after the next "
+     "write"),
+)
+
+
+async def _prompt_device_problems(faults, overlap_excluded):
     """A device too quick to pipeline against is not a device in violation.
 
     `control.busy_when_outstanding` writes a second request meaning to have it
@@ -611,10 +725,19 @@ async def _prompt_device_problems():
     again. Nothing else removes it once `control.busy_not_applied` stops
     probing, and a slot held for the rest of the connection is a slot
     `can.table_full` is counting a few checks later.
+
+    Run twice, over `PROMPT_SCENARIOS`. The second run stacks a host that holds
+    every control delivery one scheduler turn, which moves `t_recv` past the
+    second write and leaves every timestamp the harness owns saying the device
+    was still owing a response it had in fact already sent. That is issue #48,
+    and it is not reachable by making the device worse: the device is byte for
+    byte the first run's, and only the host changed. A harness that verdicts
+    differently across these two runs is verdicting on its own scheduling.
     """
     problems = []
     left_installed = []
-    transport = LoopbackTransport(faults=["answers_before_the_next_write"])
+    scenario = "+".join(faults)
+    transport = LoopbackTransport(faults=list(faults))
     target = (await transport.scan(0))[0]
 
     def on_result(result):
@@ -632,34 +755,43 @@ async def _prompt_device_problems():
 
     expected = {"control.busy_when_outstanding": Status.OBSERVE,
                 "control.busy_not_applied": Status.SKIP}
+    verdict = result_for(report, "control.busy_when_outstanding")
+    if verdict is not None and verdict.status is Status.OBSERVE and \
+            verdict.evidence.get("overlap_excluded") is not overlap_excluded:
+        problems.append(
+            f"{scenario}: control.busy_when_outstanding observed with "
+            f"overlap_excluded="
+            f"{verdict.evidence.get('overlap_excluded')!r}, and this run is "
+            f"only a test of anything at {overlap_excluded!r}. The two runs "
+            f"require the same two statuses, so without this the seeded host "
+            f"could do nothing at all and still be reported as working")
     for check_id, want in expected.items():
         result = result_for(report, check_id)
         if result is None:
-            problems.append(f"answers_before_the_next_write: {check_id} did "
-                            f"not run")
+            problems.append(f"{scenario}: {check_id} did not run")
         elif result.status is not want:
             problems.append(
                 f"a conforming device that answers before the harness can "
-                f"write again was reported {result.status.value} by "
-                f"{check_id}: {result.message}. Nothing was ever pipelined "
-                f"against it, so the only honest verdict is "
-                f"{want.value}")
+                f"write again ({scenario}) was reported {result.status.value} "
+                f"by {check_id}: {result.message}. Nothing was ever pipelined "
+                f"against it, so the only honest verdict is {want.value}")
     if report.aborted:
         # Without this the two results above are enough to report success on a
         # run that never reached the end: they come from the control phase, and
         # everything that would have failed after it never ran.
-        problems.append(f"the prompt-device scenario run aborted: "
-                        f"{report.aborted}")
+        problems.append(f"the {scenario} run aborted: {report.aborted}")
     also_broken = sorted(r.check.id for r in
                          report.failures + report.warnings + report.errors)
     if also_broken:
         problems.append(
-            f"a conforming device that answers promptly was reported "
-            f"fail/warn/error on {also_broken}; answering quickly breaks no "
-            f"rule in SPEC.md")
+            f"a conforming device that answers promptly ({scenario}) was "
+            f"reported fail/warn/error on {also_broken}; answering quickly "
+            f"breaks no rule in SPEC.md, and neither does a host that takes "
+            f"its time")
     if not left_installed:
-        problems.append("control.busy_not_applied never reported, so nothing "
-                        "could be said about what the pair left installed")
+        problems.append(f"{scenario}: control.busy_not_applied never "
+                        f"reported, so nothing could be said about what the "
+                        f"pair left installed")
     elif left_installed[0]:
         problems.append(
             f"the subscription the pipelined request installed was left "
@@ -707,7 +839,8 @@ async def main():
         *(run(faults=[fault], reconnect=fault in NEEDS_RECONNECT,
               profile=profile_for(fault))
           for fault in ordered),
-        _prompt_device_problems(),
+        *(_prompt_device_problems(faults, overlap_excluded)
+          for faults, overlap_excluded, _ in PROMPT_SCENARIOS),
         run(faults=["obd_pid_never_answers"]),
         run(faults=["obd_pid_never_answers", "obd_reprobe_refused"]),
     )
@@ -715,7 +848,9 @@ async def main():
     clean = started[0]
     profile_reports = started[1:cut]
     reports = started[cut:cut + len(ordered)]
-    prompt, quiet, stacked = started[cut + len(ordered):]
+    tail = started[cut + len(ordered):]
+    prompts = tail[:len(PROMPT_SCENARIOS)]
+    quiet, stacked = tail[len(PROMPT_SCENARIOS):]
 
     print("A conforming device")
     counts = clean.counts
@@ -732,6 +867,7 @@ async def main():
         problems.append(f"only {counts['pass']} checks passed against the "
                         f"reference peripheral; something is not running")
     problems += _skip_problems(clean)
+    problems += _verdict_problems(clean)
 
     print("\nA device that implements some of the roles")
     # SPEC.md §4.1 -- a device is never failed for a role it never claimed, and
@@ -815,10 +951,10 @@ async def main():
     # tool-worse-than-no-tool case in this file's header) and a stacked run
     # that must FAIL for the right stated reason.
     print("\nTargeted scenarios")
-    problems += prompt
-    if not prompt:
-        print("  ok   a device too quick to pipeline against is reported as "
-              "untestable, not as in violation")
+    for (_, _, headline), prompt in zip(PROMPT_SCENARIOS, prompts):
+        problems += prompt
+        if not prompt:
+            print(f"  ok   {headline}")
 
     result = result_for(quiet, "obd.poll_and_flag")
     if result is None:
