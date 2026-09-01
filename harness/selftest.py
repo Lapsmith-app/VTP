@@ -669,13 +669,55 @@ async def _prompt_device_problems():
     return problems
 
 
+def _failed(problems):
+    print("\nFAILED")
+    for problem in problems:
+        print(f"  - {problem}")
+    return 1
+
+
 async def main():
     problems = _coverage_problems()
+    if problems:
+        # These tables are the map every run below is READ through: which
+        # fault is expected to break which check, and which checks are excused
+        # from having one. While they disagree among themselves there is no
+        # verdict a device can hand back that means anything -- it would be
+        # scored against a key already known to be wrong -- so say so now
+        # rather than after three minutes of listening to ninety-six of them.
+        return _failed(problems)
     problems += await _model_device_problems()
     problems += await _diverge_anchor_problems()
 
+    # Every run below is independent -- its own transport, its own device,
+    # sharing nothing but the event loop -- so they are all started here and
+    # awaited once, and the printing that follows is unchanged.
+    #
+    # A run is ~55s of almost pure waiting: the CAN and OBD checks listen for
+    # periodic frames, and the loop has nothing to compute while they do. The
+    # fault matrix already knew that and gathered its ninety. The seven runs
+    # around it did not, and waiting for each other in turn was most of this
+    # file's wall clock -- three minutes of it, spent asleep, for no reason
+    # anyone had chosen.
+    ordered = sorted(CAUGHT_BY)
+    profiles = (PARTIAL, "gps", "gps+control")
+    started = await asyncio.gather(
+        run(reconnect=True),
+        *(run(profile=profile) for profile in profiles),
+        *(run(faults=[fault], reconnect=fault in NEEDS_RECONNECT,
+              profile=profile_for(fault))
+          for fault in ordered),
+        _prompt_device_problems(),
+        run(faults=["obd_pid_never_answers"]),
+        run(faults=["obd_pid_never_answers", "obd_reprobe_refused"]),
+    )
+    cut = 1 + len(profiles)
+    clean = started[0]
+    profile_reports = started[1:cut]
+    reports = started[cut:cut + len(ordered)]
+    prompt, quiet, stacked = started[cut + len(ordered):]
+
     print("A conforming device")
-    clean = await run(reconnect=True)
     counts = clean.counts
     print(f"  {counts['pass']} passed, {counts['fail']} failed, "
           f"{counts['warn']} warnings, {counts['skip']} skipped, "
@@ -694,8 +736,7 @@ async def main():
     print("\nA device that implements some of the roles")
     # SPEC.md §4.1 -- a device is never failed for a role it never claimed, and
     # the inert half of the profile is only reachable on a device that has one.
-    for profile in (PARTIAL, "gps", "gps+control"):
-        report = await run(profile=profile)
+    for profile, report in zip(profiles, profile_reports):
         counts = report.counts
         print(f"  {profile:<16} {counts['pass']} passed, {counts['fail']} failed, "
               f"{counts['skip']} skipped, {counts['error']} errors")
@@ -705,12 +746,6 @@ async def main():
                             f"{result.message}")
 
     print("\nA device with one specific defect")
-    ordered = sorted(CAUGHT_BY)
-    reports = await asyncio.gather(*(
-        run(faults=[fault], reconnect=fault in NEEDS_RECONNECT,
-            profile=profile_for(fault))
-        for fault in ordered))
-
     width = max(len(f) for f in ordered)
     for fault, report in zip(ordered, reports):
         caught, missed = [], []
@@ -767,13 +802,11 @@ async def main():
     # tool-worse-than-no-tool case in this file's header) and a stacked run
     # that must FAIL for the right stated reason.
     print("\nTargeted scenarios")
-    prompt = await _prompt_device_problems()
     problems += prompt
     if not prompt:
         print("  ok   a device too quick to pipeline against is reported as "
               "untestable, not as in violation")
 
-    quiet = await run(faults=["obd_pid_never_answers"])
     result = result_for(quiet, "obd.poll_and_flag")
     if result is None:
         problems.append("obd_pid_never_answers: obd.poll_and_flag did not run")
@@ -795,8 +828,6 @@ async def main():
                 f"{'nothing' if result is None else result.status.value} on "
                 f"a conforming car that is merely quiet")
 
-    stacked = await run(faults=["obd_pid_never_answers",
-                                "obd_reprobe_refused"])
     result = result_for(stacked, "obd.poll_and_flag")
     if result is None:
         problems.append("obd_reprobe_refused: obd.poll_and_flag did not run")
@@ -812,12 +843,9 @@ async def main():
     else:
         print("  ok   a refused diagnostic re-probe fails, naming the status")
 
-    print()
     if problems:
-        print("FAILED")
-        for problem in problems:
-            print(f"  - {problem}")
-        return 1
+        return _failed(problems)
+    print()
     print(f"ok: the reference peripheral passes, all {len(CAUGHT_BY)} seeded "
           f"defects were caught, and all {len(SCENARIO_FAULTS)} scenario "
           f"seeds verdict as required")
