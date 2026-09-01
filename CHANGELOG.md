@@ -62,6 +62,16 @@ harness owns saying the device was still owing, and the device not owing.
 and with it not, and requires the same two verdicts from both: what a report
 says must not turn on when the host got round to the callback.
 
+The clean run gains a verdict baseline to go with its expected-skip one
+(`selftest.EXPECTED_OBSERVES`). Several MUSTs here Fail on a violation and
+Observe on success, because the number they arrived at is worth printing — so
+`observe` and `pass` are both ordinary outcomes and a MUST that quietly stops
+verdicting reads as one that passed. Every MUST and SHOULD must now pass
+against the reference peripheral unless the table says what it measures. This
+check is why: it has two Observe branches and one pass, and inverting the
+predicate that chooses between them sends every device down a reporting branch
+with nothing to notice that the rule had stopped being tested.
+
 `pipelines_silently` now models a device that applies the pipelined request and
 answers nobody, rather than one that answers `ok`. The `ok` half is the half no
 host can see, so a seed claiming it was caught was really asserting the timing

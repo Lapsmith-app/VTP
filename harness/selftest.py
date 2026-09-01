@@ -421,6 +421,82 @@ EXPECTED_SKIPS = {
 }
 
 
+#: Which MUST and SHOULD checks report a MEASUREMENT rather than a bare pass on
+#: a conforming device, and what each one measures.
+#:
+#: The complement of EXPECTED_SKIPS, and the same argument in the other
+#: direction. Several checks here Fail on a violation and Observe on success,
+#: because the number they arrived at is worth printing: the negotiated MTU,
+#: which power fields the device says are valid, how far the stream clocks ran
+#: apart. That is deliberate -- and it also means `observe` and `pass` are both
+#: ordinary outcomes of a clean run, so a MUST that quietly stops verdicting
+#: reads as one that passed.
+#:
+#: So every MUST and SHOULD must PASS on the reference peripheral unless it is
+#: named here, and every check named here must OBSERVE.
+#: `control.busy_when_outstanding` is the case that asked for this. It has two
+#: Observe branches, for two things a host cannot settle (issue #48), and one
+#: pass; inverting the predicate that chooses between them sends the clean run
+#: down a reporting branch, and until this table there was nothing to notice
+#: that the check had stopped verdicting on every device.
+EXPECTED_OBSERVES = {
+    "dis.present": "the three Device Information strings",
+    "power.something_valid": "which power fields the device says are valid",
+    "obd.probe": "the request identifier, and the ECUs that answered it",
+    "obd.capacities": "how many PIDs fit in one poll set",
+    "gps.decodes": "how many notifications arrived, all of them decoded",
+    "can.decodes": "the same, for CAN",
+    "imu.decodes": "the same, for IMU",
+    "clock.one_clock": "how far apart the streams' clocks read",
+    "clock.one_rate": "how far apart their rates ran, in ppm",
+    "link.att_mtu": "the negotiated ATT MTU, and what it leaves per packet",
+}
+
+
+def _verdict_problems(report):
+    """A MUST that has stopped verdicting reads as a MUST that passed.
+
+    `_skip_problems` covers the checks that said nothing at all. This covers
+    the ones that said something and asserted nothing: on a device with every
+    role, a MUST either passes or reports a measurement, and which of the two
+    is a property of the check rather than of the device. Nothing was holding
+    that property, so a predicate inverted in a way that pushes every device
+    onto a reporting branch left a green run behind it.
+
+    Held in both directions, like the tables above it: an entry here that has
+    started passing is an entry to delete, because a list that is not true of
+    the clean run stops being read.
+    """
+    problems = []
+    observed = set()
+    for result in report.results:
+        if result.check.severity not in ("MUST", "SHOULD"):
+            continue                    # an OBSERVE check asserts nothing
+        if result.check.id in EXPECTED_SKIPS:
+            continue                    # `_skip_problems` holds those
+        if result.status not in (Status.PASS, Status.OBSERVE):
+            continue                    # a failure, reported where it belongs
+        if result.status is Status.OBSERVE:
+            observed.add(result.check.id)
+        want = (Status.OBSERVE if result.check.id in EXPECTED_OBSERVES
+                else Status.PASS)
+        if result.status is not want:
+            problems.append(
+                f"on a conforming device, {result.check.id} "
+                f"({result.check.severity}) reported {result.status.value} "
+                f"where {want.value} was "
+                f"expected: {result.message}. A MUST that reports instead of "
+                f"verdicting has stopped testing its rule; either it should "
+                f"pass here, or EXPECTED_OBSERVES should say what it measures")
+    gone = sorted(set(EXPECTED_OBSERVES) - observed)
+    if gone:
+        problems.append(
+            f"check(s) {gone} are listed as reporting a measurement on a "
+            f"conforming device and did not. Remove them -- an expectation "
+            f"that is not true of the clean run stops being read")
+    return problems
+
+
 def _skip_problems(report):
     """A skip that nobody predicted is a check that stopped running.
 
@@ -723,6 +799,7 @@ async def main():
         problems.append(f"only {counts['pass']} checks passed against the "
                         f"reference peripheral; something is not running")
     problems += _skip_problems(clean)
+    problems += _verdict_problems(clean)
 
     print("\nA device that implements some of the roles")
     # SPEC.md §4.1 -- a device is never failed for a role it never claimed, and
