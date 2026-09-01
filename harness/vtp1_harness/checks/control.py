@@ -222,7 +222,7 @@ async def control_busy_when_outstanding(s):
     # pipeline. Nothing else in this harness writes a second request before the
     # first is answered.
     first_tag, first_future = await c.send(UNALLOCATED_OPCODE)
-    second = await _pipelined_second(s, c)
+    probe_opcode, idle, second = await _pipelined_second(s, c)
     try:
         first_response = await c.await_response(
             UNALLOCATED_OPCODE, first_tag, first_future, timeout=5.0)
@@ -313,7 +313,7 @@ async def control_busy_when_outstanding(s):
         raise Observe(
             "the device answered the first request before the second was "
             "written, so nothing was ever pipelined and this could not be "
-            "tested from here")
+            "tested from here", overlap_excluded=True)
     if second.status == refdec.STATUS_VALUE["busy"]:
         # The device's own testimony that its slot was still occupied, which is
         # the only evidence there is that the window was open: nothing above
@@ -340,6 +340,38 @@ async def control_busy_when_outstanding(s):
     # `control.busy_not_applied` -- but this one needs the send timestamped. A
     # sniffer settles it; so would a `t_sent` field in `control_response`,
     # which is the sort of thing a later minor could add.
+    #
+    # None of which excuses the response itself. What the clock cannot settle
+    # is the choice BETWEEN `busy` and the answer this request is worth to an
+    # idle device; everything else about the response is owed either way, and
+    # is checked here because nothing else in the run looks at it --
+    # `control.echoes_request` and `control.detail_only_on_ok` each probe with
+    # a request of their own and never see this one. A `bad_params` here is
+    # wrong if the slot was occupied, because §9 says `busy`, and wrong if it
+    # was free, because the request was well formed; there is no reading of
+    # the clock on which it is right.
+    problems = []
+    if second.opcode != probe_opcode:
+        problems.append(
+            f"echoed opcode 0x{second.opcode:02x} for a request sent as "
+            f"0x{probe_opcode:02x}")
+    if second.status != idle:
+        problems.append(
+            f"answered {second.status_name}: §9 leaves this request `busy` "
+            f"while the slot is occupied and "
+            f"{refdec.STATUS.get(idle, idle)} once it is free, and this is "
+            f"neither")
+    if second.reject_reason:
+        problems.append(f"did not decode as a control_response: "
+                        f"{second.reject_reason}")
+    elif second.detail and not second.ok:
+        problems.append(f"carried {len(second.detail)} byte(s) of detail on a "
+                        f"refusal; detail is present if and only if status is "
+                        f"ok")
+    if problems:
+        raise Fail(
+            "the second of two pipelined requests " + "; ".join(problems),
+            response=second.raw.hex())
     raise Observe(
         f"the second of two pipelined requests was answered "
         f"{second.status_name}. §9 makes busy the one thing a device can say "
@@ -347,7 +379,7 @@ async def control_busy_when_outstanding(s):
         f"slot was still occupied cannot be told from here: the first "
         f"response had not reached the host, but a device that had already "
         f"SENT it owed nothing and was right to answer as it did",
-        response=second.raw.hex())
+        response=second.raw.hex(), overlap_excluded=False)
 
 
 async def _remove_busy_probe(s, c, installed=True):
@@ -389,21 +421,31 @@ async def _remove_busy_probe(s, c, installed=True):
 
 
 async def _pipelined_second(s, c):
-    """Write a second request immediately, and return whatever answers it.
+    """Write a second request immediately; return it, and what answers it.
 
     Chosen to be observable: if the device applies it despite owing a response,
     the subscription table says so and `control.busy_not_applied` finds it.
+
+    The opcode and the status it earns with NOTHING outstanding are returned
+    with the response, because the caller needs all three. §9 leaves a device
+    two answers to this request and no more -- `busy`, or what the request is
+    worth to an idle device -- and which of the two is right turns on a clock
+    the host does not have. Anything outside that pair does not: it is wrong
+    whichever way the clock ran, and the caller can say so.
     """
     if s.has("can"):
         opcode = refdec.OPCODE["CAN_SUBSCRIBE"]
         params = struct.pack("<IBH", BUSY_PROBE_ID, 0, 0)
+        idle = refdec.STATUS_VALUE["ok"]
     else:
         opcode, params = UNALLOCATED_OPCODE, b""
+        idle = refdec.STATUS_VALUE["unsupported_opcode"]
     tag, future = await c.send(opcode, params)
     try:
-        return await c.await_response(opcode, tag, future, timeout=5.0)
+        return opcode, idle, await c.await_response(
+            opcode, tag, future, timeout=5.0)
     except ControlTimeout:
-        return None
+        return opcode, idle, None
 
 
 @check(id="control.busy_not_applied", section="9", phase="control",

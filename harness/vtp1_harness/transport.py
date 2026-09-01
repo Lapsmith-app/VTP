@@ -304,6 +304,7 @@ FAULTS = {
     "pipelines_silently": "SPEC.md §9.4 — a second request written while a response is owed is applied, and answered by nobody",
     "owes_until_confirmed": "SPEC.md §9 — a response stays owed until its confirmation, so a client writing on arrival is refused busy (narrowed to one refusal; see _answer)",
     "busy_but_applied": "SPEC.md §9 — a request answered busy is applied anyway",
+    "pipelined_answered_bad_params": "SPEC.md §9 — a request written while a response was owed is refused bad_params: neither the busy §9 requires nor the answer the same request earns once the slot is free",
     "list_reserved_nonzero": "SPEC.md §13.3 — a reserved declaration byte is not zero",
     "missing_characteristic": "SPEC.md §4.1 — a characteristic is absent rather than inert",
     "extra_characteristic": "SPEC.md §4.1 — the service carries a characteristic it must not",
@@ -1167,6 +1168,17 @@ class LoopbackTransport(Transport):
                     # answered by nobody, so nothing observed the defect
                     # and there is nothing to spend it on.
                     self._late_armed = False
+                # SPEC.md §9 -- the refusal a pipelining client is owed, or
+                # the wrong one. `bad_params` is the status that is wrong
+                # whichever way the clock ran: `busy` while the slot is
+                # occupied, and `ok` for this same well-formed subscribe once
+                # it is free, so a device answering neither has said something
+                # no reading of the timing makes true. It is here rather than
+                # in a response rewrite because the point is the status a
+                # device chose for a request it could not take.
+                status = ("bad_params"
+                          if "pipelined_answered_bad_params" in self.faults
+                          else "busy")
                 # Delivered on the same schedule as any other response,
                 # because it IS one: sending it immediately would model a
                 # refusal that is never owed for any duration, and §9's
@@ -1174,7 +1186,7 @@ class LoopbackTransport(Transport):
                 self._owed += 1
                 asyncio.create_task(self._answer(bytes(
                     [request[0], request[1],
-                     refdec.STATUS_VALUE["busy"]])))
+                     refdec.STATUS_VALUE[status]])))
             # Over the cap the refusal itself has nowhere to go, so the
             # request is discarded unanswered and unapplied (SPEC.md §9).
             return
@@ -1309,16 +1321,31 @@ class LoopbackTransport(Transport):
             # conforming device it produces the case the §9 checks may not
             # verdict on -- a response that was SENT before the second request
             # and RECEIVED after it.
-            asyncio.get_running_loop().call_soon(self._deliver_control_now,
-                                                 response)
+            asyncio.get_running_loop().call_soon(
+                self._deliver_deferred, response, self._deliver_lock)
+            return
+        self._deliver_control_now(response)
+
+    def _deliver_deferred(self, response, lock):
+        """A held-back delivery, and the link it was held back on.
+
+        `_answer` identifies a connection by its delivery lock and drops a
+        response whose lock has been replaced; a deferral scheduled outside
+        that coroutine has to make the same test, and one more. `disconnect`
+        clears `_connected` and then AWAITS the pump before it clears `_subs`,
+        so a callback that runs in that window finds a subscription table that
+        is still populated and a link that is already gone. A real stack drops
+        what it was holding when the connection does; delivering it here would
+        put a control response into a session that has been told the link is
+        down, and into the history the transport-phase checks read back.
+        """
+        if not self._connected or lock is not self._deliver_lock:
             return
         self._deliver_control_now(response)
 
     def _deliver_control_now(self, response):
-        # The subscription is read here rather than at the call above, so a
-        # delivery deferred past a dropped link finds no callback and lands
-        # nowhere -- which is what a stack with a queued indication does when
-        # the connection goes.
+        # The subscription is read at delivery rather than when a deferral is
+        # scheduled, so a callback taken back meanwhile lands nowhere.
         cb = self._subs.get(refdec.CHAR["control"])
         if cb is not None:
             cb(response, asyncio.get_running_loop().time())

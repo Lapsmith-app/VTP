@@ -60,7 +60,28 @@ sent before the second request and received after it — every timestamp the
 harness owns saying the device was still owing, and the device not owing.
 `harness/selftest.py` runs the prompt-device scenario twice, with the host slow
 and with it not, and requires the same two verdicts from both: what a report
-says must not turn on when the host got round to the callback.
+says must not turn on when the host got round to the callback. It also requires
+each run to reach that verdict by the branch it is about, which is what makes
+the second run a test of anything — both report the same two statuses, so
+asserting only those would pass whether or not the seeded host did a thing.
+
+Not verdicting on the timing is not the same as not verdicting. The clock
+cannot settle the choice BETWEEN `busy` and the answer the same request earns
+once the slot is free; everything else about that response is owed either way,
+and nothing else in a run looks at it — `control.echoes_request` and
+`control.detail_only_on_ok` each probe with a request of their own. So the
+opcode it echoes, whether it decodes, whether a refusal carried detail, and
+whether the status is one of the two §9 leaves open are all tested before the
+timing argument is reached. A device answering the pipelined subscribe
+`bad_params` — wrong if the slot was occupied, because §9 says `busy`, and
+wrong if it was free, because the request was well formed — is
+`pipelined_answered_bad_params` in `transport.FAULTS`, and is failed.
+
+A deferred delivery is held to the link it was scheduled on. `disconnect`
+clears `_connected` and then awaits the pump before it clears the subscription
+table, so a callback landing in that window found a live table and a dead link.
+`_answer` has always dropped a response whose connection has gone; the deferral
+now makes the same test.
 
 The clean run gains a verdict baseline to go with its expected-skip one
 (`selftest.EXPECTED_OBSERVES`). Several MUSTs here Fail on a violation and

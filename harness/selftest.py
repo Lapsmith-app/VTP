@@ -92,6 +92,7 @@ CAUGHT_BY = {
     "drops_a_response": ("control.time_sync",
                          "control.no_busy_for_conforming_client"),
     "pipelines_silently": "control.busy_when_outstanding",
+    "pipelined_answered_bad_params": "control.busy_when_outstanding",
     "owes_until_confirmed": ("control.no_busy_for_conforming_client",
                              "control.no_unprovoked_busy"),
     "busy_but_applied": "control.busy_not_applied",
@@ -223,7 +224,11 @@ CASCADING = {
 #: request this harness makes is conforming. The narrowing is what makes the
 #: entry mean anything, and without this it could rot back into the cascade it
 #: was written to avoid with nothing to say so.
-ISOLATED = {"owes_until_confirmed"}
+#: `pipelined_answered_bad_params` is narrow by construction -- it can only
+#: fire while a response is owed, and `control.busy_when_outstanding` is the
+#: only thing here that writes while one is -- so holding it to breaking that
+#: check and nothing else is the claim, not a hope.
+ISOLATED = {"owes_until_confirmed", "pipelined_answered_bad_params"}
 
 #: Faults that are SCENARIO seeds rather than matrix entries: neither breaks
 #: a rule one check can catch on its own, so neither belongs in CAUGHT_BY.
@@ -681,17 +686,25 @@ async def _diverge_anchor_problems():
 #: verdicts. They differ only in when the host got round to the callback, which
 #: is the one thing about this exchange the harness measures and the one thing
 #: that says nothing about the device.
+#:
+#: Each names the `overlap_excluded` the run must reach, which is what makes
+#: the second run a test of anything. Both runs require the same two statuses,
+#: so asserting only those passes whether or not the seeded host does anything
+#: at all -- a no-op `host_callback_lands_late` is still an Observe and still a
+#: Skip. The evidence says which branch produced them: the prompt host arrives
+#: before the second write and excludes the overlap; the slow one does not, and
+#: it is only on that path that the check had been failing a conforming device.
 PROMPT_SCENARIOS = (
-    (("answers_before_the_next_write",),
+    (("answers_before_the_next_write",), True,
      "a device too quick to pipeline against is reported as untestable, not "
      "as in violation"),
-    (("answers_before_the_next_write", "host_callback_lands_late"),
+    (("answers_before_the_next_write", "host_callback_lands_late"), False,
      "...and still is when the host holds the delivery until after the next "
      "write"),
 )
 
 
-async def _prompt_device_problems(faults):
+async def _prompt_device_problems(faults, overlap_excluded):
     """A device too quick to pipeline against is not a device in violation.
 
     `control.busy_when_outstanding` writes a second request meaning to have it
@@ -742,6 +755,16 @@ async def _prompt_device_problems(faults):
 
     expected = {"control.busy_when_outstanding": Status.OBSERVE,
                 "control.busy_not_applied": Status.SKIP}
+    verdict = result_for(report, "control.busy_when_outstanding")
+    if verdict is not None and verdict.status is Status.OBSERVE and \
+            verdict.evidence.get("overlap_excluded") is not overlap_excluded:
+        problems.append(
+            f"{scenario}: control.busy_when_outstanding observed with "
+            f"overlap_excluded="
+            f"{verdict.evidence.get('overlap_excluded')!r}, and this run is "
+            f"only a test of anything at {overlap_excluded!r}. The two runs "
+            f"require the same two statuses, so without this the seeded host "
+            f"could do nothing at all and still be reported as working")
     for check_id, want in expected.items():
         result = result_for(report, check_id)
         if result is None:
@@ -877,8 +900,8 @@ async def main():
     # tool-worse-than-no-tool case in this file's header) and a stacked run
     # that must FAIL for the right stated reason.
     print("\nTargeted scenarios")
-    for faults, headline in PROMPT_SCENARIOS:
-        prompt = await _prompt_device_problems(faults)
+    for faults, overlap_excluded, headline in PROMPT_SCENARIOS:
+        prompt = await _prompt_device_problems(faults, overlap_excluded)
         problems += prompt
         if not prompt:
             print(f"  ok   {headline}")
