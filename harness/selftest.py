@@ -27,6 +27,7 @@ from vtp1_harness import refdec                             # noqa: E402
 sys.path.insert(0, str(refdec.ROOT / "reference" / "peripheral"))
 
 from vtp1_harness.checks import Status, load_all           # noqa: E402
+from vtp1_harness.checks import control as control_checks  # noqa: E402
 from vtp1_harness.runner import Runner                     # noqa: E402
 from vtp1_harness.transport import FAULTS, LoopbackTransport  # noqa: E402
 
@@ -234,7 +235,14 @@ ISOLATED = {"owes_until_confirmed"}
 #: re-probe a silent poll is entitled to is refused, which §15.2 makes a
 #: failure. The targeted-scenario section of main() asserts both, so these
 #: are held to account there rather than by the one-fault-one-check matrix.
-SCENARIO_FAULTS = {"obd_pid_never_answers", "obd_reprobe_refused"}
+#: `answers_before_the_next_write` is a CONFORMING device that answers inside
+#: its write handler, so the harness can never get a second request in while
+#: one is owed. The claim under test is that the pair of §9 checks built on
+#: pipelining report that limit rather than a violation -- an Observe and a
+#: Skip, and in particular NOT the Fail that a device fast enough to be
+#: unverifiable used to earn (issue #46).
+SCENARIO_FAULTS = {"obd_pid_never_answers", "obd_reprobe_refused",
+                   "answers_before_the_next_write"}
 
 #: Only these faults are about state surviving a link drop, and only their runs
 #: need to pay for the reconnection.
@@ -582,6 +590,78 @@ async def _diverge_anchor_problems():
     return problems
 
 
+async def _prompt_device_problems():
+    """A device too quick to pipeline against is not a device in violation.
+
+    `control.busy_when_outstanding` writes a second request meaning to have it
+    arrive while the first is owed, and against a device that answers before
+    the host can write again it does not manage to -- which the check itself
+    calls a device behaving well. The second request is then an ordinary
+    conforming one, `ok` is the only correct answer to it, and the device
+    installs it.
+
+    `control.busy_not_applied` used to read that subscription back and Fail:
+    its premise is that finding the probe installed proves a refusal was a lie,
+    and on this path there was no refusal. It is the tool-worse-than-no-tool
+    case in this file's header, reachable by any device that answers promptly,
+    and the run that reported it had the Observe and the Fail printed one line
+    apart contradicting each other.
+
+    Also asserted here: the subscription that install left behind is taken back
+    again. Nothing else removes it once `control.busy_not_applied` stops
+    probing, and a slot held for the rest of the connection is a slot
+    `can.table_full` is counting a few checks later.
+    """
+    problems = []
+    left_installed = []
+    transport = LoopbackTransport(faults=["answers_before_the_next_write"])
+    target = (await transport.scan(0))[0]
+
+    def on_result(result):
+        # Read the moment the pair is done, and not at the end of the phase:
+        # the CAN checks after them reset the table, so a slot leaked here is
+        # invisible a few checks later however long it was held.
+        if result.check.id == "control.busy_not_applied":
+            left_installed.append(sorted(
+                key for key in transport.device._subscriptions
+                if key[0] == control_checks.BUSY_PROBE_ID))
+
+    runner = Runner(transport, observe_s=OBSERVE_SECONDS, on_result=on_result)
+    report = await runner.run(target)
+
+    expected = {"control.busy_when_outstanding": Status.OBSERVE,
+                "control.busy_not_applied": Status.SKIP}
+    for check_id, want in expected.items():
+        result = result_for(report, check_id)
+        if result is None:
+            problems.append(f"answers_before_the_next_write: {check_id} did "
+                            f"not run")
+        elif result.status is not want:
+            problems.append(
+                f"a conforming device that answers before the harness can "
+                f"write again was reported {result.status.value} by "
+                f"{check_id}: {result.message}. Nothing was ever pipelined "
+                f"against it, so the only honest verdict is "
+                f"{want.value}")
+    also_broken = sorted(r.check.id for r in
+                         report.failures + report.warnings + report.errors)
+    if also_broken:
+        problems.append(
+            f"a conforming device that answers promptly was reported "
+            f"fail/warn/error on {also_broken}; answering quickly breaks no "
+            f"rule in SPEC.md")
+    if not left_installed:
+        problems.append("control.busy_not_applied never reported, so nothing "
+                        "could be said about what the pair left installed")
+    elif left_installed[0]:
+        problems.append(
+            f"the subscription the pipelined request installed was left "
+            f"behind ({[(hex(i), hex(m)) for i, m in left_installed[0]]}); "
+            f"nothing removes it once busy_not_applied stops probing, and it "
+            f"holds a slot that can.table_full a few checks later is counting")
+    return problems
+
+
 async def main():
     problems = _coverage_problems()
     problems += await _model_device_problems()
@@ -675,11 +755,17 @@ async def main():
                 f"the fault in CASCADING if it broke the conversation rather "
                 f"than that rule, or correct the reason")
 
-    # The verdict-shaped claims the one-fault matrix cannot express: a run
-    # that must SKIP (failing it would fail a conforming device -- the
+    # The verdict-shaped claims the one-fault matrix cannot express: runs that
+    # must OBSERVE or SKIP (failing them would fail a conforming device -- the
     # tool-worse-than-no-tool case in this file's header) and a stacked run
     # that must FAIL for the right stated reason.
-    print("\nTargeted OBD scenarios")
+    print("\nTargeted scenarios")
+    prompt = await _prompt_device_problems()
+    problems += prompt
+    if not prompt:
+        print("  ok   a device too quick to pipeline against is reported as "
+              "untestable, not as in violation")
+
     quiet = await run(faults=["obd_pid_never_answers"])
     result = result_for(quiet, "obd.poll_and_flag")
     if result is None:
@@ -726,8 +812,8 @@ async def main():
             print(f"  - {problem}")
         return 1
     print(f"ok: the reference peripheral passes, all {len(CAUGHT_BY)} seeded "
-          f"defects were caught, and both OBD scenario seeds verdict as "
-          f"required")
+          f"defects were caught, and all {len(SCENARIO_FAULTS)} scenario "
+          f"seeds verdict as required")
     return 0
 
 

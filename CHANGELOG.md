@@ -8,6 +8,52 @@ conformance vector.
 
 ## [Unreleased]
 
+### Harness: a device too quick to pipeline against is not a device in violation
+
+Reported from the first firmware implementation, which met it as one MUST
+failure in an otherwise clean run — with the two lines that disagreed printed
+one above the other:
+
+    ····  A request arriving while one is owed is answered busy, and not applied
+          the device answered the first request before the second was written, so
+          nothing was ever pipelined and this could not be tested from here
+    FAIL  A request refused busy did not take effect
+          a subscription written while the device owed a response was installed
+
+`control.busy_when_outstanding` pipelines a `CAN_SUBSCRIBE` behind an
+unallocated opcode and Observes when the device answered the first request
+before the second could be written, because nothing was ever outstanding
+together and there was nothing to detect. On that path the second request was
+an ordinary conforming one: nothing was owed when it arrived, `ok` was the only
+correct answer, and the device installed it, correctly.
+`control.busy_not_applied` then read that subscription back and Failed, on a
+premise — finding it installed proves the refusal was a lie — that needs there
+to have been a refusal. There had been none. The failure was reachable by any
+device fast enough to answer before the host can write again, which is what the
+Observe above it calls a device behaving well.
+
+The two checks are halves of one exchange, so the second now reads what the
+first measured: whether the requests genuinely overlapped, and what the second
+was answered. It Skips unless that answer was `busy`, and says which of the two
+it was — the same structural limit the Observe already explains, in the same
+words. What is recorded is the timestamps and not the check's intent, for the
+reason `_overlapped` gives: a `busy` answered to a request that in the event
+overlapped nothing is still a refusal of a conforming client, and
+`control.no_unprovoked_busy` still reports it.
+
+The subscription that install left behind is now taken back. Nothing removed it
+once `busy_not_applied` stopped probing — it had only ever been removed as a
+side effect of the failing case — and a slot held for the rest of the
+connection is a slot `can.table_full` counts a few checks later, which is a
+second failure with an even less obvious cause.
+
+Seeded as `answers_before_the_next_write` in `transport.FAULTS`: a conforming
+device that sends its answer before its write handler returns, so no client can
+pipeline against it. It is a scenario seed rather than a matrix entry, like the
+quiet OBD car, because the claim is about what must NOT be reported — an
+Observe and a Skip, no failure anywhere in the run, and no subscription left
+installed. `harness/selftest.py` asserts all four.
+
 ### Harness: a diverging clock is caught by its rate, not its offset
 
 Reported from a device in the field: CAN and GPS timestamps that agree at

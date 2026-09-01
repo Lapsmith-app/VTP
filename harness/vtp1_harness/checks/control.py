@@ -9,7 +9,7 @@ import asyncio
 import struct
 
 from .. import refdec
-from ..session import ControlTimeout
+from ..session import ControlEchoMismatch, ControlTimeout
 from ..transport import DeviceRefused, TransportError
 from . import Fail, Observe, Skip, check
 
@@ -23,8 +23,30 @@ UNALLOCATED_OPCODE = 0x7E
 PROBE_ID = 0x7A0
 
 #: A second identifier, used only by the request a device must refuse `busy`.
-#: Kept distinct so that finding it installed proves the refusal was a lie.
+#: Kept distinct so that finding it installed proves the refusal was a lie --
+#: once there was a refusal for it to be a lie about, which is what
+#: BUSY_PROBE_STATE is for.
 BUSY_PROBE_ID = 0x7A1
+
+#: Where `control.busy_when_outstanding` leaves what became of the request it
+#: pipelined, for `control.busy_not_applied` to read.
+#:
+#: The two are halves of one exchange: the first writes the second request, the
+#: second looks for its effect. Only the first can say whether that request was
+#: ever pipelined at all -- against a device that answers before the host can
+#: write again it was an ordinary conforming request, `ok` was the correct
+#: answer, and installing it was correct too. Without this the second check
+#: reads a rightly-installed subscription as a refusal that was a lie, and
+#: fails a device for the one thing `control.busy_when_outstanding` says in the
+#: same breath it could not test.
+#:
+#: What is recorded is what the timestamps said and not what the check meant to
+#: do, for the reason `_overlapped` gives: a note left on intent would excuse a
+#: `busy` answered to a request that in the event overlapped nothing, which §9
+#: does not excuse. This note is only how the measurement reaches the check
+#: that needs it -- the history records a status and a tag, not which request
+#: was the pipelined one.
+BUSY_PROBE_STATE = "busy_probe"
 
 
 def _control(s):
@@ -211,7 +233,13 @@ async def control_busy_when_outstanding(s):
         raise Fail("the second of two pipelined requests was never answered. §9 "
                    "requires busy rather than silence: a device meeting a "
                    "client that pipelines has to have something true to say")
-    if second.t_write > first_response.t_recv:
+    overlapped = second.t_write <= first_response.t_recv
+    s.state[BUSY_PROBE_STATE] = {"overlapped": overlapped,
+                                 "status": second.status,
+                                 "status_name": second.status_name}
+    if s.has("can") and second.ok:
+        await _remove_busy_probe(s, c)
+    if not overlapped:
         # The device answered the first before the second was written, so the
         # two were never outstanding together and there was nothing to detect.
         # A limit of testing from a host, not a finding.
@@ -254,6 +282,32 @@ async def control_busy_when_outstanding(s):
         f"cannot answer", response=second.raw.hex())
 
 
+async def _remove_busy_probe(s, c):
+    """Take back the subscription the pipelined request installed.
+
+    It is installed exactly when that request was answered `ok`, and against a
+    device that answered the first request first, `ok` was the right answer to
+    what was by then an ordinary conforming request. Nothing else removes it:
+    `control.busy_not_applied` probes with an unsubscribe only where there was
+    a refusal to contradict, and where there was none it does not write at all.
+    A subscription left behind holds a slot for the rest of the connection, and
+    `can.table_full` a few checks later is counting slots.
+    """
+    try:
+        removal = await c.unsubscribe_can(BUSY_PROBE_ID)
+    except (ControlTimeout, ControlEchoMismatch, DeviceRefused,
+            TransportError) as exc:
+        reason = str(exc)
+    else:
+        if removal.ok:
+            return
+        reason = f"the unsubscribe was answered {removal.status_name}"
+    s.note(f"the subscription this harness pipelined was installed, "
+           f"correctly, and could not be taken back again ({reason}); one "
+           f"subscription slot may be occupied for the rest of this "
+           f"connection")
+
+
 async def _pipelined_second(s, c):
     """Write a second request immediately, and return whatever answers it.
 
@@ -276,7 +330,33 @@ async def _pipelined_second(s, c):
        severity="MUST", requires=("control", "can"), adversarial=True,
        title="A request refused busy did not take effect")
 async def control_busy_not_applied(s):
+    """The second half of `control.busy_when_outstanding`'s exchange.
+
+    It can only run where that check produced a refusal, so it reads what that
+    check recorded before it writes anything. An installed subscription is only
+    evidence of anything if the request that installed it was answered `busy`:
+    on the Observe path nothing was ever outstanding, `ok` was correct, and a
+    device is doing exactly what §9 asks when the probe finds it there. Reading
+    the table without that question first fails a conforming device, and fails
+    it most reliably on the promptest ones.
+    """
     c = _control(s)
+    pipelined = s.state.get(BUSY_PROBE_STATE)
+    if pipelined is None:
+        raise Skip("the request control.busy_when_outstanding pipelines was "
+                   "never answered, so there is no refusal to hold to")
+    if not pipelined["overlapped"]:
+        raise Skip("the device answered the first request before the second "
+                   "was written, so nothing was ever pipelined: that request "
+                   "was an ordinary conforming one, nothing was owed when it "
+                   "arrived, and applying it was right. There is no refusal "
+                   "here for anything to have contradicted")
+    if pipelined["status"] != refdec.STATUS_VALUE["busy"]:
+        raise Skip(f"the pipelined request was answered "
+                   f"{pipelined['status_name']}, not busy -- which "
+                   f"control.busy_when_outstanding reports. Nothing was "
+                   f"refused, so nothing can have been applied despite a "
+                   f"refusal")
     # §9.1 makes (id, mask) the subscription's identity, so removal is also the
     # probe: an install that was refused busy leaves nothing to remove.
     probe = await c.unsubscribe_can(BUSY_PROBE_ID)

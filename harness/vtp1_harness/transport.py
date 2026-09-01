@@ -370,15 +370,17 @@ FAULTS = {
     "obd_accepts_bad_group": "SPEC.md §15.4.1 — a group of seven PIDs, and a group left open past the end of the list, are both answered ok",
     "obd_ignores_group_minimum": "SPEC.md §15.4.2 — every group is transmitted every pass whatever minimum interval it was given",
     "obd_splits_groups": "SPEC.md §15.4.1 — bit 7 is parsed and answered ok, then the group's PIDs are scheduled individually: half the rate the client asked for, with nothing on the wire to say so",
-    # The two below are SCENARIO seeds, not matrix faults: neither violates a
+    # The three below are SCENARIO seeds, not matrix faults: none violates a
     # rule any single check can catch on its own. The first is a CONFORMING
     # car whose polled PID nothing answers (§15.4 makes that gap legal, so the
     # claim under test is that obd.poll_and_flag does NOT fail it); the second
     # only means anything stacked on the first, where the diagnostic re-probe
-    # it refuses MUST turn the indeterminate skip into a failure. See
-    # harness/selftest.py's targeted-scenario section.
+    # it refuses MUST turn the indeterminate skip into a failure. The third is
+    # a conforming device that is simply fast. See harness/selftest.py's
+    # targeted-scenario section.
     "obd_pid_never_answers": "a car that answers every probe and never the polled PID — legal silence (SPEC.md §15.4), which no check may Fail",
     "obd_reprobe_refused": "SPEC.md §15.2 — the first OBD_INFO of a connection answers ok and every later one is refused bad_params",
+    "answers_before_the_next_write": "a device that answers inside its write handler — conforming, and quick enough that no client can pipeline against it (SPEC.md §9), which no check may Fail",
 }
 
 
@@ -1209,6 +1211,17 @@ class LoopbackTransport(Transport):
         late = (self._late_armed and len(request) == 2
                 and request[0] == refdec.OPCODE["TIME_SYNC"])
         response = self._corrupt_response(bytearray(response), request)
+        if "answers_before_the_next_write" in self.faults:
+            # SPEC.md §9's window, closed. This device sends its answer before
+            # its write handler returns, so nothing is ever owed and a client
+            # that writes two requests back to back has the first answered in
+            # between -- which is a device behaving well, not a defect, and the
+            # reason `control.busy_when_outstanding` Observes rather than
+            # verdicts. Delivered synchronously rather than on a zero delay so
+            # the scenario is decided by the code path and not by which task
+            # the loop happens to run first.
+            self._deliver_control(bytes(response))
+            return
         self._owed += 1
         asyncio.create_task(self._answer(bytes(response), late=late))
 
