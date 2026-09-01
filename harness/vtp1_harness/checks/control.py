@@ -263,8 +263,17 @@ async def control_busy_when_outstanding(s):
     # of this check leaves a device that dropped the first response holding a
     # slot for the rest of the connection -- failing here, correctly, and then
     # failing `can.table_full` for a reason nothing in that report can explain.
-    if s.has("can") and second is not None and second.ok:
-        await _remove_busy_probe(s, c)
+    #
+    # `second is None` is here for the same reason, and is the harder half: a
+    # device that applied the request and answered nobody installed it just as
+    # surely, and left no answer to read that off. `pipelines_silently` is
+    # exactly that device, and without this it holds a slot that
+    # `can.table_full` counts a few checks later and fails on -- a second
+    # failure whose cause is nowhere in the report. The unsubscribe is the only way to find out and is
+    # worth the write: `unknown_subscription` back means nothing was installed,
+    # which is one of the two right answers rather than a finding.
+    if s.has("can") and (second is None or second.ok):
+        await _remove_busy_probe(s, c, installed=second is not None)
     if first_response is None:
         raise Fail("the first of two pipelined requests was never answered. A "
                    "device MUST respond to every request it applies")
@@ -341,12 +350,15 @@ async def control_busy_when_outstanding(s):
         response=second.raw.hex())
 
 
-async def _remove_busy_probe(s, c):
+async def _remove_busy_probe(s, c, installed=True):
     """Take back the subscription the pipelined request installed.
 
-    It is installed exactly when that request was answered `ok`, and against a
+    It is installed whenever that request was answered `ok`, and against a
     device that answered the first request first, `ok` was the right answer to
-    what was by then an ordinary conforming request. Nothing else removes it:
+    what was by then an ordinary conforming request. It may also be installed
+    where the request was answered by nobody, which is what `installed=False`
+    says: there the removal is a question rather than a tidy-up, and an
+    `unknown_subscription` is its answer. Nothing else removes it:
     `control.busy_not_applied` probes with an unsubscribe only where there was
     a refusal to contradict, and where there was none it does not write at all.
     A subscription left behind holds a slot for the rest of the connection, and
@@ -362,6 +374,13 @@ async def _remove_busy_probe(s, c):
     """
     removal = await c.unsubscribe_can(BUSY_PROBE_ID)
     if removal.ok:
+        return
+    if not installed and \
+            removal.status == refdec.STATUS_VALUE["unknown_subscription"]:
+        # The device never answered the pipelined request, so whether it
+        # applied it was never knowable from here. Nothing is installed, and
+        # that needs no note: the silence is what the check reports, and this
+        # write only ever existed to take back what silence may have left.
         return
     s.note(f"the subscription this harness pipelined was installed, "
            f"correctly, and the unsubscribe taking it back was answered "
