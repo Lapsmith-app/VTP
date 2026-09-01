@@ -626,7 +626,8 @@ async def _prompt_device_problems():
                 key for key in transport.device._subscriptions
                 if key[0] == control_checks.BUSY_PROBE_ID))
 
-    runner = Runner(transport, observe_s=OBSERVE_SECONDS, on_result=on_result)
+    runner = Runner(transport, observe_s=OBSERVE_SECONDS,
+                    reconnect=False, on_result=on_result)
     report = await runner.run(target)
 
     expected = {"control.busy_when_outstanding": Status.OBSERVE,
