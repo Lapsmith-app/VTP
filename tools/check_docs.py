@@ -94,8 +94,12 @@ def check_references(problems):
 
 def check_counts(problems):
     files = sorted(VECTORS.glob("*.json"))
-    actual_cases = sum(len(json.loads(p.read_text())["cases"]) for p in files)
-    actual_files = len(files)
+    cases = [c for p in files for c in json.loads(p.read_text())["cases"]]
+    actual_cases = len(cases)
+    # The record TYPES, not the files that hold them. Counting files made the
+    # claim readable and false: ten files carry thirteen records, because a
+    # file is a subject -- monitor, obd -- and a record is a struct.
+    actual_records = len({c["record"] for c in cases})
     actual_producers = len(json.loads(
         (ROOT / "conformance" / "encoders.json").read_text())["cases"])
 
@@ -114,11 +118,12 @@ def check_counts(problems):
                 continue
             for cases, records in COUNT.findall(line):
                 seen = True
-                if (int(cases), int(records)) != (actual_cases, actual_files):
+                if (int(cases), int(records)) != (actual_cases,
+                                                  actual_records):
                     problems.append(
                         f"{name}:{n}: claims {cases} vectors across {records} "
                         f"record types; the corpus holds {actual_cases} across "
-                        f"{actual_files}")
+                        f"{actual_records}")
             for stated in PRODUCERS.findall(line):
                 if int(stated) != actual_producers:
                     problems.append(

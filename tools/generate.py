@@ -940,7 +940,13 @@ def case(schema, record, name, values, desc, *, extra=b"", reject=None, note=Non
 def _reserved_case(schema, record, field, value):
     """The producer input and the bytes it MUST produce, for one field."""
     if record == "gps_fix":
-        clean = dict(seq=1, validity=0, ext_count=0)
+        # fix_type is 3, not the zero a default would give: the dirty validity
+        # value sets every assigned bit, p_dop and num_sv included, and
+        # SPEC.md 5.2 scopes both to the solution fix_type names -- neither
+        # belongs on a fix_type of `none`. A baseline the encoder must refuse
+        # for another reason tests nothing about the reserved bits, exactly as
+        # for `info` below.
+        clean = dict(seq=1, validity=0, ext_count=0, fix_type=3)
         return ({"fix": dict(clean, **{field: value})},
                 encode(schema, "gps_fix", dict(clean, **{field: value})))
     if record == "can_header":
@@ -1155,6 +1161,79 @@ def vectors(schema):
              "and MUST NOT fall back to 3D.",
              note="Falling back to a plausible default is the sentinel mistake in a "
                   "different costume."),
+        # SPEC.md 5.2 -- num_sv counts satellites used in the solution
+        # fix_type NAMES, and p_dop describes a position's geometry. The two
+        # fields are adjacent and their bits are not a pair: a time-only
+        # solution is computed from real satellites and has no position
+        # geometry at all. The three cases below are the ordinary state of a
+        # u-blox receiver in the first half-minute of a cold start, which is
+        # the state the wording used to leave a device to guess at.
+        case(schema, "gps_fix", "time-only-fix-with-satellites",
+             dict(nominal, seq=14,
+                  validity=V["t_utc"] | V["t_utc_resolved"] | V["num_sv"],
+                  fix_type=5, num_sv=6, fix_flags=0b0001_1000),
+             "A time-only solution part-way through a cold start: t_utc and "
+             "num_sv valid, no position, p_dop absent. SPEC.md 5.2 -- num_sv "
+             "counts the satellites used in the solution fix_type names, so "
+             "six satellites is a measurement here and a decoder MUST report "
+             "it rather than absent.",
+             note="The wording this settles said 'the solution' while 5 opens "
+                  "by scoping the record to a position solution, so a device "
+                  "could read the same field two ways and no payload "
+                  "disagreed. Reported by the first firmware implementation."),
+        case(schema, "gps_fix", "p-dop-on-a-time-only-fix",
+             dict(nominal, seq=15,
+                  validity=V["t_utc"] | V["num_sv"] | V["p_dop"],
+                  p_dop=140, fix_type=5, num_sv=6, fix_flags=0b0001_1000),
+             "A dilution of precision for a position the same fix says it "
+             "does not have: a device-side violation of SPEC.md 5.2. The "
+             "bytes are well-formed, so a receiver MUST decode them and "
+             "SHOULD flag the contradiction -- and MUST NOT read the PDOP as "
+             "evidence that a position exists after all.",
+             refused_by="gps-p-dop-on-a-time-only-fix",
+             no_roundtrip=True),
+        case(schema, "gps_fix", "position-on-a-time-only-fix",
+             dict(nominal, seq=17,
+                  validity=V["t_utc"] | V["position"] | V["num_sv"],
+                  fix_type=5, num_sv=6, fix_flags=0b0001_1000),
+             "A position beside a fix_type that says there is none: a "
+             "device-side violation of SPEC.md 5.2. A receiver MUST decode "
+             "the fix and SHOULD flag it, and MUST NOT pick a winner between "
+             "the two on the device's behalf.",
+             refused_by="gps-position-on-a-time-only-fix",
+             no_roundtrip=True),
+        case(schema, "gps_fix", "num-sv-with-no-solution",
+             dict(nominal, seq=16, validity=V["num_sv"],
+                  fix_type=0, num_sv=9, fix_flags=0),
+             "num_sv valid beside a fix_type of none: a device-side violation "
+             "of SPEC.md 5.2, since no solution was reached for a satellite "
+             "to have been used in. A receiver MUST decode the fix and SHOULD "
+             "flag it.",
+             refused_by="gps-num-sv-with-no-solution",
+             no_roundtrip=True,
+             note="This is the count of satellites TRACKED wearing the name "
+                  "of the count of satellites USED, which is a plausible "
+                  "wrong value: a client shows nine satellites for a receiver "
+                  "that has solved nothing. VTP/1 carries no field for the "
+                  "tracked count."),
+        case(schema, "gps_fix", "p-dop-without-a-position",
+             dict(nominal, seq=18, validity=V["t_utc"] | V["p_dop"],
+                  p_dop=140, fix_type=3, fix_flags=0),
+             "A PDOP with the position bit clear, under a fix_type that does "
+             "name a position solution: the same SPEC.md 5.2 violation as the "
+             "time-only case, reached without the fix_type saying so. The "
+             "rule is about the position the record carries, not only about "
+             "the fix_type it names.",
+             refused_by="gps-p-dop-without-a-position",
+             no_roundtrip=True),
+        case(schema, "gps_fix", "position-with-no-solution",
+             dict(nominal, seq=19, validity=V["position"], fix_type=0,
+                  fix_flags=0),
+             "A valid position beside a fix_type of none: SPEC.md 5.2's "
+             "position rule reached through the other enum member it names. "
+             "A receiver MUST decode the fix and SHOULD flag it.",
+             refused_by="gps-position-with-no-solution",
+             no_roundtrip=True),
         # SPEC.md 5.3 -- the two RTK bits are exclusive, and either implies
         # differential. A device MUST NOT emit either combination, and the
         # reference ENCODER refuses both (conformance/encoders.json). A
@@ -2790,15 +2869,20 @@ def vectors(schema):
         {"name": "gps-latitude-beyond-the-pole",
          "record": "gps_fix", "must_refuse": True, "vector": "latitude-beyond-the-pole",
          "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position "
-                 "bit set so the range rule applies.",
+                 "bit set so the range rule applies. fix_type is 3 for the "
+                 "reason `info` names below: a position bit beside a "
+                 "fix_type of `none` is refused under SPEC.md 5.2, and a "
+                 "case refused for another reason tests nothing about the "
+                 "range.",
          "input": {"fix": dict(seq=0, validity=V["position"], lat=910_000_000,
-                               lon=0, ext_count=0)}},
+                               lon=0, fix_type=3, ext_count=0)}},
         {"name": "gps-longitude-beyond-the-antimeridian",
          "record": "gps_fix", "must_refuse": True, "vector": "longitude-beyond-the-antimeridian",
          "desc": "SPEC.md 5.4 -- a longitude of 181 degrees, with the position "
-                 "bit set so the range rule applies.",
+                 "bit set so the range rule applies, and a fix_type of 3 so "
+                 "SPEC.md 5.2 is not what refuses it.",
          "input": {"fix": dict(seq=0, validity=V["position"], lat=0,
-                               lon=1_810_000_000, ext_count=0)}},
+                               lon=1_810_000_000, fix_type=3, ext_count=0)}},
         {"name": "gps-heading-at-360",
          "record": "gps_fix", "must_refuse": True, "vector": "heading-at-360",
          "desc": "SPEC.md 5.4 -- a heading of exactly 360 degrees, which the "
@@ -2817,6 +2901,82 @@ def vectors(schema):
                  "corrected one, so the bit is implied and not optional.",
          "input": {"fix": dict(seq=0, validity=0, fix_flags=0b0000_0010,
                                ext_count=0)}},
+        {"name": "gps-p-dop-on-a-time-only-fix",
+         "record": "gps_fix", "must_refuse": True,
+         "vector": "p-dop-on-a-time-only-fix",
+         "desc": "SPEC.md 5.2 -- a PDOP beside a fix_type of time_only. "
+                 "Dilution of precision is a property of a position's "
+                 "geometry, and this fix reports no position.",
+         "input": {"fix": dict(seq=0, validity=V["p_dop"], p_dop=140,
+                               fix_type=5, ext_count=0)}},
+        {"name": "gps-position-on-a-time-only-fix",
+         "record": "gps_fix", "must_refuse": True,
+         "vector": "position-on-a-time-only-fix",
+         "desc": "SPEC.md 5.2 -- a valid position beside a fix_type of "
+                 "time_only, which names no position solution. The record "
+                 "would say both, and nothing on the wire says which half "
+                 "is the defect.",
+         "input": {"fix": dict(seq=0, validity=V["position"], lat=515_074_000,
+                               lon=-1_397_000, fix_type=5, ext_count=0)}},
+        {"name": "gps-num-sv-with-no-solution",
+         "record": "gps_fix", "must_refuse": True,
+         "vector": "num-sv-with-no-solution",
+         "desc": "SPEC.md 5.2 -- a satellite count beside a fix_type of "
+                 "none. num_sv counts what the reported solution used, and "
+                 "none names no solution; the tracked count has no field "
+                 "here and MUST NOT borrow this one.",
+         "input": {"fix": dict(seq=0, validity=V["num_sv"], num_sv=9,
+                               fix_type=0, ext_count=0)}},
+        {"name": "gps-p-dop-without-a-position",
+         "record": "gps_fix", "must_refuse": True,
+         "vector": "p-dop-without-a-position",
+         "desc": "SPEC.md 5.2 -- a PDOP with the position bit clear under a "
+                 "positional fix_type. Separate from the time-only refusal "
+                 "so an encoder testing only fix_type fails one and passes "
+                 "the other.",
+         "input": {"fix": dict(seq=0, validity=V["p_dop"], p_dop=140,
+                               fix_type=3, ext_count=0)}},
+        {"name": "gps-position-with-no-solution",
+         "record": "gps_fix", "must_refuse": True,
+         "vector": "position-with-no-solution",
+         "desc": "SPEC.md 5.2 -- a valid position beside a fix_type of none. "
+                 "Separate from the time_only refusal so an encoder "
+                 "checking one enum member does not pass for the other.",
+         "input": {"fix": dict(seq=0, validity=V["position"],
+                               lat=515_074_000, lon=-1_397_000, fix_type=0,
+                               ext_count=0)}},
+        # ...and the states SPEC.md 5.2 makes legal, which no refusal can
+        # assert. An encoder that gates num_sv on a position -- the reading
+        # this specification rejected -- refuses both of these and passes
+        # every must_refuse case in the file.
+        {"name": "gps-time-only-carries-num-sv",
+         "record": "gps_fix", "must_refuse": False,
+         "desc": "SPEC.md 5.2 -- a time-only solution with six satellites in "
+                 "it. The count is a measurement of a real thing and the "
+                 "encoder MUST emit it: withholding num_sv because the fix "
+                 "carries no position is the reading this section closed.",
+         "input": {"fix": dict(seq=3, validity=V["t_utc"] | V["t_utc_resolved"]
+                               | V["num_sv"], t_device=123_456_789,
+                               t_utc=1_766_000_000_000, fix_type=5, num_sv=6,
+                               fix_flags=0b0001_1000, ext_count=0)},
+         "expect_hex": encode(schema, "gps_fix", dict(
+             seq=3, validity=V["t_utc"] | V["t_utc_resolved"] | V["num_sv"],
+             t_device=123_456_789, t_utc=1_766_000_000_000, fix_type=5,
+             num_sv=6, fix_flags=0b0001_1000, ext_count=0)).hex()},
+        {"name": "gps-dead-reckon-counts-zero-satellites",
+         "record": "gps_fix", "must_refuse": False,
+         "desc": "SPEC.md 5.2 -- a dead-reckoning solution that used no "
+                 "satellites, with bit 11 set and the field zero. A set bit "
+                 "beside a zero is a measurement of zero (5.1), and an "
+                 "encoder that treats zero as absence normalises the bit "
+                 "away and fails here.",
+         "input": {"fix": dict(seq=4, validity=V["position"] | V["num_sv"],
+                               lat=515_074_000, lon=-1_397_000, fix_type=1,
+                               num_sv=0, fix_flags=0, ext_count=0)},
+         "expect_hex": encode(schema, "gps_fix", dict(
+             seq=4, validity=V["position"] | V["num_sv"], lat=515_074_000,
+             lon=-1_397_000, fix_type=1, num_sv=0, fix_flags=0,
+             ext_count=0)).hex()},
         {"name": "gps-ext-count-disagrees",
          "record": "gps_fix", "must_refuse": True, "structural": True,
          "desc": "SPEC.md 5.5 -- three extensions declared, none supplied.",

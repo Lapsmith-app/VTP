@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Check that no existing conformance vector has changed meaning.
+"""Check that no existing conformance case has changed meaning.
+
+Covers both corpora: the decode vectors in `conformance/vectors/` and the
+producer cases in `conformance/encoders.json`, which make the same kind of
+promise about what an encoder must refuse.
 
 SPEC.md §12 makes a promise: "A minor version MAY add cases and MUST NOT
 modify or remove an existing case. A change that alters the expected decode of
@@ -33,6 +37,7 @@ import argparse, hashlib, json, pathlib, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 VECTORS = ROOT / "conformance" / "vectors"
+PRODUCERS = ROOT / "conformance" / "encoders.json"
 BASELINE = ROOT / "conformance" / "baseline.json"
 
 # Everything that decides what an implementation must DO. `desc` and `note` are
@@ -42,9 +47,18 @@ SEMANTIC = ("record", "hex", "expect", "must_reject", "expect_absent",
             "expect_roundtrip_hex", "expect_scaled", "canonical",
             "no_roundtrip")
 
+# The same idea for the producer corpus, whose cases say what an encoder must
+# refuse and what it must emit. They were baselined by nothing until a change
+# to the gps_fix reserved-bits baseline altered two of them: the generator, the
+# cases and both references are regenerated together, so they agreed about the
+# new answer and every check stayed green -- exactly the failure this file
+# exists to prevent for decode vectors.
+PRODUCER_SEMANTIC = ("record", "must_refuse", "structural", "vector", "input",
+                     "expect_hex")
 
-def digest(case):
-    payload = {k: case[k] for k in SEMANTIC if k in case}
+
+def digest(case, semantic=SEMANTIC):
+    payload = {k: case[k] for k in semantic if k in case}
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -52,13 +66,19 @@ def digest(case):
 
 def current():
     out = {}
+
+    def record(name, value):
+        if name in out:
+            sys.exit(f"duplicate case name {name!r}; names are the "
+                     f"baseline's keys and MUST be unique")
+        out[name] = value
+
     for path in sorted(VECTORS.glob("*.json")):
         for case in json.loads(path.read_text())["cases"]:
-            name = f"{path.stem}/{case['name']}"
-            if name in out:
-                sys.exit(f"duplicate case name {name!r}; names are the "
-                         f"baseline's keys and MUST be unique")
-            out[name] = digest(case)
+            record(f"{path.stem}/{case['name']}", digest(case))
+    for case in json.loads(PRODUCERS.read_text())["cases"]:
+        record(f"encoders/{case['name']}",
+               digest(case, PRODUCER_SEMANTIC))
     return out
 
 
@@ -94,7 +114,7 @@ def main():
 
     if changed or removed:
         for n in changed:
-            print(f"CHANGED: {n}: an existing vector now expects something "
+            print(f"CHANGED: {n}: an existing case now requires something "
                   f"different", file=sys.stderr)
         for n in removed:
             print(f"REMOVED: {n}", file=sys.stderr)

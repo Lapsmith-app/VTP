@@ -251,6 +251,83 @@ async def gps_fix_types(s):
         fix_types=seen, solution_epoch=epoch)
 
 
+@check(id="gps.solution_scoped_bits", section="5.2", phase="streams",
+       severity="MUST", requires=("gps",),
+       title="num_sv, p_dop and position agree with fix_type")
+async def gps_solution_scoped_bits(s):
+    """SPEC.md 5.2 -- the three combinations a host can prove from a payload.
+
+    Each is a well-formed fix, so the decode corpus requires a receiver to
+    accept it and the reference encoders refuse to produce it. Neither reaches
+    a device that emits one anyway, which is what this is for. The rule these
+    sit under -- that a device holding the count reports it on a time-only fix
+    -- is an omission and cannot be judged from a stream; `gps.num_sv_scope`
+    below reports it instead.
+    """
+    _log(s, "gps")
+    good, _ = _decoded(s, "gps")
+    known = refdec.enum_values("fix_type")
+    none = next((v for v, n in known.items() if n == "none"), None)
+    positionless = {v for v, n in known.items() if n in ("none", "time_only")}
+    num_sv = 1 << refdec.bit("gps_validity", "num_sv")
+    p_dop = 1 << refdec.bit("gps_validity", "p_dop")
+    position = 1 << refdec.bit("gps_validity", "position")
+
+    for item, fix in good:
+        v, ft = fix["validity"], fix["fix_type"]
+        name = known.get(ft, f"unknown({ft})")
+        if v & p_dop and not v & position:
+            raise Fail(
+                f"p_dop is valid on a fix carrying no position (fix_type "
+                f"{name}). §5.2: dilution of precision describes a position's "
+                f"geometry, and this fix has none for it to describe",
+                payload=item.payload.hex())
+        if v & position and ft in positionless:
+            raise Fail(
+                f"the position bit is set on a fix_type of {name}, which "
+                f"names no position solution. §5.2: the record would say "
+                f"both, and nothing on the wire says which half is the defect",
+                payload=item.payload.hex())
+        if v & num_sv and ft == none:
+            raise Fail(
+                f"num_sv is valid beside a fix_type of none. §5.2: no "
+                f"solution was reached for a satellite to have been used in, "
+                f"and the count of satellites tracked has no field in VTP/1",
+                payload=item.payload.hex())
+
+
+@check(id="gps.num_sv_scope", section="5.2", phase="streams",
+       severity="OBSERVE", requires=("gps",),
+       title="num_sv is reported on the solutions that used satellites")
+async def gps_num_sv_scope(s):
+    """SPEC.md 5.2's other half, which no artefact in this repository can hold.
+
+    The corpus judges what a device EMITS, and the rule that changed firmware
+    behaviour is about what it WITHHOLDS: a satellite count kept back because
+    the fix carries no position. An encoder cannot refuse an omission and
+    produce.py cannot see one, so a device that keeps bit 11 clear through
+    every time-only fix passes everything else here. It is reported rather
+    than failed, because a receiver with no count to give leaves exactly the
+    same trace from a host as one declining to pass it on.
+    """
+    _log(s, "gps")
+    good, _ = _decoded(s, "gps")
+    known = refdec.enum_values("fix_type")
+    num_sv = 1 << refdec.bit("gps_validity", "num_sv")
+
+    time_only = [f for _, f in good if known.get(f["fix_type"]) == "time_only"]
+    counted = sum(1 for f in time_only if f["validity"] & num_sv)
+    if time_only and not counted:
+        s.note(f"{len(time_only)} time-only fix(es) arrived and none carried "
+               f"num_sv. §5.2 scopes the count to the solution fix_type "
+               f"names, so a device holding it MUST report it here; a "
+               f"receiver with no count to give looks the same from a host, "
+               f"which is why this is not a failure.")
+    raise Observe(
+        f"{len(time_only)} time-only fix(es), {counted} carrying num_sv",
+        time_only=len(time_only), time_only_with_num_sv=counted)
+
+
 @check(id="can.header_reserved", section="6", phase="streams", severity="MUST",
        requires=("can",),
        title="can_header.reserved is zero")

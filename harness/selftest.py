@@ -89,6 +89,7 @@ CAUGHT_BY = {
     "stream_before_subscribe": "can.silent_until_asked",
     "caps_reserved_bits": "info.reserved_capabilities",
     "absent_field_nonzero": "gps.absent_fields_zero",
+    "gps_scope_bits_ignored": "gps.solution_scoped_bits",
     "clock_per_stream": "clock.one_clock",
     "clock_diverges": "clock.one_rate",
     "drops_a_response": ("control.time_sync",

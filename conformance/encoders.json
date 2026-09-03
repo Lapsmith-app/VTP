@@ -215,13 +215,14 @@
       "record": "gps_fix",
       "must_refuse": true,
       "vector": "latitude-beyond-the-pole",
-      "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position bit set so the range rule applies.",
+      "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position bit set so the range rule applies. fix_type is 3 for the reason `info` names below: a position bit beside a fix_type of `none` is refused under SPEC.md 5.2, and a case refused for another reason tests nothing about the range.",
       "input": {
         "fix": {
           "seq": 0,
           "validity": 4,
           "lat": 910000000,
           "lon": 0,
+          "fix_type": 3,
           "ext_count": 0
         }
       }
@@ -231,13 +232,14 @@
       "record": "gps_fix",
       "must_refuse": true,
       "vector": "longitude-beyond-the-antimeridian",
-      "desc": "SPEC.md 5.4 -- a longitude of 181 degrees, with the position bit set so the range rule applies.",
+      "desc": "SPEC.md 5.4 -- a longitude of 181 degrees, with the position bit set so the range rule applies, and a fix_type of 3 so SPEC.md 5.2 is not what refuses it.",
       "input": {
         "fix": {
           "seq": 0,
           "validity": 4,
           "lat": 0,
           "lon": 1810000000,
+          "fix_type": 3,
           "ext_count": 0
         }
       }
@@ -286,6 +288,126 @@
           "ext_count": 0
         }
       }
+    },
+    {
+      "name": "gps-p-dop-on-a-time-only-fix",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "vector": "p-dop-on-a-time-only-fix",
+      "desc": "SPEC.md 5.2 -- a PDOP beside a fix_type of time_only. Dilution of precision is a property of a position's geometry, and this fix reports no position.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 1024,
+          "p_dop": 140,
+          "fix_type": 5,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-position-on-a-time-only-fix",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "vector": "position-on-a-time-only-fix",
+      "desc": "SPEC.md 5.2 -- a valid position beside a fix_type of time_only, which names no position solution. The record would say both, and nothing on the wire says which half is the defect.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 4,
+          "lat": 515074000,
+          "lon": -1397000,
+          "fix_type": 5,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-num-sv-with-no-solution",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "vector": "num-sv-with-no-solution",
+      "desc": "SPEC.md 5.2 -- a satellite count beside a fix_type of none. num_sv counts what the reported solution used, and none names no solution; the tracked count has no field here and MUST NOT borrow this one.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 2048,
+          "num_sv": 9,
+          "fix_type": 0,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-p-dop-without-a-position",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "vector": "p-dop-without-a-position",
+      "desc": "SPEC.md 5.2 -- a PDOP with the position bit clear under a positional fix_type. Separate from the time-only refusal so an encoder testing only fix_type fails one and passes the other.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 1024,
+          "p_dop": 140,
+          "fix_type": 3,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-position-with-no-solution",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "vector": "position-with-no-solution",
+      "desc": "SPEC.md 5.2 -- a valid position beside a fix_type of none. Separate from the time_only refusal so an encoder checking one enum member does not pass for the other.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 4,
+          "lat": 515074000,
+          "lon": -1397000,
+          "fix_type": 0,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-time-only-carries-num-sv",
+      "record": "gps_fix",
+      "must_refuse": false,
+      "desc": "SPEC.md 5.2 -- a time-only solution with six satellites in it. The count is a measurement of a real thing and the encoder MUST emit it: withholding num_sv because the fix carries no position is the reading this section closed.",
+      "input": {
+        "fix": {
+          "seq": 3,
+          "validity": 2051,
+          "t_device": 123456789,
+          "t_utc": 1766000000000,
+          "fix_type": 5,
+          "num_sv": 6,
+          "fix_flags": 24,
+          "ext_count": 0
+        }
+      },
+      "expect_hex": "030000000308000015cd5b0700000000007ccd2d9b0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005061800"
+    },
+    {
+      "name": "gps-dead-reckon-counts-zero-satellites",
+      "record": "gps_fix",
+      "must_refuse": false,
+      "desc": "SPEC.md 5.2 -- a dead-reckoning solution that used no satellites, with bit 11 set and the field zero. A set bit beside a zero is a measurement of zero (5.1), and an encoder that treats zero as absence normalises the bit away and fails here.",
+      "input": {
+        "fix": {
+          "seq": 4,
+          "validity": 2052,
+          "lat": 515074000,
+          "lon": -1397000,
+          "fix_type": 1,
+          "num_sv": 0,
+          "fix_flags": 0,
+          "ext_count": 0
+        }
+      },
+      "expect_hex": "040000000408000000000000000000000000000000000000d067b31ef8aeeaff000000000000000000000000000000000000000000000000000000000000000000000000000001000000"
     },
     {
       "name": "gps-ext-count-disagrees",
@@ -1067,10 +1189,11 @@
         "fix": {
           "seq": 1,
           "validity": 2147487743,
-          "ext_count": 0
+          "ext_count": 0,
+          "fix_type": 3
         }
       },
-      "expect_hex": "01000000ff0f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      "expect_hex": "01000000ff0f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000"
     },
     {
       "name": "reserved-bits-gps-fix-fix-flags",
@@ -1082,10 +1205,11 @@
           "seq": 1,
           "validity": 0,
           "ext_count": 0,
+          "fix_type": 3,
           "fix_flags": 157
         }
       },
-      "expect_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001d00"
+      "expect_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003001d00"
     },
     {
       "name": "reserved-bits-can-header-flags",

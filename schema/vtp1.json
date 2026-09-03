@@ -127,7 +127,7 @@
         {
           "value": 0,
           "name": "none",
-          "desc": "No position solution"
+          "desc": "No solution: no position, and no time solution being computed now"
         },
         {
           "value": 1,
@@ -377,11 +377,13 @@
         },
         {
           "bit": 10,
-          "name": "p_dop"
+          "name": "p_dop",
+          "desc": "Clear on a fix reporting no position (SPEC.md 5.2)"
         },
         {
           "bit": 11,
-          "name": "num_sv"
+          "name": "num_sv",
+          "desc": "The device has a satellite count for the solution fix_type names; zero is a count (SPEC.md 5.2)"
         }
       ],
       "reserved_from": 12,
@@ -712,7 +714,7 @@
       "access": "notify",
       "extensible": true,
       "validity": "gps_validity",
-      "desc": "One complete position solution. Never split, never paired, never packed.",
+      "desc": "One complete GNSS solution. Never split, never paired, never packed.",
       "fields": [
         {
           "name": "seq",
@@ -861,7 +863,7 @@
           "type": "u16",
           "scale": 0.01,
           "valid_bit": "p_dop",
-          "desc": "Position dilution of precision"
+          "desc": "Position dilution of precision; absent on a fix reporting no position (SPEC.md 5.2)"
         },
         {
           "name": "fix_type",
@@ -876,7 +878,7 @@
           "size": 1,
           "type": "u8",
           "valid_bit": "num_sv",
-          "desc": "Satellites used in the solution"
+          "desc": "Satellites used in the solution fix_type names, positional or not (SPEC.md 5.2)"
         },
         {
           "name": "fix_flags",

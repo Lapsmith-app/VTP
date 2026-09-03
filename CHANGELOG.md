@@ -121,6 +121,95 @@ And three that were wrong rather than harmful:
   is the first *downward* override in the tree, which is why nothing had
   surfaced it.
 
+
+### §5.2: `num_sv` counts the solution `fix_type` names, and `p_dop` a position
+
+Reported by the first VTP/1 device firmware, against this repository at
+`7eeaf56`. Not a decode disagreement — no payload shows it. It is an ambiguity
+a device has to resolve before it can emit a fix at all, and §5 did not resolve
+it.
+
+`num_sv` was described as "Satellites used in the solution" while §5 opens by
+scoping the record to "exactly one position solution", so on a `time_only` fix
+the document supported two readings and they disagreed. §5.1 leaves no third
+state: the bit is set and the field is a measurement, or it is clear and the
+field is absent. Two conforming devices reported one receiver differently, and
+an absent `num_sv` meant "no satellites contributed" under one reading and
+"this device declines to count them without a position" under the other. It is
+not hypothetical: a u-blox MAX-M10S reports `fixType = 5` with a populated
+`numSV` for most of the first thirty seconds of every cold start, so every
+device built on such a part meets this on the way to its first fix.
+
+**`num_sv` counts the satellites used in the solution `fix_type` names**, which
+is not always a position solution. Bit 11 answers whether the device has that
+count and nothing else, so a device holding it MUST report it on a `time_only`
+fix — withholding it because the fix carries no position is not conforming. A
+`fix_type` of `none` names no solution at all, so bit 11 is clear there: the
+count of satellites *tracked* does not get to borrow the name of the count
+*used*, and VTP/1 has no field for the tracked count.
+
+**`p_dop` describes the geometry of a position solution**, so bit 10 is clear
+on a fix reporting no position. That was settled only by the adjective in the
+field's description; it is now a requirement, and the pair of bits is stated to
+be a pair only by adjacency.
+
+**A `fix_type` of `none` or `time_only` reports no position**, so the
+`position` bit is clear on such a fix. That was the premise the two rules above
+rest on and it was nowhere stated, so a record could name no position solution
+and carry a position, leaving a client to choose between the halves of one
+record with nothing on the wire saying which was the defect. §5's opening
+sentence and the `gps_fix` description said every notification carries "one
+position solution", which is the reading the report came from; both now say one
+GNSS solution, as does §1.2's definition of a fix — the unit `dropped` counts,
+which had quietly excluded the solutions this section is about.
+
+`fix_type = none` had two meanings and the rules above need one. The enum said
+"no position solution" while §5.2 leans on "no solution at all"; it now names
+both — no position and no timing solution being computed. `t_utc` is
+deliberately not constrained by it: a receiver that has acquired GNSS time
+keeps it when the solution providing it is lost, bit 0 says the timestamp came
+from a GNSS time solution rather than that one was computed for this fix, and
+a device losing its fix reports `none` and goes on reporting the time it
+holds.
+
+All three are device-side content rules, so a receiver decodes a fix that
+breaks one and surfaces it, as with the RTK flags in §5.3 — and MUST NOT read a
+`p_dop` beside an absent position as evidence that a position exists, or pick a
+winner between a position and a `fix_type` that names none.
+
+No wire change: no field, enum value, UUID or existing conformance vector
+moves, and the descriptions that changed are exempt from the compatibility
+baseline. Six vectors are added — a time-only fix carrying six satellites,
+and five well-formed records a device MUST NOT emit: a PDOP on a time-only fix
+and another with the position bit simply clear, a `num_sv` beside
+`fix_type = none`, and a position beside each of the two fix types that name
+none. Each of the five is paired with an encoder refusal, and both reference
+encoders refuse them. Two producer cases go the other way, because no refusal
+can assert what is legal: a time-only fix carrying `num_sv`, and a
+`dead_reckon` fix whose satellite count is a measurement of zero. An encoder
+that gates `num_sv` on a position — the reading this section closed — passes
+every refusal in the file and fails both of those. The corpus is 169 vectors
+and 67 producer cases. Reasoning in the RATIONALE contradictions section.
+
+Two things that hold the change up rather than state it.
+`tools/check_baseline.py` now covers `conformance/encoders.json` as well as the decode vectors: the
+producer corpus makes the same promise about what an encoder must refuse and
+was protected by nothing, which this change noticed by altering two existing
+cases — the `gps_fix` reserved-bits baseline names a `fix_type` of 3, because a
+case the encoder must refuse for another reason tests nothing about the
+reserved bits. And `gps.solution_scoped_bits` in the harness reports what no
+vector can reach: a device that withholds `num_sv` through every time-only fix
+emits nothing wrong, so the corpus cannot see it, and the rule that changed
+firmware behaviour would otherwise be the one rule here with nothing watching
+it. `gps.solution_scoped_bits` fails a device on the three combinations a host
+can prove from a payload — a `p_dop` beside no position, a position beside a
+`fix_type` naming none, a `num_sv` beside `none` — and `gps.num_sv_scope`
+observes the fourth without failing it, because a receiver with no count to
+give leaves the same trace from a host as one withholding it. The seeded
+`gps_scope_bits_ignored` fault holds the failing half to account, as
+`harness/selftest.py` requires of every MUST it defines.
+
+
 ### Harness: §9's window cannot be measured from a host, and a check was verdicting as though it could
 
 Raised in review of the entry below, which is where the reproduction comes
