@@ -48,12 +48,17 @@ class Report:
 
 class Runner:
     def __init__(self, transport, *, adversarial=True, observe_s=12.0,
-                 can_ids=(), reconnect=True, on_result=None, on_phase=None):
+                 can_ids=(), reconnect=True, aiding_blob=None, on_result=None,
+                 on_phase=None):
         self.transport = transport
         self.adversarial = adversarial
         self.observe_s = observe_s
         self.can_ids = list(can_ids)
         self.reconnect = reconnect
+        # SPEC.md §14.6 -- the operator's own aiding, for a device that
+        # refuses anything the harness could invent. None means the synthetic
+        # pattern, which is what every check but aiding.transfer uses anyway.
+        self.aiding_blob = aiding_blob
         self.on_result = on_result or (lambda result: None)
         self.on_phase = on_phase or (lambda phase, note: None)
         self.checks = load_all()
@@ -61,6 +66,7 @@ class Runner:
     async def run(self, target):
         session = Session(self.transport, adversarial=self.adversarial)
         session.state["can_ids"] = self.can_ids
+        session.state["aiding_blob"] = self.aiding_blob
         report = Report(results=[], session=session, started=time.time())
         self._target = target
         began = time.monotonic()

@@ -384,7 +384,45 @@ FAULTS = {
     "obd_reprobe_refused": "SPEC.md §15.2 — the first OBD_INFO of a connection answers ok and every later one is refused bad_params",
     "answers_before_the_next_write": "a device that answers inside its write handler — conforming, and quick enough that no client can pipeline against it (SPEC.md §9), which no check may Fail",
     "host_callback_lands_late": "not the device: the host stack holds each control delivery a scheduler turn, so `t_recv` lands after the next write — which no check may read as the device still owing (SPEC.md §9)",
+    "aid_strict_receiver": "a receiver that takes only aiding in the format the device declared — SPEC.md §14.6 as a MUST NOT, which makes the harness's synthetic payload `rejected` and §14.4's `applied` reachable only with --aiding-blob",
 }
+
+
+# SPEC.md §14.6 — the MUST NOT, enforced. A device that reads this rule as
+# written cannot take the payload `checks/aiding.py::_payload` builds: it is
+# not aiding in the declared format, so `applied` is unreachable for it and
+# half of §14.4 goes untested. That is issue #52, and this is the device that
+# makes it reproducible here rather than only on somebody's bench.
+def _frames_as_ubx_mga(blob):
+    """Does `blob` frame as a concatenated sequence of UBX-MGA messages?
+
+    SPEC.md §14.1 makes the bytes opaque, so nothing here looks INSIDE a
+    payload: no msgId is checked against a list and no ordering is required.
+    What is checked is the declaration the device made -- every message frames,
+    every checksum agrees, every message is in the MGA class, and the blob ends
+    exactly on a frame boundary. A real receiver's gate is this shape.
+    """
+    i, n = 0, len(blob)
+    if n == 0:
+        return False
+    while i < n:
+        if n - i < 8 or blob[i] != 0xB5 or blob[i + 1] != 0x62:
+            return False
+        if blob[i + 2] != 0x13:                     # the UBX-MGA class
+            return False
+        length = int.from_bytes(blob[i + 4:i + 6], "little")
+        end = i + 6 + length + 2
+        if end > n:
+            return False
+        # The 8-bit Fletcher checksum UBX carries, over class through payload.
+        a = b = 0
+        for byte in blob[i + 2:i + 6 + length]:
+            a = (a + byte) & 0xFF
+            b = (b + a) & 0xFF
+        if (a, b) != (blob[end - 2], blob[end - 1]):
+            return False
+        i = end
+    return True
 
 
 class LoopbackTransport(Transport):
@@ -509,6 +547,12 @@ class LoopbackTransport(Transport):
         self.device = vtp_device.VtpDevice(mtu=self._mtu, **self._device_kwargs)
         self.device.set_negotiated_mtu(self._mtu)
         self.device.on_connect()
+        if "aid_strict_receiver" in self.faults:
+            # Not a defect: SPEC.md §14.6's "MUST NOT accept anything but
+            # aiding in the format it declared", modelled at the one place a
+            # transfer reaches the receiver. `apply_aiding` is documented as
+            # overridable for exactly this.
+            self.device.apply_aiding = _frames_as_ubx_mga
         if "obd_delivery_needs_subscription" in self.faults:
             # SPEC.md §15.5 -- the superseded draft, as a device would have
             # shipped it: the fallback is disabled and only table matches are

@@ -6,6 +6,7 @@ every role it declares, and print what it did.
 """
 import argparse
 import asyncio
+import pathlib
 import platform
 import sys
 
@@ -47,6 +48,14 @@ def build_parser():
                      help="a CAN identifier to subscribe to, hex or decimal; "
                           "repeatable. Needed only if the device does not "
                           "support masked subscriptions")
+    run.add_argument("--aiding-blob", metavar="PATH",
+                     help="send these bytes as the payload of the §14.4 "
+                          "transfer, instead of a synthetic pattern. §14.6 "
+                          "lets a device refuse anything that is not aiding "
+                          "in the format it declared, and one that does can "
+                          "never answer `applied` to bytes the harness "
+                          "invented. Build the file at run time -- a stale "
+                          "one is stale aiding")
     run.add_argument("--no-adversarial", action="store_true",
                      help="do not send malformed or out-of-range requests")
     run.add_argument("--no-reconnect", action="store_true",
@@ -86,6 +95,23 @@ def _parse_can_id(text):
         return int(text, 0)
     except ValueError:
         raise SystemExit(f"not a CAN identifier: {text!r}")
+
+
+def _read_aiding_blob(path):
+    """The bytes of `--aiding-blob`, or an exit that says why not.
+
+    Read before anything touches Bluetooth: a typo in the path is worth
+    finding now rather than after a scan, a connection and thirty checks.
+    """
+    try:
+        blob = pathlib.Path(path).read_bytes()
+    except OSError as exc:
+        raise SystemExit(f"could not read --aiding-blob {path}: {exc}")
+    if not blob:
+        raise SystemExit(f"--aiding-blob {path} is empty. A transfer of no "
+                         f"bytes is not a transfer, and SPEC.md §14.1 has "
+                         f"nothing for a device to apply")
+    return blob
 
 
 def _print_faults():
@@ -190,6 +216,9 @@ async def _main(args):
         _print_faults()
         return EXIT_OK
 
+    aiding_blob = (_read_aiding_blob(args.aiding_blob)
+                   if args.aiding_blob else None)
+
     if args.loopback:
         transport = LoopbackTransport(faults=args.fault)
         target = (await transport.scan(0))[0]
@@ -211,6 +240,7 @@ async def _main(args):
         observe_s=args.seconds,
         can_ids=[_parse_can_id(v) for v in args.can_id],
         reconnect=not args.no_reconnect,
+        aiding_blob=aiding_blob,
         on_result=console.result,
         on_phase=console.phase,
     )

@@ -20,6 +20,7 @@ import asyncio
 import pathlib
 import struct
 import sys
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -27,6 +28,7 @@ from vtp1_harness import refdec                             # noqa: E402
 sys.path.insert(0, str(refdec.ROOT / "reference" / "peripheral"))
 
 from vtp1_harness.checks import Status, load_all           # noqa: E402
+from vtp1_harness.checks import aiding as aiding_checks    # noqa: E402
 from vtp1_harness.checks import control as control_checks  # noqa: E402
 from vtp1_harness.runner import Runner                     # noqa: E402
 from vtp1_harness.transport import FAULTS, LoopbackTransport  # noqa: E402
@@ -254,9 +256,20 @@ ISOLATED = {"owes_until_confirmed", "pipelined_answered_bad_params"}
 #: still owing, and it was not (issue #48). The required verdicts are the same
 #: two, which is the point: what the report says must not turn on when the
 #: host got round to the callback.
+#: `aid_strict_receiver` is the third of that shape and the reason issue #52
+#: was filed. It is a CONFORMING device -- SPEC.md §14.6's "MUST NOT accept
+#: anything but aiding in the format it declared", read as written -- and what
+#: it exposes is a hole in this harness rather than a defect in itself: the
+#: payload `checks/aiding.py::_payload` invents is not aiding in any format, so
+#: `applied` and the `first_missing` assertion behind it were unreachable for
+#: every device strict enough to obey the rule. The three runs in the
+#: targeted-scenario section are the claim: without a blob the run must OBSERVE
+#: and fail nothing, with a real one `aiding.transfer` must PASS, and with a
+#: blob that is not aiding it must WARN rather than accuse the device.
 SCENARIO_FAULTS = {"obd_pid_never_answers", "obd_reprobe_refused",
                    "answers_before_the_next_write",
-                   "host_callback_lands_late"}
+                   "host_callback_lands_late",
+                   "aid_strict_receiver"}
 
 #: Only these faults are about state surviving a link drop, and only their runs
 #: need to pay for the reconnection.
@@ -296,12 +309,13 @@ def capabilities(profile):
     return word
 
 
-async def run(faults=(), reconnect=False, profile=None):
+async def run(faults=(), reconnect=False, profile=None, aiding_blob=None):
     device_kwargs = ({} if profile is None
                      else {"capabilities": capabilities(profile)})
     transport = LoopbackTransport(faults=faults, device_kwargs=device_kwargs)
     target = (await transport.scan(0))[0]
-    runner = Runner(transport, observe_s=OBSERVE_SECONDS, reconnect=reconnect)
+    runner = Runner(transport, observe_s=OBSERVE_SECONDS, reconnect=reconnect,
+                    aiding_blob=aiding_blob)
     return await runner.run(target)
 
 
@@ -704,6 +718,60 @@ PROMPT_SCENARIOS = (
 )
 
 
+def _ubx(msg_id, payload):
+    """One UBX message: sync, class, id, length, payload, Fletcher checksum.
+
+    Class is 0x13 -- UBX-MGA -- because that is the only class SPEC.md §14.1's
+    `ubx_mga` names, and a receiver enforcing §14.6 checks it.
+    """
+    body = bytes([0x13, msg_id]) + len(payload).to_bytes(2, "little") + payload
+    a = b = 0
+    for byte in body:
+        a = (a + byte) & 0xFF
+        b = (b + a) & 0xFF
+    return b"\xb5\x62" + body + bytes([a, b])
+
+
+def aiding_blob(repeat=12):
+    """Bytes that ARE aiding in the format the reference device declares.
+
+    Two ordinary MGA-INI messages, time and position, built here in about
+    twenty lines. That is the finding issue #52 arrived with and it is worth
+    keeping visible: `ubx_mga` sounds like it implies an AssistNow
+    subscription and for this purpose it does not -- §14.1 defines the format
+    as a concatenation of UBX-MGA messages and says nothing about where they
+    came from.
+
+    Only the FRAMING is load-bearing here: §14.1 makes the payloads opaque, so
+    the strict receiver walks the blob and never looks inside one. The
+    layouts are the real M10 ones anyway, because a fixture that claims to be
+    MGA-INI and is not would be the wrong thing to leave lying about.
+
+    Repeated until it spans several chunks, so the transfer that reaches
+    `applied` is a multi-chunk one; and built at run time, which is what
+    §14.6 asks of a client -- a time initialisation is as old as the file it
+    was kept in.
+    """
+    now = time.gmtime()
+    # UBX-MGA-INI-TIME_UTC: type 0x10, and 1 second of claimed accuracy, which
+    # is honest about a transfer whose own latency §14.6 warns about.
+    time_utc = struct.pack(
+        "<BBBbHBBBBBBIHHI",
+        0x10, 0x00, 0x00, 0x00,            # type, version, ref, leapSecs
+        now.tm_year, now.tm_mon, now.tm_mday,
+        now.tm_hour, now.tm_min, now.tm_sec, 0x00,
+        0,                                  # ns
+        1,                                  # tAccS: one second
+        0,                                  # reserved
+        0)                                  # tAccNs
+    # UBX-MGA-INI-POS_LLH: type 0x01. Silverstone, to 100 km -- an aiding
+    # position is a search hint, not a measurement (§14.6).
+    pos_llh = struct.pack("<BBHiiiI", 0x01, 0x00, 0,
+                          520_713_000, -10_207_000, 15_300, 10_000_000)
+    one = _ubx(0x40, time_utc) + _ubx(0x40, pos_llh)
+    return one * repeat
+
+
 async def _prompt_device_problems(faults, overlap_excluded):
     """A device too quick to pipeline against is not a device in violation.
 
@@ -801,6 +869,75 @@ async def _prompt_device_problems(faults, overlap_excluded):
     return problems
 
 
+def _strict_receiver_problems(synthetic, real, wrong):
+    """SPEC.md §14.6 conformance must not cost a device half of §14.4.
+
+    Three runs against the SAME conforming device -- one that takes only
+    aiding in the format it declared -- differing in what the client sent.
+
+    Without a blob, the harness's invented payload is refused and the run may
+    say so and nothing more: `rejected` is a §14.4 outcome and the device did
+    not break a rule. That is the state issue #52 reported, and this holds it
+    to observing rather than accusing.
+
+    With a real blob, `applied` is reached, and with it the `first_missing`
+    assertion that only lives on that branch. This is the whole point of the
+    option: a strict device used to get LESS of §14 tested than a lax one.
+
+    With a blob that is not aiding, the device refuses it correctly. The
+    operator's file and the device's receiver are both suspects and nothing on
+    this side of the link can separate them, so the required verdict is a
+    warning that names both -- never the MUST failure, which would blame a
+    conforming device for a stale download.
+    """
+    problems = []
+    cases = (
+        ("no blob", synthetic, Status.OBSERVE,
+         "a §14.6-conforming device refusing the synthetic payload is "
+         "reported, not failed"),
+        ("a real blob", real, Status.PASS,
+         "...and reaches §14.4's `applied` once --aiding-blob supplies "
+         "aiding it will take"),
+        ("a blob that is not aiding", wrong, Status.WARN,
+         "...and a supplied blob the receiver refuses is a warning naming "
+         "both suspects, not a verdict on the device"),
+    )
+    for label, report, want, headline in cases:
+        if report.aborted:
+            problems.append(f"the strict-receiver run with {label} aborted: "
+                            f"{report.aborted}")
+            continue
+        result = result_for(report, "aiding.transfer")
+        if result is None:
+            problems.append(f"strict receiver, {label}: aiding.transfer did "
+                            f"not run")
+            continue
+        if result.status is not want:
+            problems.append(
+                f"a device that takes only aiding in the format it declared "
+                f"(SPEC.md §14.6), sent {label}, was reported "
+                f"{result.status.value} by aiding.transfer where "
+                f"{want.value} was required: {result.message}")
+            continue
+        # The rest of the run is the other half of the claim. A device
+        # obeying §14.6 breaks no other rule, and neither does a client that
+        # brings its own bytes -- so anything else red here is this change
+        # having cost the run something, which the one-fault matrix cannot
+        # see because it only ever asserts that the NAMED check failed.
+        spread = sorted(r.check.id for r in
+                        report.failures + report.warnings + report.errors
+                        if r.check.id != "aiding.transfer")
+        if spread:
+            problems.append(
+                f"the strict-receiver run with {label} also reported "
+                f"{spread}; SPEC.md §14.6 is a rule this device obeys and "
+                f"every other check is about the transfer mechanics, which "
+                f"do not care what the bytes mean")
+            continue
+        print(f"  ok   {headline}")
+    return problems
+
+
 def _failed(problems):
     print("\nFAILED")
     for problem in problems:
@@ -843,6 +980,12 @@ async def main():
           for faults, overlap_excluded, _ in PROMPT_SCENARIOS),
         run(faults=["obd_pid_never_answers"]),
         run(faults=["obd_pid_never_answers", "obd_reprobe_refused"]),
+        run(faults=["aid_strict_receiver"]),
+        run(faults=["aid_strict_receiver"], aiding_blob=aiding_blob()),
+        # The harness's OWN payload, handed back through the option: bytes
+        # that are certainly not aiding, from an operator who thinks they are.
+        run(faults=["aid_strict_receiver"],
+            aiding_blob=aiding_checks._payload(600)),
     )
     cut = 1 + len(profiles)
     clean = started[0]
@@ -850,7 +993,8 @@ async def main():
     reports = started[cut:cut + len(ordered)]
     tail = started[cut + len(ordered):]
     prompts = tail[:len(PROMPT_SCENARIOS)]
-    quiet, stacked = tail[len(PROMPT_SCENARIOS):]
+    (quiet, stacked, strict_synthetic, strict_real,
+     strict_wrong) = tail[len(PROMPT_SCENARIOS):]
 
     print("A conforming device")
     counts = clean.counts
@@ -991,6 +1135,9 @@ async def main():
             f"message was: {result.message}")
     else:
         print("  ok   a refused diagnostic re-probe fails, naming the status")
+
+    problems += _strict_receiver_problems(strict_synthetic, strict_real,
+                                          strict_wrong)
 
     if problems:
         return _failed(problems)

@@ -198,6 +198,43 @@ format in a flags word gets wrong. The other half, that an extended
 subscription matches extended frames, is only exercised if the vehicle
 carries them.
 
+### Aiding needs bytes the receiver will take
+
+The §14 checks build their own payload — a byte pattern that is not all the
+same, so a misplaced chunk shows up. That is the right payload for almost all
+of them: chunk indexing, the CRC, a `begin` superseding an open transfer and an
+oversized transfer refused are all about the transfer mechanics, and none of
+them cares what the bytes mean.
+
+One check does. §14.6 says a device MUST NOT accept anything but aiding in the
+format it declared, and a device that enforces it refuses an invented payload
+by construction — so §14.4's `applied`, and the `first_missing` assertion that
+only exists on that branch, are unreachable without real aiding. The harness
+reports the refusal as the conforming answer it is and says what went untested;
+to reach the other half, bring your own bytes:
+
+```sh
+uv run vtp1-harness --aiding-blob assist.ubx
+```
+
+Only the §14.4 transfer uses it. Run once without it to confirm the device
+refuses a blob it should, once with it to confirm it applies one it should.
+
+Two things about the file. Build it at run time rather than keeping one around:
+a device applies a transfer at commit, not as it arrives, so a blob carrying
+time initialisation is already as old as the file plus the transfer, which is
+what §14.6 asks a client to account for. And a blob the device refuses is
+reported as a warning naming both suspects rather than a failure — either those
+bytes are not aiding the receiver will take or the device refuses one that is,
+and §14.1 makes them opaque to this harness, so it cannot tell you which.
+
+For `ubx_mga` this is a lower bar than it sounds. `UBX-MGA-INI-TIME_UTC` and
+`UBX-MGA-INI-POS_LLH` are ordinary assistance, their layouts are in the M10
+interface description, and a concatenation of the two is a valid blob under
+§14.1 — about forty lines to synthesise, no AssistNow subscription and no
+network. `harness/selftest.py::aiding_blob` builds one that way if you want a
+worked example.
+
 ### Adversarial requests
 
 By default the harness sends malformed control requests — truncated parameters,
@@ -257,9 +294,13 @@ the one that matters:
 - The exceptions are the **scenario seeds** (`selftest.SCENARIO_FAULTS`), which
   are not mistakes: a conforming car whose polled PID nothing answers, a device
   that answers inside its write handler, a host stack that holds a delivery a
-  scheduler turn. They exist to hold the harness to what it must *not* report,
-  and the targeted section of the selftest states the verdict each must
-  produce rather than naming a check that fails.
+  scheduler turn, a receiver that takes only aiding in the format it declared.
+  They exist to hold the harness to what it must *not* report, and the targeted
+  section of the selftest states the verdict each must produce rather than
+  naming a check that fails. The last of them is also the only seed that
+  exposed a hole in the harness rather than in a device: `aid_strict_receiver`
+  obeys §14.6, and §14.4's `applied` was unreachable for it until
+  `--aiding-blob` existed.
 - **No MUST or SHOULD may exist with no fault against it**, unless
   `selftest.NOT_SEEDED` says why none is possible. Without this half,
   `transport.FAULTS` decides what "detects every defect it claims" means, and
