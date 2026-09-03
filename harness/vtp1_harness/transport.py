@@ -298,6 +298,7 @@ FAULTS = {
     "stream_before_subscribe": "SPEC.md §9.1 — CAN frames arrive with no subscription installed",
     "caps_reserved_bits": "SPEC.md §4 — a reserved capability bit is set",
     "absent_field_nonzero": "SPEC.md §5.1 — a field whose validity bit is clear is not zero",
+    "gps_scope_bits_ignored": "SPEC.md §5.2 — a fix_type of time_only beside a valid position and p_dop",
     "clock_per_stream": "SPEC.md §8.1 — the streams are not on one clock",
     "clock_diverges": "SPEC.md §8.1 — the CAN clock runs at its own rate: it agrees with the others at connect and walks away from there",
     "drops_a_response": "SPEC.md §9 — a request is silently discarded rather than answered",
@@ -1769,6 +1770,17 @@ class LoopbackTransport(Transport):
             self._truncations = getattr(self, "_truncations", 0) + 1
             if self._truncations % 2 == 0:
                 del payload[-1:]
+        if "gps_scope_bits_ignored" in self.faults and stream == "gps":
+            # A device that reports the solution it reached and leaves the
+            # validity mask describing the one before it: fix_type says
+            # time_only while position and p_dop still claim a position and
+            # its geometry. The payload decodes perfectly -- the whole rule is
+            # in which bits may sit beside which fix_type -- so no vector run
+            # against this device catches it, and its own encoder would have
+            # refused to build it.
+            struct.pack_into("<B", payload,
+                             refdec.offset("gps_fix", "fix_type"),
+                             refdec.enum_value("fix_type", "time_only"))
         if "absent_field_nonzero" in self.faults and stream == "gps":
             # A value written into a field whose validity bit is clear: the
             # plausible wrong value SPEC.md §1.1 exists to prevent, and one no

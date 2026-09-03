@@ -75,7 +75,7 @@ it; the receiver MUST NOT paper over it.
 | **Indication** | An acknowledged GATT push. Control responses are indications (§9). |
 | **Record** | One fixed-size little-endian struct, as tabulated in this document. |
 | **Batch** | A header record followed by `count` further records, all inside one notification. |
-| **Fix, frame, sample** | One GNSS position solution, one CAN bus frame, one IMU sample: the item its stream carries and the unit `dropped` counts. |
+| **Fix, frame, sample** | One GNSS solution — positional or not (§5.2) — one CAN bus frame, one IMU sample: the item its stream carries and the unit `dropped` counts. |
 
 The characteristic named `gps` carries a solution from whatever constellations
 the receiver uses. The name is not a claim about GPS in particular.
@@ -397,11 +397,12 @@ conformance role covers both directions of the records it names
 
 ## 5. GPS characteristic — NOTIFY
 
-One notification carries exactly one position solution. There is no pairing
-between characteristics and no reassembly.
+One notification carries exactly one GNSS solution — a position solution
+where the receiver has one, and otherwise whatever solution `fix_type` names
+(§5.2). There is no pairing between characteristics and no reassembly.
 
 <!-- BEGIN GENERATED: gps_fix -->
-*One complete position solution. Never split, never paired, never packed.*
+*One complete GNSS solution. Never split, never paired, never packed.*
 
 Total: **74 bytes**. All fields little-endian.
 
@@ -423,9 +424,9 @@ Total: **74 bytes**. All fields little-endian.
 | 56 | 4 | `u32` | `h_acc` | `mm`; Horizontal position accuracy estimate, 1 sigma; valid when `validity` bit 7 (`h_acc`) is set |
 | 60 | 4 | `u32` | `v_acc` | `mm`; Vertical position accuracy estimate, 1 sigma; valid when `validity` bit 8 (`v_acc`) is set |
 | 64 | 4 | `u32` | `s_acc` | `mm/s`; Speed accuracy estimate, 1 sigma; valid when `validity` bit 9 (`s_acc`) is set |
-| 68 | 2 | `u16` | `p_dop` | scale 0.01; Position dilution of precision; valid when `validity` bit 10 (`p_dop`) is set |
+| 68 | 2 | `u16` | `p_dop` | scale 0.01; Position dilution of precision; absent on a fix reporting no position (SPEC.md 5.2); valid when `validity` bit 10 (`p_dop`) is set |
 | 70 | 1 | `u8` | `fix_type` | enum `fix_type` |
-| 71 | 1 | `u8` | `num_sv` | Satellites used in the solution; valid when `validity` bit 11 (`num_sv`) is set |
+| 71 | 1 | `u8` | `num_sv` | Satellites used in the solution fix_type names, positional or not (SPEC.md 5.2); valid when `validity` bit 11 (`num_sv`) is set |
 | 72 | 1 | `u8` | `fix_flags` | bitmask `fix_flags` |
 | 73 | 1 | `u8` | `ext_count` | Extension records following the base record |
 <!-- END GENERATED: gps_fix -->
@@ -478,8 +479,8 @@ whatever geoid model it carries; this specification does not name one.
 | 7 | `h_acc` | — |
 | 8 | `v_acc` | — |
 | 9 | `s_acc` | — |
-| 10 | `p_dop` | — |
-| 11 | `num_sv` | — |
+| 10 | `p_dop` | Clear on a fix reporting no position (SPEC.md 5.2) |
+| 11 | `num_sv` | The device has a satellite count for the solution fix_type names; zero is a count (SPEC.md 5.2) |
 | 12+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:gps_validity -->
 
@@ -497,7 +498,7 @@ measurement of zero. No field value anywhere in VTP/1 signals absence.
 <!-- BEGIN GENERATED: enum:fix_type -->
 | Value | Name | Meaning |
 | --- | --- | --- |
-| 0 | `none` | No position solution |
+| 0 | `none` | No solution: no position, and no time solution being computed now |
 | 1 | `dead_reckon` | Dead-reckoning solution only |
 | 2 | `fix_2d` | 2D position solution |
 | 3 | `fix_3d` | 3D position solution |
@@ -505,6 +506,54 @@ measurement of zero. No field value anywhere in VTP/1 signals absence.
 | 5 | `time_only` | Time solution only, no position |
 | *other* | *unknown* | MUST decode as unknown, never as a default |
 <!-- END GENERATED: enum:fix_type -->
+
+`fix_type` has no validity bit and is present on every fix. It is the only
+field that says which solution the receiver reached, and it says so on a fix
+carrying no position as much as on one carrying a position.
+
+**`num_sv` counts the satellites used in the solution `fix_type` names**, which
+is not always a position solution. Bit 11 answers whether the device has that
+count and nothing else; it is not a second statement about whether the record
+carries a position. A `time_only` solution is computed from real satellites, so
+a device holding the count MUST set bit 11 and report it — withholding
+`num_sv` because the fix carries no position is not conforming. A `fix_type` of
+`none` names no solution at all, so no satellite was used in one and a device
+MUST leave bit 11 clear: satellites tracked but unused are not what this field
+counts, and this specification carries no field that counts them.
+
+Zero is a measurement where the reported solution genuinely used no satellites
+— a `dead_reckon` fix — and a device holding that count sets bit 11 and writes
+zero. §5.1 keeps the two apart: absence is the bit's to signal, and no value of
+`num_sv` signals it.
+
+**A `fix_type` of `none` or `time_only` reports no position**, so a device
+MUST leave the `position` bit clear on such a fix. The two never disagree: a
+record naming no position solution and carrying a position leaves a client to
+choose between them, and nothing on the wire says which is the defect.
+
+`none` names no solution of any kind at this epoch — neither a position nor a
+timing solution — which is what makes bits 2, 10 and 11 clear there. It does
+**not** constrain `t_utc`. A receiver that has acquired GNSS time keeps it
+when the solution that provided it is lost, and bit 0 says the timestamp came
+from a GNSS time solution, not that one was computed for this fix. A device
+losing its fix therefore reports `none` and goes on reporting the time it
+holds; what distinguishes `time_only` is that the receiver is computing a
+timing solution now, which is also why `time_only` can carry `num_sv` and
+`none` cannot.
+
+**`p_dop` describes the geometry of a position solution**, so a device MUST
+leave bit 10 clear on a fix reporting no position: a `fix_type` of `none` or
+`time_only`, or any fix whose `position` bit is clear.
+
+The two fields are adjacent and their bits are not a pair. On a `time_only`
+fix, bit 11 carries a measurement and bit 10 is clear. Every rule in this
+subsection binds the device; a receiver MUST decode a fix that breaks one —
+the payload is well-formed — and SHOULD surface the violation as a device
+defect. It MUST NOT
+reject the fix, and MUST NOT read a `p_dop` beside an absent position as
+evidence that a position exists. The same holds for a position beside a
+`fix_type` that names none: a receiver decodes both and MUST NOT pick a winner
+on the device's behalf.
 
 ### 5.3 Fix flags
 

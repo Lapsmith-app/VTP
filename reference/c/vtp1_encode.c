@@ -77,6 +77,26 @@ int vtp_encode_gps_fix(const vtp_gps_fix_t *f,
         if (rtk == (VTP_FIX_FLAGS_RTK_FLOAT | VTP_FIX_FLAGS_RTK_FIXED)) return -1;
         if (rtk && !(f->fix_flags & VTP_FIX_FLAGS_DIFFERENTIAL)) return -1;
     }
+    /* SPEC.md 5.2 -- num_sv counts the satellites used in the solution
+     * fix_type NAMES, and p_dop describes a position's geometry. So the two
+     * bits do not move together: a time-only solution is computed from real
+     * satellites and has no position for a dilution of precision to describe,
+     * and a fix_type of `none` reached no solution for a satellite to have
+     * been used in. Publishing either is a plausible wrong value -- a PDOP
+     * a client reads as evidence of a position, or a tracked count wearing
+     * the name of a used one. */
+    if ((f->validity & VTP_GPS_VALIDITY_P_DOP)
+        && (f->fix_type == VTP_FIX_TYPE_NONE
+            || f->fix_type == VTP_FIX_TYPE_TIME_ONLY
+            || !(f->validity & VTP_GPS_VALIDITY_POSITION))) return -1;
+    if ((f->validity & VTP_GPS_VALIDITY_NUM_SV)
+        && f->fix_type == VTP_FIX_TYPE_NONE) return -1;
+    /* ...and the premise of the rule above is itself a rule: a fix_type
+     * naming no position solution beside a valid position leaves a client
+     * choosing between the two halves of one record. */
+    if ((f->validity & VTP_GPS_VALIDITY_POSITION)
+        && (f->fix_type == VTP_FIX_TYPE_NONE
+            || f->fix_type == VTP_FIX_TYPE_TIME_ONLY)) return -1;
     /* SPEC.md §5.5 — the notification length MUST equal the base record plus
      * exactly the bytes accounted for by ext_count. An encoder that writes a
      * count disagreeing with its own payload emits something no conforming

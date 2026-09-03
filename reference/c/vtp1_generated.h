@@ -30,7 +30,7 @@
 #define VTP_INFO_OFF_CLOCK_FLAGS 21
 #define VTP_INFO_OFF_RESERVED_22 22
 
-/* One complete position solution. Never split, never paired, never packed. */
+/* One complete GNSS solution. Never split, never paired, never packed. */
 #define VTP_GPS_FIX_SIZE 74
 #define VTP_GPS_FIX_OFF_SEQ 0
 #define VTP_GPS_FIX_OFF_DROPPED 2
