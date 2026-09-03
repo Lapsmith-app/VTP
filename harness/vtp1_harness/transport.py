@@ -385,6 +385,7 @@ FAULTS = {
     "answers_before_the_next_write": "a device that answers inside its write handler — conforming, and quick enough that no client can pipeline against it (SPEC.md §9), which no check may Fail",
     "host_callback_lands_late": "not the device: the host stack holds each control delivery a scheduler turn, so `t_recv` lands after the next write — which no check may read as the device still owing (SPEC.md §9)",
     "aid_strict_receiver": "a receiver that takes only aiding in the format the device declared — SPEC.md §14.6 as a MUST NOT, which makes the harness's synthetic payload `rejected` and §14.4's `applied` reachable only with --aiding-blob",
+    "aid_tiny_chunks": "a device that chunks small and accepts large transfers — both legal, and the only shape in which SPEC.md §14.3's 65535-chunk cap binds before `max_bytes` does",
 }
 
 
@@ -547,6 +548,15 @@ class LoopbackTransport(Transport):
         self.device = vtp_device.VtpDevice(mtu=self._mtu, **self._device_kwargs)
         self.device.set_negotiated_mtu(self._mtu)
         self.device.on_connect()
+        if "aid_tiny_chunks" in self.faults:
+            # Not a defect either. §14.3 allows any chunk_bytes from 1 to
+            # ATT_MTU-6, and §14.2 any ceiling; this device picks a small
+            # chunk and a large ceiling, which is the only combination where
+            # §14.3's 65535-chunk cap is reached before `max_bytes` is. The
+            # peripheral already refuses such a BEGIN -- the numbers are the
+            # ones PR #54's review reproduced with.
+            self.device._aid_chunk_bytes = lambda: 17
+            self.device.AID_MAX_BYTES_DECLARED = 2_000_000
         if "aid_strict_receiver" in self.faults:
             # Not a defect: SPEC.md §14.6's "MUST NOT accept anything but
             # aiding in the format it declared", modelled at the one place a

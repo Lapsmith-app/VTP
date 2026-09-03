@@ -157,9 +157,9 @@ class Runner:
     async def _one(self, session, check):
         began = time.monotonic()
 
-        def finish(status, message="", evidence=None):
+        def finish(status, message="", evidence=None, severity=None):
             return Result(check=check, status=status, message=message,
-                          evidence=evidence or {},
+                          evidence=evidence or {}, severity=severity,
                           duration_s=time.monotonic() - began)
 
         missing = [c for c in check.requires if c not in session.capabilities]
@@ -173,7 +173,7 @@ class Runner:
         except Fail as exc:
             severity = exc.severity or check.severity
             return finish(Status.FAIL if severity == "MUST" else Status.WARN,
-                          exc.message, exc.evidence)
+                          exc.message, exc.evidence, severity=severity)
         except Skip as exc:
             return finish(Status.SKIP, exc.reason, exc.evidence)
         except Observe as exc:
@@ -183,7 +183,7 @@ class Runner:
             # and MUST echo the opcode and tag. Both are MUSTs regardless of
             # the severity of the check that happened to provoke them.
             return finish(Status.FAIL, str(exc),
-                          getattr(exc, "evidence", {}))
+                          getattr(exc, "evidence", {}), severity="MUST")
         except TransportError:
             raise
         except Exception as exc:                    # noqa: BLE001

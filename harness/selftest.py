@@ -266,10 +266,17 @@ ISOLATED = {"owes_until_confirmed", "pipelined_answered_bad_params"}
 #: targeted-scenario section are the claim: without a blob the run must OBSERVE
 #: and fail nothing, with a real one `aiding.transfer` must PASS, and with a
 #: blob that is not aiding it must WARN rather than accuse the device.
+#: `aid_tiny_chunks` is the fourth, and it is the same lesson from the other
+#: side. §14.3 caps a transfer at 65535 chunks and requires the device to
+#: refuse a BEGIN that would need more, and `max_bytes` reaches that cap first
+#: on every ordinary profile -- so a device that chunks small and accepts large
+#: transfers is the only shape where the rule binds. Handed a blob past the cap,
+#: the harness must recognise the refusal as the one §14.3 demands and SKIP,
+#: never open the transfer and call the required `bad_params` a failed MUST.
 SCENARIO_FAULTS = {"obd_pid_never_answers", "obd_reprobe_refused",
                    "answers_before_the_next_write",
                    "host_callback_lands_late",
-                   "aid_strict_receiver"}
+                   "aid_strict_receiver", "aid_tiny_chunks"}
 
 #: Only these faults are about state surviving a link drop, and only their runs
 #: need to pay for the reconnection.
@@ -938,6 +945,46 @@ def _strict_receiver_problems(synthetic, real, wrong):
     return problems
 
 
+def _chunk_cap_problems(report):
+    """`max_bytes` is not the only ceiling a blob has to clear.
+
+    SPEC.md §14.3 caps a transfer at 65535 chunks -- `index` and
+    `first_missing` are both u16 -- and requires a device to answer
+    `bad_params` to a BEGIN that would need more. On every ordinary profile
+    `max_bytes` binds first, so the rule is invisible; this device chunks
+    small and accepts large transfers, which is the only shape where it is
+    not. Both numbers are legal and neither is a defect.
+
+    Handed a blob past the cap, the harness must recognise there is nothing
+    here to test and SKIP. Opening the transfer anyway and reporting the
+    refusal §14.3 REQUIRES as a failed MUST is the tool-worse-than-no-tool
+    case, and it is what this did before PR #54's review found it.
+    """
+    problems = []
+    if report.aborted:
+        return [f"the tiny-chunks run aborted: {report.aborted}"]
+    result = result_for(report, "aiding.transfer")
+    if result is None:
+        problems.append("aid_tiny_chunks: aiding.transfer did not run")
+    elif result.status is not Status.SKIP:
+        problems.append(
+            f"a device whose 17-byte chunks put a 1,200,000-byte blob past "
+            f"§14.3's 65535-chunk cap was reported {result.status.value} by "
+            f"aiding.transfer: {result.message}. §14.3 REQUIRES that BEGIN "
+            f"refused, so the only honest verdict is a skip")
+    spread = sorted(r.check.id for r in
+                    report.failures + report.warnings + report.errors)
+    if spread:
+        problems.append(
+            f"the tiny-chunks run reported {spread}; a small chunk size and a "
+            f"large ceiling are both legal, and a blob the device is required "
+            f"to refuse is the operator's to make smaller")
+    if not problems:
+        print("  ok   a blob past §14.3's chunk cap skips, rather than failing "
+              "the device for the refusal §14.3 requires")
+    return problems
+
+
 def _failed(problems):
     print("\nFAILED")
     for problem in problems:
@@ -986,6 +1033,9 @@ async def main():
         # that are certainly not aiding, from an operator who thinks they are.
         run(faults=["aid_strict_receiver"],
             aiding_blob=aiding_checks._payload(600)),
+        # 1,200,000 bytes at this device's 17-byte chunks is 70,589 chunks,
+        # past §14.3's cap of 65535 and inside its 2,000,000-byte ceiling.
+        run(faults=["aid_tiny_chunks"], aiding_blob=aiding_blob(repeat=20_000)),
     )
     cut = 1 + len(profiles)
     clean = started[0]
@@ -994,7 +1044,7 @@ async def main():
     tail = started[cut + len(ordered):]
     prompts = tail[:len(PROMPT_SCENARIOS)]
     (quiet, stacked, strict_synthetic, strict_real,
-     strict_wrong) = tail[len(PROMPT_SCENARIOS):]
+     strict_wrong, tiny_chunks) = tail[len(PROMPT_SCENARIOS):]
 
     print("A conforming device")
     counts = clean.counts
@@ -1138,6 +1188,7 @@ async def main():
 
     problems += _strict_receiver_problems(strict_synthetic, strict_real,
                                           strict_wrong)
+    problems += _chunk_cap_problems(tiny_chunks)
 
     if problems:
         return _failed(problems)

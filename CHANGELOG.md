@@ -77,6 +77,50 @@ subscription, and for reaching `applied` on a bench it does not. §14.6 is also
 why it is built rather than kept as a fixture: a device applies a transfer at
 commit, so a time initialisation on disk is already as old as the file.
 
+Review of the above found six further problems, and three of them would have
+failed a conforming device — the thing this harness exists not to do:
+
+- **§14.3's chunk cap is a second ceiling, and clearing `max_bytes` does not
+  clear it.** A transfer MUST NOT need more than 65535 chunks, because `index`
+  and `first_missing` are both `u16`, and a device MUST answer `bad_params` to
+  a BEGIN that would open one. On every ordinary profile `max_bytes` binds
+  first, which is why the rule was easy to miss; a device that chunks small and
+  accepts large transfers reaches it, and the harness reported the *required*
+  refusal as a failed MUST. A blob past the cap now skips, saying so. An
+  accepting device is failed explicitly, before the chunk index overflows the
+  `u16` it is packed into and turns a finding into a harness error.
+- **A commit has no deadline, and the harness gave it three seconds.** §14.3
+  forbids handing any part of a transfer to the receiver before the commit, so
+  everything the module has to be told happens inside that one response, and
+  tens of kilobytes down a UART is tens of seconds at the baud rates GNSS
+  modules run at. The commit timeout is now the transfer's size, not the
+  control plane's default. Unreachable before this change — the synthetic
+  payload is at most two and a half chunks.
+- **macOS relaunches through an app bundle, and the bundle has its own working
+  directory.** The parent read `--aiding-blob assist.ubx` and then handed the
+  child the same relative path from somewhere else, so the invocation in
+  `harness/README.md` failed on the one platform whose instructions are longest.
+  Path options are now resolved against the invoking shell's directory before
+  the relaunch — `--json` and `--markdown` with them, which had written their
+  reports into the bundle's cache for as long as the relaunch has existed.
+
+And three that were wrong rather than harmful:
+
+- An unreadable or empty `--aiding-blob` exited 1, which is
+  `EXIT_NOT_CONFORMING` — a verdict about a device the run never connected to.
+  It is `EXIT_ERROR` now: a run that did not happen.
+- The `rejected` branch caught every non-`applied` value, so a member a future
+  minor version adds would have been given receiver-refusal semantics. §14.4
+  says *other* decodes as unknown, never as a default; the harness now says
+  unknown and puts no verdict on it.
+- `Fail(severity=...)` moved a finding's severity and reporting kept reading
+  the check's, so JSON emitted `severity: MUST` beside `status: warn` and the
+  console filed it under "SHOULDs not followed". `Result` now carries the
+  finding's own severity — `check_severity` is beside it in JSON for the
+  check's — and the console heading no longer claims a SHOULD was broken. This
+  is the first *downward* override in the tree, which is why nothing had
+  surfaced it.
+
 ### Harness: §9's window cannot be measured from a host, and a check was verdicting as though it could
 
 Raised in review of the entry below, which is where the reproduction comes

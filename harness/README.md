@@ -220,6 +220,13 @@ uv run vtp1-harness --aiding-blob assist.ubx
 Only the §14.4 transfer uses it. Run once without it to confirm the device
 refuses a blob it should, once with it to confirm it applies one it should.
 
+Size it against **both** of the device's ceilings. `max_bytes` in
+`GNSS_AID_INFO` is the obvious one; the other is §14.3's cap of 65535 chunks,
+which binds when `max_bytes ÷ chunk_bytes` exceeds it — a device that chunks
+small and accepts large transfers. A blob past either is one the device is
+required to refuse, so the harness skips and says which ceiling it hit rather
+than failing the device for obeying the rule.
+
 Two things about the file. Build it at run time rather than keeping one around:
 a device applies a transfer at commit, not as it arrives, so a blob carrying
 time initialisation is already as old as the file plus the transfer, which is

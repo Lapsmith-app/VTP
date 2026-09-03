@@ -146,7 +146,12 @@ class ConsoleReporter:
 
         if report.warnings:
             self._write()
-            self._write(self._paint(Status.WARN, "  SHOULDs not followed"))
+            # Not "SHOULDs not followed": a MUST check can produce a finding
+            # at SHOULD level when what it found is not the device's to answer
+            # for, and printing that under a heading about SHOULDs would say
+            # the opposite of what the finding says.
+            self._write(self._paint(Status.WARN, "  Findings short of a "
+                                    "failed MUST"))
             for result in report.warnings:
                 self._write(f"    {result.check.section:>4}  {result.check.id}")
                 for line in _wrap(result.message, 88):
@@ -205,7 +210,7 @@ def _unverified_musts(report):
     this run did not test, and the report has to be able to name how many.
     """
     return [r for r in report.results
-            if r.status is Status.SKIP and r.check.severity == "MUST"
+            if r.status is Status.SKIP and r.severity == "MUST"
             and r.message and "does not declare" not in r.message]
 
 
@@ -284,7 +289,8 @@ def to_dict(report):
                 "id": r.check.id,
                 "section": r.check.section,
                 "title": r.check.title,
-                "severity": r.check.severity,
+                "severity": r.severity,
+                "check_severity": r.check.severity,
                 "adversarial": r.check.adversarial,
                 "status": r.status.value,
                 "message": r.message,

@@ -98,6 +98,16 @@ class Result:
     message: str = ""
     evidence: dict = dataclasses.field(default_factory=dict)
     duration_s: float = 0.0
+    #: The severity of THIS finding, which `Fail.severity` may move either way
+    #: from the check's own. Reporting reads it rather than `check.severity`:
+    #: a check whose rule is a MUST can produce a finding the harness cannot
+    #: settle against the device, and a report that called that a MUST would
+    #: be saying the opposite of what the finding says.
+    severity: str = None
+
+    def __post_init__(self):
+        if self.severity is None:
+            self.severity = self.check.severity
 
 
 REGISTRY = []
