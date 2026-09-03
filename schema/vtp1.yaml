@@ -133,7 +133,7 @@ enums:
   fix_type:
     width: 1
     members:
-      - {value: 0, name: none,        desc: "No position solution"}
+      - {value: 0, name: none,        desc: "No solution: no position, and no time solution being computed now"}
       - {value: 1, name: dead_reckon, desc: "Dead-reckoning solution only"}
       - {value: 2, name: fix_2d,      desc: "2D position solution"}
       - {value: 3, name: fix_3d,      desc: "3D position solution"}
@@ -264,7 +264,7 @@ bitmasks:
       - {bit: 8,  name: v_acc}
       - {bit: 9,  name: s_acc}
       - {bit: 10, name: p_dop,          desc: "Clear on a fix reporting no position (SPEC.md 5.2)"}
-      - {bit: 11, name: num_sv,         desc: "Set on any solution satellites were used in, position or time (SPEC.md 5.2)"}
+      - {bit: 11, name: num_sv,         desc: "The device has a satellite count for the solution fix_type names; zero is a count (SPEC.md 5.2)"}
     reserved_from: 12
     reserved_purpose: "Validity for fields added in a later minor"
   fix_flags:

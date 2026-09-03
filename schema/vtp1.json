@@ -127,7 +127,7 @@
         {
           "value": 0,
           "name": "none",
-          "desc": "No position solution"
+          "desc": "No solution: no position, and no time solution being computed now"
         },
         {
           "value": 1,
@@ -383,7 +383,7 @@
         {
           "bit": 11,
           "name": "num_sv",
-          "desc": "Set on any solution satellites were used in, position or time (SPEC.md 5.2)"
+          "desc": "The device has a satellite count for the solution fix_type names; zero is a count (SPEC.md 5.2)"
         }
       ],
       "reserved_from": 12,

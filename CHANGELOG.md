@@ -46,7 +46,17 @@ and carry a position, leaving a client to choose between the halves of one
 record with nothing on the wire saying which was the defect. §5's opening
 sentence and the `gps_fix` description said every notification carries "one
 position solution", which is the reading the report came from; both now say one
-GNSS solution.
+GNSS solution, as does §1.2's definition of a fix — the unit `dropped` counts,
+which had quietly excluded the solutions this section is about.
+
+`fix_type = none` had two meanings and the rules above need one. The enum said
+"no position solution" while §5.2 leans on "no solution at all"; it now names
+both — no position and no timing solution being computed. `t_utc` is
+deliberately not constrained by it: a receiver that has acquired GNSS time
+keeps it when the solution providing it is lost, bit 0 says the timestamp came
+from a GNSS time solution rather than that one was computed for this fix, and
+a device losing its fix reports `none` and goes on reporting the time it
+holds.
 
 All three are device-side content rules, so a receiver decodes a fix that
 breaks one and surfaces it, as with the RTK flags in §5.3 — and MUST NOT read a
@@ -55,12 +65,17 @@ winner between a position and a `fix_type` that names none.
 
 No wire change: no field, enum value, UUID or existing conformance vector
 moves, and the descriptions that changed are exempt from the compatibility
-baseline. Four vectors are added — a time-only fix carrying six satellites, a
-PDOP on a time-only fix, a `num_sv` beside `fix_type = none`, and a position
-beside a time-only `fix_type` — with the device-side half of the last three as
-an encoder refusal, and both reference encoders now refuse them. The corpus is
-167 vectors and 63 producer cases. Reasoning in the RATIONALE contradictions
-section.
+baseline. Six vectors are added — a time-only fix carrying six satellites,
+and five well-formed records a device MUST NOT emit: a PDOP on a time-only fix
+and another with the position bit simply clear, a `num_sv` beside
+`fix_type = none`, and a position beside each of the two fix types that name
+none. Each of the five is paired with an encoder refusal, and both reference
+encoders refuse them. Two producer cases go the other way, because no refusal
+can assert what is legal: a time-only fix carrying `num_sv`, and a
+`dead_reckon` fix whose satellite count is a measurement of zero. An encoder
+that gates `num_sv` on a position — the reading this section closed — passes
+every refusal in the file and fails both of those. The corpus is 169 vectors
+and 67 producer cases. Reasoning in the RATIONALE contradictions section.
 
 Two things that hold the change up rather than state it.
 `tools/check_baseline.py` now covers `conformance/encoders.json` as well as the decode vectors: the
@@ -72,8 +87,13 @@ reserved bits. And `gps.solution_scoped_bits` in the harness reports what no
 vector can reach: a device that withholds `num_sv` through every time-only fix
 emits nothing wrong, so the corpus cannot see it, and the rule that changed
 firmware behaviour would otherwise be the one rule here with nothing watching
-it. It observes rather than fails — a receiver with no count to give leaves the
-same trace from a host.
+it. `gps.solution_scoped_bits` fails a device on the three combinations a host
+can prove from a payload — a `p_dop` beside no position, a position beside a
+`fix_type` naming none, a `num_sv` beside `none` — and `gps.num_sv_scope`
+observes the fourth without failing it, because a receiver with no count to
+give leaves the same trace from a host as one withholding it. The seeded
+`gps_scope_bits_ignored` fault holds the failing half to account, as
+`harness/selftest.py` requires of every MUST it defines.
 
 ### Harness: §9's window cannot be measured from a host, and a check was verdicting as though it could
 

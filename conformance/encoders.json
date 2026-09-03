@@ -339,6 +339,77 @@
       }
     },
     {
+      "name": "gps-p-dop-without-a-position",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "vector": "p-dop-without-a-position",
+      "desc": "SPEC.md 5.2 -- a PDOP with the position bit clear under a positional fix_type. Separate from the time-only refusal so an encoder testing only fix_type fails one and passes the other.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 1024,
+          "p_dop": 140,
+          "fix_type": 3,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-position-with-no-solution",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "vector": "position-with-no-solution",
+      "desc": "SPEC.md 5.2 -- a valid position beside a fix_type of none. Separate from the time_only refusal so an encoder checking one enum member does not pass for the other.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 4,
+          "lat": 515074000,
+          "lon": -1397000,
+          "fix_type": 0,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-time-only-carries-num-sv",
+      "record": "gps_fix",
+      "must_refuse": false,
+      "desc": "SPEC.md 5.2 -- a time-only solution with six satellites in it. The count is a measurement of a real thing and the encoder MUST emit it: withholding num_sv because the fix carries no position is the reading this section closed.",
+      "input": {
+        "fix": {
+          "seq": 3,
+          "validity": 2051,
+          "t_device": 123456789,
+          "t_utc": 1766000000000,
+          "fix_type": 5,
+          "num_sv": 6,
+          "fix_flags": 24,
+          "ext_count": 0
+        }
+      },
+      "expect_hex": "030000000308000015cd5b0700000000007ccd2d9b0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005061800"
+    },
+    {
+      "name": "gps-dead-reckon-counts-zero-satellites",
+      "record": "gps_fix",
+      "must_refuse": false,
+      "desc": "SPEC.md 5.2 -- a dead-reckoning solution that used no satellites, with bit 11 set and the field zero. A set bit beside a zero is a measurement of zero (5.1), and an encoder that treats zero as absence normalises the bit away and fails here.",
+      "input": {
+        "fix": {
+          "seq": 4,
+          "validity": 2052,
+          "lat": 515074000,
+          "lon": -1397000,
+          "fix_type": 1,
+          "num_sv": 0,
+          "fix_flags": 0,
+          "ext_count": 0
+        }
+      },
+      "expect_hex": "040000000408000000000000000000000000000000000000d067b31ef8aeeaff000000000000000000000000000000000000000000000000000000000000000000000000000001000000"
+    },
+    {
       "name": "gps-ext-count-disagrees",
       "record": "gps_fix",
       "must_refuse": true,
