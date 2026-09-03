@@ -423,9 +423,9 @@ Total: **74 bytes**. All fields little-endian.
 | 56 | 4 | `u32` | `h_acc` | `mm`; Horizontal position accuracy estimate, 1 sigma; valid when `validity` bit 7 (`h_acc`) is set |
 | 60 | 4 | `u32` | `v_acc` | `mm`; Vertical position accuracy estimate, 1 sigma; valid when `validity` bit 8 (`v_acc`) is set |
 | 64 | 4 | `u32` | `s_acc` | `mm/s`; Speed accuracy estimate, 1 sigma; valid when `validity` bit 9 (`s_acc`) is set |
-| 68 | 2 | `u16` | `p_dop` | scale 0.01; Position dilution of precision; valid when `validity` bit 10 (`p_dop`) is set |
+| 68 | 2 | `u16` | `p_dop` | scale 0.01; Position dilution of precision; absent on a fix reporting no position (SPEC.md 5.2); valid when `validity` bit 10 (`p_dop`) is set |
 | 70 | 1 | `u8` | `fix_type` | enum `fix_type` |
-| 71 | 1 | `u8` | `num_sv` | Satellites used in the solution; valid when `validity` bit 11 (`num_sv`) is set |
+| 71 | 1 | `u8` | `num_sv` | Satellites used in the solution fix_type names, positional or not (SPEC.md 5.2); valid when `validity` bit 11 (`num_sv`) is set |
 | 72 | 1 | `u8` | `fix_flags` | bitmask `fix_flags` |
 | 73 | 1 | `u8` | `ext_count` | Extension records following the base record |
 <!-- END GENERATED: gps_fix -->
@@ -478,8 +478,8 @@ whatever geoid model it carries; this specification does not name one.
 | 7 | `h_acc` | — |
 | 8 | `v_acc` | — |
 | 9 | `s_acc` | — |
-| 10 | `p_dop` | — |
-| 11 | `num_sv` | — |
+| 10 | `p_dop` | Clear on a fix reporting no position (SPEC.md 5.2) |
+| 11 | `num_sv` | Set on any solution satellites were used in, position or time (SPEC.md 5.2) |
 | 12+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:gps_validity -->
 
@@ -505,6 +505,36 @@ measurement of zero. No field value anywhere in VTP/1 signals absence.
 | 5 | `time_only` | Time solution only, no position |
 | *other* | *unknown* | MUST decode as unknown, never as a default |
 <!-- END GENERATED: enum:fix_type -->
+
+`fix_type` has no validity bit and is present on every fix. It is the only
+field that says which solution the receiver reached, and it says so on a fix
+carrying no position as much as on one carrying a position.
+
+**`num_sv` counts the satellites used in the solution `fix_type` names**, which
+is not always a position solution. Bit 11 answers whether the device has that
+count and nothing else; it is not a second statement about whether the record
+carries a position. A `time_only` solution is computed from real satellites, so
+a device holding the count MUST set bit 11 and report it — withholding
+`num_sv` because the fix carries no position is not conforming. A `fix_type` of
+`none` names no solution at all, so no satellite was used in one and a device
+MUST leave bit 11 clear: satellites tracked but unused are not what this field
+counts, and this specification carries no field that counts them.
+
+Zero is a measurement where the reported solution genuinely used no satellites
+— a `dead_reckon` fix — and a device holding that count sets bit 11 and writes
+zero. §5.1 keeps the two apart: absence is the bit's to signal, and no value of
+`num_sv` signals it.
+
+**`p_dop` describes the geometry of a position solution**, so a device MUST
+leave bit 10 clear on a fix reporting no position: a `fix_type` of `none` or
+`time_only`, or any fix whose `position` bit is clear.
+
+The two fields are adjacent and their bits are not a pair. On a `time_only`
+fix, bit 11 carries a measurement and bit 10 is clear. Both rules bind the
+device; a receiver MUST decode a fix that breaks either — the payload is
+well-formed — and SHOULD surface the violation as a device defect. It MUST NOT
+reject the fix, and MUST NOT read a `p_dop` beside an absent position as
+evidence that a position exists.
 
 ### 5.3 Fix flags
 

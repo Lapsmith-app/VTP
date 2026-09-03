@@ -8,6 +8,49 @@ conformance vector.
 
 ## [Unreleased]
 
+### §5.2: `num_sv` counts the solution `fix_type` names, and `p_dop` a position
+
+Reported by the first VTP/1 device firmware, against this repository at
+`7eeaf56`. Not a decode disagreement — no payload shows it. It is an ambiguity
+a device has to resolve before it can emit a fix at all, and §5 did not resolve
+it.
+
+`num_sv` was described as "Satellites used in the solution" while §5 opens by
+scoping the record to "exactly one position solution", so on a `time_only` fix
+the document supported two readings and they disagreed. §5.1 leaves no third
+state: the bit is set and the field is a measurement, or it is clear and the
+field is absent. Two conforming devices reported one receiver differently, and
+an absent `num_sv` meant "no satellites contributed" under one reading and
+"this device declines to count them without a position" under the other. It is
+not hypothetical: a u-blox MAX-M10S reports `fixType = 5` with a populated
+`numSV` for most of the first thirty seconds of every cold start, so every
+device built on such a part meets this on the way to its first fix.
+
+**`num_sv` counts the satellites used in the solution `fix_type` names**, which
+is not always a position solution. Bit 11 answers whether the device has that
+count and nothing else, so a device holding it MUST report it on a `time_only`
+fix — withholding it because the fix carries no position is not conforming. A
+`fix_type` of `none` names no solution at all, so bit 11 is clear there: the
+count of satellites *tracked* does not get to borrow the name of the count
+*used*, and VTP/1 has no field for the tracked count.
+
+**`p_dop` describes the geometry of a position solution**, so bit 10 is clear
+on a fix reporting no position. That was settled only by the adjective in the
+field's description; it is now a requirement, and the pair of bits is stated to
+be a pair only by adjacency.
+
+Both are device-side content rules, so a receiver decodes a fix that breaks
+either and surfaces it, as with the RTK flags in §5.3 — and MUST NOT read a
+`p_dop` beside an absent position as evidence that a position exists.
+
+No wire change: no field, enum value, UUID or existing conformance vector
+moves, and the two descriptions that changed are exempt from the compatibility
+baseline. Three vectors are added — a time-only fix carrying six satellites, a
+PDOP on a time-only fix, and a `num_sv` beside `fix_type = none` — with the
+device-side half of each of the last two as an encoder refusal, and both
+reference encoders now refuse them. The corpus is 166 vectors and 62 producer
+cases. Reasoning in the RATIONALE contradictions section.
+
 ### Harness: §9's window cannot be measured from a host, and a check was verdicting as though it could
 
 Raised in review of the entry below, which is where the reproduction comes

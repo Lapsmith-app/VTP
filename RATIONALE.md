@@ -1441,6 +1441,31 @@ MUST NOT read the pair as either solution, and SHOULD flag the contradiction —
 the review pass in §8.3 is where the receiver-side reject this paragraph once
 described was downgraded, with the rest of the content rules.
 
+**"Satellites used in the solution" named two solutions.** SPEC §5 opens by
+scoping the record to a position solution, and `num_sv` one row below `p_dop`
+says "the solution", so a `time_only` fix — the ordinary state of a u-blox
+receiver through most of the first thirty seconds of a cold start — had two
+readings available in the document and they disagreed about whether bit 11
+could be set. SPEC §5.1 leaves no third state: the bit is set and the field is
+a measurement, or it is clear and the field is absent. Two conforming devices
+therefore reported one receiver differently and nothing on the wire told a
+client which convention it was reading — an absent `num_sv` meaning "no
+satellites contributed" under one and "this device declines to count them
+without a position" under the other. Reported by the first firmware
+implementation, which had withheld it. The count won. A time solution is
+computed from real satellites and their number is a measurement of a real
+thing, and this document's own reason for decoding an out-of-range latitude —
+hiding the evidence from the person best placed to notice costs more than
+surfacing it — applies unchanged to hiding a satellite count for the whole of
+an acquisition. SPEC §1.1 forbids a plausible *wrong* value, and this one is
+right; what scopes it is the `fix_type` byte beside it, which has no validity
+bit and is present on every fix. So SPEC §5.2 now scopes `num_sv` to whatever
+solution `fix_type` names and `p_dop` to a position's geometry, and says the
+two adjacent bits do not move together. What the adjective in its description
+settled for `p_dop` is stated rather than inferred, and `fix_type = none` — no
+solution for a satellite to have been used in — leaves bit 11 clear, so the
+count of satellites *tracked* cannot borrow the name of the count *used*.
+
 **An IMU batch could carry no samples**, though `t_base` is defined as the
 acquisition time of sample 0. The same reasoning was then applied to CAN:
 SPEC.md §6.2 forbids an empty CAN batch too, because its `t_base` is defined

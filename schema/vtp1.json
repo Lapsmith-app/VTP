@@ -377,11 +377,13 @@
         },
         {
           "bit": 10,
-          "name": "p_dop"
+          "name": "p_dop",
+          "desc": "Clear on a fix reporting no position (SPEC.md 5.2)"
         },
         {
           "bit": 11,
-          "name": "num_sv"
+          "name": "num_sv",
+          "desc": "Set on any solution satellites were used in, position or time (SPEC.md 5.2)"
         }
       ],
       "reserved_from": 12,
@@ -861,7 +863,7 @@
           "type": "u16",
           "scale": 0.01,
           "valid_bit": "p_dop",
-          "desc": "Position dilution of precision"
+          "desc": "Position dilution of precision; absent on a fix reporting no position (SPEC.md 5.2)"
         },
         {
           "name": "fix_type",
@@ -876,7 +878,7 @@
           "size": 1,
           "type": "u8",
           "valid_bit": "num_sv",
-          "desc": "Satellites used in the solution"
+          "desc": "Satellites used in the solution fix_type names, positional or not (SPEC.md 5.2)"
         },
         {
           "name": "fix_flags",

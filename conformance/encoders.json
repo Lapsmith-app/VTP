@@ -288,6 +288,38 @@
       }
     },
     {
+      "name": "gps-p-dop-on-a-time-only-fix",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "vector": "p-dop-on-a-time-only-fix",
+      "desc": "SPEC.md 5.2 -- a PDOP beside a fix_type of time_only. Dilution of precision is a property of a position's geometry, and this fix reports no position.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 1024,
+          "p_dop": 140,
+          "fix_type": 5,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-num-sv-with-no-solution",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "vector": "num-sv-with-no-solution",
+      "desc": "SPEC.md 5.2 -- a satellite count beside a fix_type of none. num_sv counts what the reported solution used, and none names no solution; the tracked count has no field here and MUST NOT borrow this one.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 2048,
+          "num_sv": 9,
+          "fix_type": 0,
+          "ext_count": 0
+        }
+      }
+    },
+    {
       "name": "gps-ext-count-disagrees",
       "record": "gps_fix",
       "must_refuse": true,
@@ -1067,10 +1099,11 @@
         "fix": {
           "seq": 1,
           "validity": 2147487743,
-          "ext_count": 0
+          "ext_count": 0,
+          "fix_type": 3
         }
       },
-      "expect_hex": "01000000ff0f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      "expect_hex": "01000000ff0f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000"
     },
     {
       "name": "reserved-bits-gps-fix-fix-flags",
@@ -1082,10 +1115,11 @@
           "seq": 1,
           "validity": 0,
           "ext_count": 0,
+          "fix_type": 3,
           "fix_flags": 157
         }
       },
-      "expect_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001d00"
+      "expect_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003001d00"
     },
     {
       "name": "reserved-bits-can-header-flags",

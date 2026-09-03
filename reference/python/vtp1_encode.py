@@ -201,6 +201,36 @@ differentially corrected one."""
             "an RTK solution is a differentially corrected one")
 
 
+FIX_TYPE = {m["name"]: m["value"] for m in SCHEMA["enums"]["fix_type"]["members"]}
+
+
+def _check_solution_scoped_bits(fix):
+    """SPEC.md 5.2 -- num_sv counts the satellites used in the solution
+`fix_type` NAMES, and p_dop describes a position's geometry, so the two
+adjacent bits do not move together. A time-only solution is computed from real
+satellites and has no position for a dilution of precision to describe, and a
+`fix_type` of `none` reached no solution for a satellite to have been used in.
+Either published is a plausible wrong value: a PDOP a client reads as evidence
+of a position, or the count of satellites TRACKED wearing the name of the count
+USED."""
+    bit = {b["name"]: 1 << b["bit"]
+           for b in SCHEMA["bitmasks"]["gps_validity"]["bits"]}
+    validity = fix.get("validity", 0)
+    fix_type = fix.get("fix_type", 0)
+    positionless = (fix_type in (FIX_TYPE["none"], FIX_TYPE["time_only"])
+                    or not validity & bit["position"])
+    if validity & bit["p_dop"] and positionless:
+        raise EncodeError(
+            "gps_fix claims a p_dop on a fix reporting no position "
+            "(fix_type {}); dilution of precision describes a position's "
+            "geometry".format(fix_type))
+    if validity & bit["num_sv"] and fix_type == FIX_TYPE["none"]:
+        raise EncodeError(
+            "gps_fix claims a num_sv beside fix_type none; no solution was "
+            "reached for a satellite to have been used in, and the tracked "
+            "count has no field in VTP/1")
+
+
 def encode_gps_fix(fix, ext=b""):
     """SPEC.md §5. `ext` is appended verbatim and MUST match `ext_count`.
 
@@ -215,6 +245,7 @@ def encode_gps_fix(fix, ext=b""):
     """
     _check_gps_ranges(fix)
     _check_fix_flags(fix)
+    _check_solution_scoped_bits(fix)
     ext = bytes(ext)
     declared = fix.get("ext_count", 0)
     off, seen = 0, 0
