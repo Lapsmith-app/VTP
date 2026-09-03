@@ -48,12 +48,17 @@ class Report:
 
 class Runner:
     def __init__(self, transport, *, adversarial=True, observe_s=12.0,
-                 can_ids=(), reconnect=True, on_result=None, on_phase=None):
+                 can_ids=(), reconnect=True, aiding_blob=None, on_result=None,
+                 on_phase=None):
         self.transport = transport
         self.adversarial = adversarial
         self.observe_s = observe_s
         self.can_ids = list(can_ids)
         self.reconnect = reconnect
+        # SPEC.md §14.6 -- the operator's own aiding, for a device that
+        # refuses anything the harness could invent. None means the synthetic
+        # pattern, which is what every check but aiding.transfer uses anyway.
+        self.aiding_blob = aiding_blob
         self.on_result = on_result or (lambda result: None)
         self.on_phase = on_phase or (lambda phase, note: None)
         self.checks = load_all()
@@ -61,6 +66,7 @@ class Runner:
     async def run(self, target):
         session = Session(self.transport, adversarial=self.adversarial)
         session.state["can_ids"] = self.can_ids
+        session.state["aiding_blob"] = self.aiding_blob
         report = Report(results=[], session=session, started=time.time())
         self._target = target
         began = time.monotonic()
@@ -151,9 +157,9 @@ class Runner:
     async def _one(self, session, check):
         began = time.monotonic()
 
-        def finish(status, message="", evidence=None):
+        def finish(status, message="", evidence=None, severity=None):
             return Result(check=check, status=status, message=message,
-                          evidence=evidence or {},
+                          evidence=evidence or {}, severity=severity,
                           duration_s=time.monotonic() - began)
 
         missing = [c for c in check.requires if c not in session.capabilities]
@@ -167,7 +173,7 @@ class Runner:
         except Fail as exc:
             severity = exc.severity or check.severity
             return finish(Status.FAIL if severity == "MUST" else Status.WARN,
-                          exc.message, exc.evidence)
+                          exc.message, exc.evidence, severity=severity)
         except Skip as exc:
             return finish(Status.SKIP, exc.reason, exc.evidence)
         except Observe as exc:
@@ -177,7 +183,7 @@ class Runner:
             # and MUST echo the opcode and tag. Both are MUSTs regardless of
             # the severity of the check that happened to provoke them.
             return finish(Status.FAIL, str(exc),
-                          getattr(exc, "evidence", {}))
+                          getattr(exc, "evidence", {}), severity="MUST")
         except TransportError:
             raise
         except Exception as exc:                    # noqa: BLE001

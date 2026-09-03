@@ -8,6 +8,120 @@ conformance vector.
 
 ## [Unreleased]
 
+### Harness: §14.6 made the `applied` path unreachable, so a conforming device got half of §14.4 tested
+
+Reported from the first VTP/1 device firmware, and not as a false failure —
+the harness was behaving correctly and saying so. It is a coverage hole two
+MUSTs opened between them.
+
+Every aiding transfer the harness sent was built by `checks/aiding.py::_payload`:
+a byte pattern that is not all the same, so a misplaced chunk shows up. That is
+exactly right for what most of §14 tests — chunk indexing, the CRC, a `begin`
+superseding an open transfer, an oversized transfer refused — none of which
+care what the bytes mean.
+
+But §14.1 declares `ubx_mga` as a concatenated sequence of UBX-MGA messages,
+and §14.6 makes it a MUST NOT: a device MUST NOT accept anything but aiding in
+the format it declared. A device that enforces that refuses `_payload()` by
+construction — it is not UBX at all and does not frame — and `aiding.transfer`
+already handled the refusal correctly, noting that `rejected` is a §14.4
+outcome and observing rather than failing.
+
+The consequence is the wrong way round. Everything after that early return
+never ran on such a device: `applied` itself, the MUST the check is named for;
+the `first_missing` assertion that only exists on the applied branch, which is
+its own MUST; and the state key a later check would inherit the same hole
+from. **The stricter a device was about §14.6, the less of §14 got tested.**
+
+So the payload is now the client's to supply:
+
+    --aiding-blob PATH    send these bytes as the payload of the §14.4
+                          transfer, instead of a synthetic pattern
+
+Only `aiding.transfer` takes it. `aiding.chunk_size`, `aiding.rejects_oversized`
+and `aiding.begin_supersedes` each need a transfer of a *specific* size and keep
+the synthetic pattern; a real product is the wrong shape for them. A blob larger
+than the device's declared `max_bytes` skips rather than being clamped to fit —
+§14.2 requires that transfer to be refused, and a blob cut down to size is no
+longer aiding in any format, so the run would say something false about the
+device.
+
+The harness does not build the blob itself. Doing so would put a
+format-specific payload builder inside a harness that is otherwise entirely
+format-agnostic, and §14.1's whole shape — the device names a format, it does
+not describe one — is what keeps it that way.
+
+What a supplied blob changes is the verdict when the transfer is refused
+anyway. Sent synthetic bytes, `rejected` is an observation and nothing more.
+Sent bytes the operator vouched for, it is a **warning naming both suspects**:
+either those bytes are not aiding this receiver will take — the wrong product,
+the wrong format, or stale — or the device refuses one that is. §14.1 makes the
+bytes opaque to the harness, so it cannot tell you which, and it must not blame
+a conforming device for a stale download.
+
+The hole is now reproducible in the tree rather than only on a bench.
+`--fault aid_strict_receiver` is a *conforming* device whose receiver walks the
+committed blob as UBX framing and refuses it unless every message frames, every
+checksum agrees, every message is in the MGA class, and the blob ends exactly on
+a frame boundary. It never looks inside a payload — §14.1 says those bytes are
+opaque — so nothing checks a `msgId` against a list or cares about ordering. It
+reads the declaration the device made and nothing more. `harness/selftest.py`
+runs it three times and requires three different verdicts: an observation with
+no blob, a **pass** with a real one, and a warning with a blob that is not
+aiding.
+
+The real blob the selftest feeds it is built at run time, in about twenty
+lines, from two ordinary `UBX-MGA-INI` messages — time and position. That is
+worth recording because `ubx_mga` sounds like it implies a u-blox AssistNow
+subscription, and for reaching `applied` on a bench it does not. §14.6 is also
+why it is built rather than kept as a fixture: a device applies a transfer at
+commit, so a time initialisation on disk is already as old as the file.
+
+Review of the above found six further problems, and three of them would have
+failed a conforming device — the thing this harness exists not to do:
+
+- **§14.3's chunk cap is a second ceiling, and clearing `max_bytes` does not
+  clear it.** A transfer MUST NOT need more than 65535 chunks, because `index`
+  and `first_missing` are both `u16`, and a device MUST answer `bad_params` to
+  a BEGIN that would open one. On every ordinary profile `max_bytes` binds
+  first, which is why the rule was easy to miss; a device that chunks small and
+  accepts large transfers reaches it, and the harness reported the *required*
+  refusal as a failed MUST. A blob past the cap now skips, saying so. An
+  accepting device is failed explicitly, before the chunk index overflows the
+  `u16` it is packed into and turns a finding into a harness error.
+- **A commit has no deadline, and the harness gave it three seconds.** §14.3
+  forbids handing any part of a transfer to the receiver before the commit, so
+  everything the module has to be told happens inside that one response, and
+  tens of kilobytes down a UART is tens of seconds at the baud rates GNSS
+  modules run at. The commit timeout is now the transfer's size, not the
+  control plane's default. Unreachable before this change — the synthetic
+  payload is at most two and a half chunks.
+- **macOS relaunches through an app bundle, and the bundle has its own working
+  directory.** The parent read `--aiding-blob assist.ubx` and then handed the
+  child the same relative path from somewhere else, so the invocation in
+  `harness/README.md` failed on the one platform whose instructions are longest.
+  Path options are now resolved against the invoking shell's directory before
+  the relaunch — `--json` and `--markdown` with them, which had written their
+  reports into the bundle's cache for as long as the relaunch has existed.
+
+And three that were wrong rather than harmful:
+
+- An unreadable or empty `--aiding-blob` exited 1, which is
+  `EXIT_NOT_CONFORMING` — a verdict about a device the run never connected to.
+  It is `EXIT_ERROR` now: a run that did not happen.
+- The `rejected` branch caught every non-`applied` value, so a member a future
+  minor version adds would have been given receiver-refusal semantics. §14.4
+  says *other* decodes as unknown, never as a default; the harness now says
+  unknown and puts no verdict on it.
+- `Fail(severity=...)` moved a finding's severity and reporting kept reading
+  the check's, so JSON emitted `severity: MUST` beside `status: warn` and the
+  console filed it under "SHOULDs not followed". `Result` now carries the
+  finding's own severity — `check_severity` is beside it in JSON for the
+  check's — and the console heading no longer claims a SHOULD was broken. This
+  is the first *downward* override in the tree, which is why nothing had
+  surfaced it.
+
+
 ### §5.2: `num_sv` counts the solution `fix_type` names, and `p_dop` a position
 
 Reported by the first VTP/1 device firmware, against this repository at
@@ -94,6 +208,7 @@ observes the fourth without failing it, because a receiver with no count to
 give leaves the same trace from a host as one withholding it. The seeded
 `gps_scope_bits_ignored` fault holds the failing half to account, as
 `harness/selftest.py` requires of every MUST it defines.
+
 
 ### Harness: §9's window cannot be measured from a host, and a check was verdicting as though it could
 

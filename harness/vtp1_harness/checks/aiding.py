@@ -23,6 +23,21 @@ _FORMATS = refdec.enum_values("aid_format")
 # header, both off the negotiated MTU.
 _CHUNK_OVERHEAD = 6
 
+# SPEC.md §14.3 -- a chunk's `index` and §14.4's `first_missing` are both u16,
+# so a transfer needing more chunks than this has chunks that cannot be named,
+# and the device MUST answer `bad_params` to the BEGIN that would open one.
+_MAX_CHUNKS = 0xFFFF
+
+# SPEC.md §14.3 -- a device MUST NOT hand any part of a transfer to its
+# receiver before the commit, so everything the module has to be told happens
+# inside this one response, and §14 sets no deadline for it. Tens of kilobytes
+# down a UART is tens of seconds at the baud rates GNSS modules run at, and the
+# harness's three-second control timeout would report a conforming device as
+# having failed to answer at all. The floor covers a small transfer's fixed
+# cost; the per-kilobyte term covers the rest.
+_COMMIT_FLOOR_S = 10.0
+_COMMIT_S_PER_KIB = 1.0
+
 
 def _control(s):
     if s.control is None:
@@ -78,35 +93,82 @@ async def _write_chunk(s, token, index, body):
                    f"any kind: {exc}") from None
 
 
+def _commit_timeout(c, blob):
+    return max(c.timeout, _COMMIT_FLOOR_S + len(blob) / 1024 * _COMMIT_S_PER_KIB)
+
+
 async def _commit(s, blob):
     c = _control(s)
     return await c.request(refdec.OPCODE["GNSS_AID_COMMIT"],
-                           struct.pack("<I", zlib.crc32(blob)))
+                           struct.pack("<I", zlib.crc32(blob)),
+                           timeout=_commit_timeout(c, blob))
 
 
-async def _open_transfer(s, want=None):
+async def _open_transfer(s, want=None, blob=None):
     """Open a transfer sized to this device: (token, blob, chunks).
 
     Deliberately not a round number of chunks: the last chunk carries the
     remainder, and a transfer that divided exactly would never exercise
     §14.3's rule that only the last one may be short.
+
+    `blob` is the operator's own bytes from `--aiding-blob`, and when one is
+    given it is the transfer: its length is what BEGIN names, and nothing here
+    clamps it. A blob cut to fit a ceiling is no longer aiding in any format,
+    so a device refusing one would be refusing it correctly and the run would
+    say something false about that device.
     """
     caps = _caps(s)
     begin = s.state.get("aiding_begin")
     chunk_bytes = begin["chunk_bytes"] if begin else None
     if chunk_bytes is None:
         raise Skip("no chunk size to work from")
-    total = want or min(caps["max_bytes"], chunk_bytes * 2 + max(1, chunk_bytes // 2))
-    if total > caps["max_bytes"]:
-        total = caps["max_bytes"]
+    if blob is not None:
+        total = len(blob)
+        if total > caps["max_bytes"]:
+            raise Skip(f"the supplied aiding blob is {total} bytes and this "
+                       f"device declares a ceiling of {caps['max_bytes']}, so "
+                       f"§14.2 requires it to refuse the transfer. Supply a "
+                       f"smaller product")
+        # SPEC.md §14.3 -- `max_bytes` is not the only ceiling. A transfer
+        # needing more than 65535 chunks at the chunk size this device chooses
+        # MUST be refused `bad_params`, so opening one and calling the refusal
+        # a failure would fail a device for obeying the rule.
+        if -(-total // chunk_bytes) > _MAX_CHUNKS:
+            raise Skip(f"the supplied aiding blob is {total} bytes, which at "
+                       f"this device's chunk size of {chunk_bytes} needs "
+                       f"{-(-total // chunk_bytes)} chunks. §14.3 caps a "
+                       f"transfer at {_MAX_CHUNKS} and requires this BEGIN "
+                       f"refused, so there is nothing here to test")
+    else:
+        total = want or min(caps["max_bytes"],
+                            chunk_bytes * 2 + max(1, chunk_bytes // 2))
+        if total > caps["max_bytes"]:
+            total = caps["max_bytes"]
     response = await _begin(s, total)
     if not response.ok:
         raise Fail(f"GNSS_AID_BEGIN for {total} bytes, inside the device's own "
                    f"declared ceiling of {caps['max_bytes']}, was answered "
                    f"{response.status_name}", response=response.raw.hex())
     result = _detail(response, "aid_begin_result")
-    blob = _payload(total)
-    return result["token"], blob, _split(blob, result["chunk_bytes"])
+    chosen = result["chunk_bytes"]
+    # `aiding.chunk_size` owns both of these rules and reports them properly.
+    # Repeated here because this is arithmetic, and a zero divides while a
+    # transfer past the ceiling overflows the u16 an index is packed into --
+    # either would surface as a harness error rather than as a finding.
+    if chosen == 0:
+        raise Fail("chunk_bytes is zero, so no chunk can carry anything",
+                   detail=response.detail.hex())
+    if -(-total // chosen) > _MAX_CHUNKS:
+        raise Fail(f"a transfer of {total} bytes was opened at a chunk size "
+                   f"of {chosen}, needing {-(-total // chosen)} chunks. "
+                   f"SPEC.md §14.3 caps a transfer at {_MAX_CHUNKS} -- index "
+                   f"and first_missing are both u16 -- and requires this "
+                   f"BEGIN answered bad_params. The chunks past that cannot "
+                   f"be named, so nothing can report them missing",
+                   detail=response.detail.hex())
+    if blob is None:
+        blob = _payload(total)
+    return result["token"], blob, _split(blob, chosen)
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +309,23 @@ async def aiding_rejects_oversized(s):
        requires=("gnss_aiding",),
        title="A complete transfer commits as applied")
 async def aiding_transfer(s):
-    token, blob, chunks = await _open_transfer(s)
+    # SPEC.md §14.6 -- a device MUST NOT accept anything but aiding in the
+    # format it declared, so a device that enforces it refuses `_payload()` by
+    # construction and `applied` is unreachable on bytes this harness invented.
+    # `--aiding-blob` is the way past that, and the only check that wants it:
+    # every other one here is about the transfer mechanics, which do not care
+    # what the bytes mean.
+    supplied = s.state.get("aiding_blob")
+    token, blob, chunks = await _open_transfer(s, blob=supplied)
+    # After the BEGIN, so a blob the device is entitled to refuse on size
+    # skips without this claiming bytes went out that never did.
+    if supplied is not None:
+        s.note(f"aiding.transfer sent the {len(supplied)} bytes named by "
+               f"--aiding-blob rather than a synthetic pattern. SPEC.md §14.6 "
+               f"-- a device applies a transfer at commit, not as it arrives, "
+               f"so a blob carrying time initialisation is already as old as "
+               f"the file plus the transfer. Build one at run time rather "
+               f"than keeping it on disk.")
     for index, body in enumerate(chunks):
         await _write_chunk(s, token, index, body)
     response = await _commit(s, blob)
@@ -267,14 +345,46 @@ async def aiding_transfer(s):
                    "IEEE 802.3 polynomial, reflected, initial and final value "
                    "0xFFFFFFFF, over the reassembled payload and not the "
                    "chunks", detail=response.detail.hex())
+    if result["result"] == _RESULT_VALUE["rejected"]:
+        if supplied is None:
+            # `rejected` is legitimate -- the receiver may refuse synthetic
+            # bytes.
+            s.note(f"a complete, intact transfer of synthetic bytes was "
+                   f"answered {name}. That is conforming: SPEC.md §14.4's "
+                   f"`rejected` says the transfer arrived and the receiver "
+                   f"would not take it, which is the expected answer to a "
+                   f"payload that is not real aiding data. It also means the "
+                   f"`applied` half of §14.4 went untested on this device -- "
+                   f"pass --aiding-blob with a product in the format it "
+                   f"declared to reach it.")
+            raise Observe(f"complete transfer answered {name}", result=name)
+        # A blob the operator vouched for, refused. Either those bytes are not
+        # aiding this receiver takes or the device refuses one that is, and
+        # nothing on this side of the link can tell the two apart -- so this
+        # is a warning naming both, not a verdict on the device.
+        raise Fail(f"the {len(blob)} bytes from --aiding-blob arrived intact "
+                   f"and the transfer was answered {name}. Either they are "
+                   f"not aiding this receiver will take -- the wrong product, "
+                   f"the wrong format, or stale -- or the device refuses one "
+                   f"that is. SPEC.md §14.1 makes the bytes opaque to this "
+                   f"harness, so it cannot tell you which",
+                   severity="SHOULD", detail=response.detail.hex(),
+                   result=name, blob_bytes=len(blob))
     if result["result"] != _RESULT_VALUE["applied"]:
-        # `rejected` is legitimate -- the receiver may refuse synthetic bytes.
-        s.note(f"a complete, intact transfer of synthetic bytes was answered "
-               f"{name}. That is conforming: SPEC.md §14.4's `rejected` says "
-               f"the transfer arrived and the receiver would not take it, "
-               f"which is the expected answer to a payload that is not real "
-               f"aiding data.")
-        raise Observe(f"complete transfer answered {name}", result=name)
+        # SPEC.md §14.4 -- *other* MUST decode as unknown, never as a default,
+        # and §11.4 lets a minor version add a member at any time. So a value
+        # this version does not define is not by itself a violation, and it is
+        # certainly not `rejected`: reading receiver-refusal semantics into it
+        # would be the harness doing the exact thing §14.4 forbids a client to
+        # do, and would put a verdict on a device for a result nobody here can
+        # interpret.
+        s.note(f"the commit was answered with aid_result value "
+               f"{result['result']}, which this version of the specification "
+               f"does not define. A client MUST treat it as unknown -- in "
+               f"particular it MUST NOT be read as `rejected` -- so nothing "
+               f"here can say whether the transfer was applied.")
+        raise Observe(f"complete transfer answered unknown result "
+                      f"{result['result']}", result=result["result"])
     # SPEC.md §14.4 -- nothing is missing, so there is no index to report.
     if result["validity"] & _FIRST_MISSING:
         raise Fail("the transfer was applied and the first_missing bit is set. "

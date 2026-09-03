@@ -6,6 +6,7 @@ every role it declares, and print what it did.
 """
 import argparse
 import asyncio
+import pathlib
 import platform
 import sys
 
@@ -47,6 +48,14 @@ def build_parser():
                      help="a CAN identifier to subscribe to, hex or decimal; "
                           "repeatable. Needed only if the device does not "
                           "support masked subscriptions")
+    run.add_argument("--aiding-blob", metavar="PATH",
+                     help="send these bytes as the payload of the §14.4 "
+                          "transfer, instead of a synthetic pattern. §14.6 "
+                          "lets a device refuse anything that is not aiding "
+                          "in the format it declared, and one that does can "
+                          "never answer `applied` to bytes the harness "
+                          "invented. Build the file at run time -- a stale "
+                          "one is stale aiding")
     run.add_argument("--no-adversarial", action="store_true",
                      help="do not send malformed or out-of-range requests")
     run.add_argument("--no-reconnect", action="store_true",
@@ -86,6 +95,63 @@ def _parse_can_id(text):
         return int(text, 0)
     except ValueError:
         raise SystemExit(f"not a CAN identifier: {text!r}")
+
+
+def _read_aiding_blob(path):
+    """The bytes of `--aiding-blob`, or None with the reason printed.
+
+    Read before anything touches Bluetooth: a typo in the path is worth
+    finding now rather than after a scan, a connection and thirty checks.
+
+    None rather than SystemExit because the exit code carries meaning here.
+    `SystemExit(str)` leaves status 1, which is EXIT_NOT_CONFORMING -- a
+    verdict about a device this run never connected to. An unreadable file is
+    a run that did not happen, which is EXIT_ERROR.
+    """
+    try:
+        blob = pathlib.Path(path).read_bytes()
+    except OSError as exc:
+        print(f"could not read --aiding-blob {path}: {exc}")
+        return None
+    if not blob:
+        print(f"--aiding-blob {path} is empty. A transfer of no bytes is not "
+              f"a transfer, and SPEC.md §14.1 has nothing for a device to "
+              f"apply")
+        return None
+    return blob
+
+
+#: Options whose value is a path the RELAUNCHED process has to find again.
+#: macOS gives a bundled child a working directory of its own, so a relative
+#: path that the parent read happily resolves against somewhere else in the
+#: child -- and the failure is a file-not-found for a file that plainly
+#: exists. Both directions of use are here: an input the child reads, and the
+#: two reports it writes.
+_PATH_OPTIONS = ("--aiding-blob", "--json", "--markdown")
+
+
+def _absolute_paths(argv):
+    """`argv` with every path option resolved against THIS working directory.
+
+    Handles both spellings argparse accepts, `--opt value` and `--opt=value`.
+    """
+    out, expecting = [], False
+    for arg in argv:
+        if expecting:
+            out.append(str(pathlib.Path(arg).resolve()))
+            expecting = False
+            continue
+        if arg in _PATH_OPTIONS:
+            expecting = True
+            out.append(arg)
+            continue
+        for option in _PATH_OPTIONS:
+            if arg.startswith(option + "="):
+                value = arg[len(option) + 1:]
+                arg = f"{option}={pathlib.Path(value).resolve()}"
+                break
+        out.append(arg)
+    return out
 
 
 def _print_faults():
@@ -176,7 +242,7 @@ def _macos_preflight(args):
         return EXIT_ERROR
     print("macOS blocks Bluetooth for a process without an app bundle. "
           "Relaunching\nthrough one; the first run will ask for permission.\n")
-    code, error = macos.relaunch(sys.argv[1:])
+    code, error = macos.relaunch(_absolute_paths(sys.argv[1:]))
     if code is None:
         print(macos.explain("tcc"))
         if error:
@@ -189,6 +255,12 @@ async def _main(args):
     if args.fault == ["list"] or "list" in args.fault:
         _print_faults()
         return EXIT_OK
+
+    aiding_blob = None
+    if args.aiding_blob:
+        aiding_blob = _read_aiding_blob(args.aiding_blob)
+        if aiding_blob is None:
+            return EXIT_ERROR
 
     if args.loopback:
         transport = LoopbackTransport(faults=args.fault)
@@ -211,6 +283,7 @@ async def _main(args):
         observe_s=args.seconds,
         can_ids=[_parse_can_id(v) for v in args.can_id],
         reconnect=not args.no_reconnect,
+        aiding_blob=aiding_blob,
         on_result=console.result,
         on_phase=console.phase,
     )
