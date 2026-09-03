@@ -441,7 +441,7 @@ records:
     access: notify
     extensible: true
     validity: gps_validity
-    desc: "One complete position solution. Never split, never paired, never packed."
+    desc: "One complete GNSS solution. Never split, never paired, never packed."
     fields:
       - {name: seq,      offset: 0,  size: 2, type: u16, desc: "Notifications sent on this characteristic; +1 each, wraps, restarts at 0 per connection"}
       - {name: dropped,  offset: 2,  size: 2, type: u16, desc: "Fixes accepted then discarded since the previous notification; saturates, never wraps"}

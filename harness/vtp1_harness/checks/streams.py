@@ -251,6 +251,59 @@ async def gps_fix_types(s):
         fix_types=seen, solution_epoch=epoch)
 
 
+@check(id="gps.solution_scoped_bits", section="5.2", phase="streams",
+       severity="OBSERVE", requires=("gps",),
+       title="num_sv and p_dop are scoped to the solution fix_type names")
+async def gps_solution_scoped_bits(s):
+    """SPEC.md 5.2, the half no vector and no encoder can reach.
+
+    The corpus holds a device to what it EMITS, and the rule that changed
+    firmware behaviour is about what a device WITHHOLDS: a satellite count kept
+    back because the fix carries no position. An encoder cannot refuse an
+    omission and produce.py cannot see one, so a device that keeps bit 11 clear
+    through every time-only fix passes everything else in this repository. It
+    is reported here rather than failed, because a receiver that has no count
+    to give leaves exactly the same trace as one declining to pass it on.
+
+    The two rules a host CAN prove from a payload -- a p_dop beside no
+    position, a position beside a fix_type naming none -- are noted with it,
+    since a run that reaches this check has the fixes in hand.
+    """
+    _log(s, "gps")
+    good, _ = _decoded(s, "gps")
+    known = refdec.enum_values("fix_type")
+    positionless = {v for v, name in known.items()
+                    if name in ("none", "time_only")}
+    num_sv = 1 << refdec.bit("gps_validity", "num_sv")
+    p_dop = 1 << refdec.bit("gps_validity", "p_dop")
+    position = 1 << refdec.bit("gps_validity", "position")
+
+    time_only = [f for _, f in good if known.get(f["fix_type"]) == "time_only"]
+    counted = sum(1 for f in time_only if f["validity"] & num_sv)
+    contradictions = [
+        f for _, f in good
+        if (f["fix_type"] in positionless
+            and f["validity"] & (p_dop | position))
+        or (f["validity"] & p_dop and not f["validity"] & position)]
+
+    if time_only and not counted:
+        s.note(f"{len(time_only)} time-only fix(es) arrived and none carried "
+               f"num_sv. §5.2 scopes the count to the solution fix_type "
+               f"names, so a device holding it MUST report it here; a "
+               f"receiver that has no count to give looks the same from a "
+               f"host, which is why this is not a failure.")
+    if contradictions:
+        s.note(f"{len(contradictions)} fix(es) break §5.2: a p_dop beside no "
+               f"position, or a position beside a fix_type naming none. The "
+               f"payloads are well-formed, so they decode -- and a client "
+               f"MUST NOT resolve either pair on the device's behalf.")
+    raise Observe(
+        f"{len(time_only)} time-only fix(es), {counted} carrying num_sv; "
+        f"{len(contradictions)} §5.2 contradiction(s)",
+        time_only=len(time_only), time_only_with_num_sv=counted,
+        scope_contradictions=len(contradictions))
+
+
 @check(id="can.header_reserved", section="6", phase="streams", severity="MUST",
        requires=("can",),
        title="can_header.reserved is zero")

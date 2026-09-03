@@ -215,13 +215,14 @@
       "record": "gps_fix",
       "must_refuse": true,
       "vector": "latitude-beyond-the-pole",
-      "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position bit set so the range rule applies.",
+      "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position bit set so the range rule applies. fix_type is 3 for the reason `info` names below: a position bit beside a fix_type of `none` is refused under SPEC.md 5.2, and a case refused for another reason tests nothing about the range.",
       "input": {
         "fix": {
           "seq": 0,
           "validity": 4,
           "lat": 910000000,
           "lon": 0,
+          "fix_type": 3,
           "ext_count": 0
         }
       }
@@ -231,13 +232,14 @@
       "record": "gps_fix",
       "must_refuse": true,
       "vector": "longitude-beyond-the-antimeridian",
-      "desc": "SPEC.md 5.4 -- a longitude of 181 degrees, with the position bit set so the range rule applies.",
+      "desc": "SPEC.md 5.4 -- a longitude of 181 degrees, with the position bit set so the range rule applies, and a fix_type of 3 so SPEC.md 5.2 is not what refuses it.",
       "input": {
         "fix": {
           "seq": 0,
           "validity": 4,
           "lat": 0,
           "lon": 1810000000,
+          "fix_type": 3,
           "ext_count": 0
         }
       }
@@ -298,6 +300,23 @@
           "seq": 0,
           "validity": 1024,
           "p_dop": 140,
+          "fix_type": 5,
+          "ext_count": 0
+        }
+      }
+    },
+    {
+      "name": "gps-position-on-a-time-only-fix",
+      "record": "gps_fix",
+      "must_refuse": true,
+      "vector": "position-on-a-time-only-fix",
+      "desc": "SPEC.md 5.2 -- a valid position beside a fix_type of time_only, which names no position solution. The record would say both, and nothing on the wire says which half is the defect.",
+      "input": {
+        "fix": {
+          "seq": 0,
+          "validity": 4,
+          "lat": 515074000,
+          "lon": -1397000,
           "fix_type": 5,
           "ext_count": 0
         }

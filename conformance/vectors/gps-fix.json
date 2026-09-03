@@ -574,6 +574,55 @@
       "no_roundtrip": true
     },
     {
+      "name": "position-on-a-time-only-fix",
+      "desc": "A position beside a fix_type that says there is none: a device-side violation of SPEC.md 5.2. A receiver MUST decode the fix and SHOULD flag it, and MUST NOT pick a winner between the two on the device's behalf.",
+      "record": "gps_fix",
+      "hex": "110000000508000015cd5b0700000000007ccd2d9b010000d067b31ef8aeeaff000000000000000000000000000000000000000000000000000000000000000000000000000005061800",
+      "expect": {
+        "seq": 17,
+        "dropped": 0,
+        "validity": 2053,
+        "t_device": 123456789,
+        "t_utc": 1766000000000,
+        "lat": 515074000,
+        "lon": -1397000,
+        "alt_msl": 0,
+        "alt_ellipsoid": 0,
+        "vel_n": 0,
+        "vel_e": 0,
+        "vel_d": 0,
+        "head_mot": 0,
+        "h_acc": 0,
+        "v_acc": 0,
+        "s_acc": 0,
+        "p_dop": 0,
+        "fix_type": 5,
+        "num_sv": 6,
+        "fix_flags": 24,
+        "ext_count": 0,
+        "fix_type_known": true
+      },
+      "expect_absent": [
+        "alt_ellipsoid",
+        "alt_msl",
+        "h_acc",
+        "head_mot",
+        "p_dop",
+        "s_acc",
+        "v_acc",
+        "vel_d",
+        "vel_e",
+        "vel_n"
+      ],
+      "expect_scaled": {
+        "lat": 51.5074,
+        "lon": -0.1397,
+        "head_mot": 0.0,
+        "p_dop": 0.0
+      },
+      "no_roundtrip": true
+    },
+    {
       "name": "num-sv-with-no-solution",
       "desc": "num_sv valid beside a fix_type of none: a device-side violation of SPEC.md 5.2, since no solution was reached for a satellite to have been used in. A receiver MUST decode the fix and SHOULD flag it.",
       "record": "gps_fix",

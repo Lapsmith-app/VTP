@@ -1192,6 +1192,16 @@ def vectors(schema):
              "evidence that a position exists after all.",
              refused_by="gps-p-dop-on-a-time-only-fix",
              no_roundtrip=True),
+        case(schema, "gps_fix", "position-on-a-time-only-fix",
+             dict(nominal, seq=17,
+                  validity=V["t_utc"] | V["position"] | V["num_sv"],
+                  fix_type=5, num_sv=6, fix_flags=0b0001_1000),
+             "A position beside a fix_type that says there is none: a "
+             "device-side violation of SPEC.md 5.2. A receiver MUST decode "
+             "the fix and SHOULD flag it, and MUST NOT pick a winner between "
+             "the two on the device's behalf.",
+             refused_by="gps-position-on-a-time-only-fix",
+             no_roundtrip=True),
         case(schema, "gps_fix", "num-sv-with-no-solution",
              dict(nominal, seq=16, validity=V["num_sv"],
                   fix_type=0, num_sv=9, fix_flags=0),
@@ -2841,15 +2851,20 @@ def vectors(schema):
         {"name": "gps-latitude-beyond-the-pole",
          "record": "gps_fix", "must_refuse": True, "vector": "latitude-beyond-the-pole",
          "desc": "SPEC.md 5.4 -- a latitude of 91 degrees, with the position "
-                 "bit set so the range rule applies.",
+                 "bit set so the range rule applies. fix_type is 3 for the "
+                 "reason `info` names below: a position bit beside a "
+                 "fix_type of `none` is refused under SPEC.md 5.2, and a "
+                 "case refused for another reason tests nothing about the "
+                 "range.",
          "input": {"fix": dict(seq=0, validity=V["position"], lat=910_000_000,
-                               lon=0, ext_count=0)}},
+                               lon=0, fix_type=3, ext_count=0)}},
         {"name": "gps-longitude-beyond-the-antimeridian",
          "record": "gps_fix", "must_refuse": True, "vector": "longitude-beyond-the-antimeridian",
          "desc": "SPEC.md 5.4 -- a longitude of 181 degrees, with the position "
-                 "bit set so the range rule applies.",
+                 "bit set so the range rule applies, and a fix_type of 3 so "
+                 "SPEC.md 5.2 is not what refuses it.",
          "input": {"fix": dict(seq=0, validity=V["position"], lat=0,
-                               lon=1_810_000_000, ext_count=0)}},
+                               lon=1_810_000_000, fix_type=3, ext_count=0)}},
         {"name": "gps-heading-at-360",
          "record": "gps_fix", "must_refuse": True, "vector": "heading-at-360",
          "desc": "SPEC.md 5.4 -- a heading of exactly 360 degrees, which the "
@@ -2876,6 +2891,15 @@ def vectors(schema):
                  "geometry, and this fix reports no position.",
          "input": {"fix": dict(seq=0, validity=V["p_dop"], p_dop=140,
                                fix_type=5, ext_count=0)}},
+        {"name": "gps-position-on-a-time-only-fix",
+         "record": "gps_fix", "must_refuse": True,
+         "vector": "position-on-a-time-only-fix",
+         "desc": "SPEC.md 5.2 -- a valid position beside a fix_type of "
+                 "time_only, which names no position solution. The record "
+                 "would say both, and nothing on the wire says which half "
+                 "is the defect.",
+         "input": {"fix": dict(seq=0, validity=V["position"], lat=515_074_000,
+                               lon=-1_397_000, fix_type=5, ext_count=0)}},
         {"name": "gps-num-sv-with-no-solution",
          "record": "gps_fix", "must_refuse": True,
          "vector": "num-sv-with-no-solution",

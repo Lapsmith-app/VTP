@@ -1464,7 +1464,11 @@ solution `fix_type` names and `p_dop` to a position's geometry, and says the
 two adjacent bits do not move together. What the adjective in its description
 settled for `p_dop` is stated rather than inferred, and `fix_type = none` — no
 solution for a satellite to have been used in — leaves bit 11 clear, so the
-count of satellites *tracked* cannot borrow the name of the count *used*.
+count of satellites *tracked* cannot borrow the name of the count *used*. The
+premise underneath both — that a `fix_type` of `none` or `time_only` reports no
+position — is now a rule of its own rather than an assumption two other rules
+lean on, and SPEC §5 no longer opens by calling every notification a position
+solution, which is the sentence the narrow reading came from.
 
 **An IMU batch could carry no samples**, though `t_base` is defined as the
 acquisition time of sample 0. The same reasoning was then applied to CAN:

@@ -99,7 +99,7 @@ framing.
 | --- | --- |
 | Specification | Believed internally consistent; §4.1 fixes the profile |
 | UUID allocation | Frozen |
-| Conformance corpus | 166 vectors across 10 record types, and 62 producer cases |
+| Conformance corpus | 167 vectors across 10 record types, and 63 producer cases |
 | Reference decoders | C and Python, both passing every vector |
 | Reference encoders | C and Python, both passing every producer case |
 | Software peripheral | A synthetic device, verified against the reference decoder |

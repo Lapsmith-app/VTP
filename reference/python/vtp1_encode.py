@@ -229,6 +229,12 @@ USED."""
             "gps_fix claims a num_sv beside fix_type none; no solution was "
             "reached for a satellite to have been used in, and the tracked "
             "count has no field in VTP/1")
+    if (validity & bit["position"]
+            and fix_type in (FIX_TYPE["none"], FIX_TYPE["time_only"])):
+        raise EncodeError(
+            "gps_fix carries a valid position beside fix_type {}, which names "
+            "no position solution; the record would say both and nothing on "
+            "the wire says which half is the defect".format(fix_type))
 
 
 def encode_gps_fix(fix, ext=b""):

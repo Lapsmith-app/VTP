@@ -397,11 +397,12 @@ conformance role covers both directions of the records it names
 
 ## 5. GPS characteristic — NOTIFY
 
-One notification carries exactly one position solution. There is no pairing
-between characteristics and no reassembly.
+One notification carries exactly one GNSS solution — a position solution
+where the receiver has one, and otherwise whatever solution `fix_type` names
+(§5.2). There is no pairing between characteristics and no reassembly.
 
 <!-- BEGIN GENERATED: gps_fix -->
-*One complete position solution. Never split, never paired, never packed.*
+*One complete GNSS solution. Never split, never paired, never packed.*
 
 Total: **74 bytes**. All fields little-endian.
 
@@ -525,16 +526,24 @@ Zero is a measurement where the reported solution genuinely used no satellites
 zero. §5.1 keeps the two apart: absence is the bit's to signal, and no value of
 `num_sv` signals it.
 
+**A `fix_type` of `none` or `time_only` reports no position**, so a device
+MUST leave the `position` bit clear on such a fix. The two never disagree: a
+record naming no position solution and carrying a position leaves a client to
+choose between them, and nothing on the wire says which is the defect.
+
 **`p_dop` describes the geometry of a position solution**, so a device MUST
 leave bit 10 clear on a fix reporting no position: a `fix_type` of `none` or
 `time_only`, or any fix whose `position` bit is clear.
 
 The two fields are adjacent and their bits are not a pair. On a `time_only`
-fix, bit 11 carries a measurement and bit 10 is clear. Both rules bind the
-device; a receiver MUST decode a fix that breaks either — the payload is
-well-formed — and SHOULD surface the violation as a device defect. It MUST NOT
+fix, bit 11 carries a measurement and bit 10 is clear. Every rule in this
+subsection binds the device; a receiver MUST decode a fix that breaks one —
+the payload is well-formed — and SHOULD surface the violation as a device
+defect. It MUST NOT
 reject the fix, and MUST NOT read a `p_dop` beside an absent position as
-evidence that a position exists.
+evidence that a position exists. The same holds for a position beside a
+`fix_type` that names none: a receiver decodes both and MUST NOT pick a winner
+on the device's behalf.
 
 ### 5.3 Fix flags
 

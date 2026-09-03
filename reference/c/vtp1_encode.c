@@ -91,6 +91,12 @@ int vtp_encode_gps_fix(const vtp_gps_fix_t *f,
             || !(f->validity & VTP_GPS_VALIDITY_POSITION))) return -1;
     if ((f->validity & VTP_GPS_VALIDITY_NUM_SV)
         && f->fix_type == VTP_FIX_TYPE_NONE) return -1;
+    /* ...and the premise of the rule above is itself a rule: a fix_type
+     * naming no position solution beside a valid position leaves a client
+     * choosing between the two halves of one record. */
+    if ((f->validity & VTP_GPS_VALIDITY_POSITION)
+        && (f->fix_type == VTP_FIX_TYPE_NONE
+            || f->fix_type == VTP_FIX_TYPE_TIME_ONLY)) return -1;
     /* SPEC.md §5.5 — the notification length MUST equal the base record plus
      * exactly the bytes accounted for by ext_count. An encoder that writes a
      * count disagreeing with its own payload emits something no conforming

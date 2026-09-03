@@ -714,7 +714,7 @@
       "access": "notify",
       "extensible": true,
       "validity": "gps_validity",
-      "desc": "One complete position solution. Never split, never paired, never packed.",
+      "desc": "One complete GNSS solution. Never split, never paired, never packed.",
       "fields": [
         {
           "name": "seq",
