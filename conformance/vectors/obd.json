@@ -268,7 +268,7 @@
     },
     {
       "name": "nine-ecus",
-      "desc": "Nine entries. ISO 15765-4 caps the responders to a functional request at eight, so a ninth is a claim about a bus that cannot happen (SPEC.md 15.2). The layout is sound -- the length arithmetic agrees with count -- so it decodes, and SHOULD be flagged.",
+      "desc": "Nine entries. The record names at most eight, and a probe more than eight answered reports the eight lowest with `truncated` set (SPEC.md 15.2) -- so a ninth entry is a device that skipped the rule, not a car this record can describe. The layout is sound -- the length arithmetic agrees with count -- so it decodes, and SHOULD be flagged.",
       "record": "obd_info",
       "hex": "0109df0700007dfc15c801e005887e0921000000e8070000e9070000ea070000eb070000ec070000ed070000ee070000ef070000f0070000",
       "expect": {
@@ -308,6 +308,103 @@
           },
           {
             "id": 2032
+          }
+        ]
+      },
+      "expect_absent": [],
+      "no_roundtrip": true
+    },
+    {
+      "name": "nine-answered-eight-reported",
+      "desc": "The conforming answer on a 29-bit bus with nine ECUs on it -- the case SPEC.md 15.2's cap does not reach on its own, because 18DAF1xx carries 256 response identifiers and not eight. The device reports the eight numerically lowest, unions their masks and sets `truncated`. Lowest rather than first to answer, so two conforming devices probing this car still produce identical bytes; `truncated`, so a client reads the masks as a floor rather than as a census of the car.",
+      "record": "obd_info",
+      "hex": "0308f133db3811d801c00140048012080100000000f1da3808f1da3810f1da3818f1da3820f1da3828f1da3830f1da3838f1da38",
+      "expect": {
+        "probe": {
+          "validity": 3,
+          "count": 8,
+          "request_id": 953889777,
+          "supported_01_20": 3221346321,
+          "supported_21_40": 2147762177,
+          "supported_41_60": 67602,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 953872640
+          },
+          {
+            "id": 953872648
+          },
+          {
+            "id": 953872656
+          },
+          {
+            "id": 953872664
+          },
+          {
+            "id": 953872672
+          },
+          {
+            "id": 953872680
+          },
+          {
+            "id": 953872688
+          },
+          {
+            "id": 953872696
+          }
+        ]
+      },
+      "expect_absent": [],
+      "note": "The dropped ECU leaves no trace in the bytes beyond this bit, and cannot: its identifier is what the record has no room for. A client that wants its frames subscribes over the 18DAF1xx range itself (SPEC.md 15.5)."
+    },
+    {
+      "name": "truncated-behind-a-silent-probe",
+      "desc": "`truncated` set with `responded` clear: responders dropped from a probe nothing answered. A device-side violation of SPEC.md 15.2; decodes, SHOULD be flagged.",
+      "record": "obd_info",
+      "hex": "0200000000000000000000000000000000000000",
+      "expect": {
+        "probe": {
+          "validity": 2,
+          "count": 0,
+          "request_id": 0,
+          "supported_01_20": 0,
+          "supported_21_40": 0,
+          "supported_41_60": 0,
+          "reserved_18": 0
+        },
+        "ecus": []
+      },
+      "expect_absent": [
+        "request_id",
+        "supported_01_20",
+        "supported_21_40",
+        "supported_41_60"
+      ],
+      "no_roundtrip": true
+    },
+    {
+      "name": "truncated-below-the-cap",
+      "desc": "`truncated` set beside two entries. Truncation happens at the cap and nowhere else (SPEC.md 15.2), so a device that dropped a responder while naming two dropped one it had six free entries for. Decodes, SHOULD be flagged.",
+      "record": "obd_info",
+      "hex": "0302df0700007dfc15c801e005887e0921000000e8070000e9070000",
+      "expect": {
+        "probe": {
+          "validity": 3,
+          "count": 2,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118,
+          "reserved_18": 0
+        },
+        "ecus": [
+          {
+            "id": 2024
+          },
+          {
+            "id": 2025
           }
         ]
       },

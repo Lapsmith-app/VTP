@@ -1470,6 +1470,42 @@ position — is now a rule of its own rather than an assumption two other rules
 lean on, and SPEC §5 no longer opens by calling every notification a position
 solution, which is the sentence the narrow reading came from.
 
+**The union over every ECU that answered had no record once a ninth
+answered.** SPEC §15.3 scoped the three `supported_*` masks to "every ECU that
+answered"; SPEC §15.2 capped the entry list at eight and required `count` to
+be non-zero whenever anything answered. The three are consistent while at most
+eight answer, and on 11-bit functional addressing nothing else can: ISO
+15765-4 legislates eight response identifiers, `0x7E8`–`0x7EF`, so the cap
+there is arithmetic rather than a rule. The 29-bit fallback the same section
+*requires* is not so bounded — responses to `18DB33F1` arrive on `18DAF1xx`,
+whose low byte is the responder's source address, which is 256 identifiers —
+so a ninth responder is an ordinary bus reached by the prescribed fallback,
+and for it no conforming record existed at all: the list could not name nine,
+`count` could not say nine, and `responded` could not be clear because
+something plainly answered. Reported by the first device firmware, from the
+addressing rather than from a car. Two readings were available and neither was
+free. A literal union with eight listed makes the record claim a PID whose
+only responder it does not name — SPEC §15.4 lets a client poll it,
+SPEC §15.5's fallback delivers only on reported identifiers, and the device
+then transmits onto a car for a reply the client cannot receive, which is the
+shape SPEC §15.1's bounds exist to make unexpressible. A union over the eight
+reported is self-consistent and under-reports the car. The self-consistent one
+won, with the under-report made visible rather than accepted silently:
+SPEC §15.2 now names the selection — the eight numerically *lowest*
+identifiers, because arrival order is not reproducible and the
+ascending-entry rule exists so that two conforming devices probing one car
+produce identical bytes — SPEC §15.3 scopes the union to the ECUs the record
+reports, and `obd_validity` bit 1 (`truncated`) says the masks are a floor
+rather than a census. That bit is what makes the choice conform to SPEC §1.1
+rather than merely satisfy SPEC §15.2: a silently truncated union has a
+client read "unsupported" off a car that supports the PID, which is a
+plausible wrong value, and no byte vector can catch it because every byte of
+the record is well-formed. Raising the cap
+was considered and declined — `count` is a `u8` and an entry is four bytes, so
+a control response at the minimum ATT MTU holds eighteen entries rather than
+eight — but a higher cap moves the cliff instead of closing it, and the
+truncation rule would still have to exist at nineteen.
+
 **An IMU batch could carry no samples**, though `t_base` is defined as the
 acquisition time of sample 0. The same reasoning was then applied to CAN:
 SPEC.md §6.2 forbids an empty CAN batch too, because its `t_base` is defined

@@ -554,13 +554,19 @@ int vtp_encode_obd_info(const vtp_obd_probe_t *p,
     /* SPEC.md 15.2's content rules, which the decoder deliberately accepts:
      * the refusals are the device-side half of each. `responded` set with no
      * entries says something answered and lists nothing that did; an entry
-     * behind a silent probe is the reverse; ISO 15765-4 caps the responders
-     * to a functional request at eight; and the entry list is strictly
-     * ascending over bits 0-29, so one ECU cannot appear to be two and two
-     * conforming devices probing one car produce identical bytes. */
+     * behind a silent probe is the reverse; the record names at most eight
+     * ECUs, and a probe more than eight answered reports the eight lowest
+     * with `truncated` set -- so `truncated` behind a silent probe, or
+     * beside fewer than eight entries, contradicts itself; and the entry
+     * list is strictly ascending over bits 0-29, so one ECU cannot appear to
+     * be two and two conforming devices probing one car produce identical
+     * bytes. */
     if (responded && p->count == 0) return -1;
     if (!responded && p->count != 0) return -1;
     if (p->count > 8) return -1;
+    if (v & VTP_OBD_VALIDITY_TRUNCATED) {
+        if (!responded || p->count != 8) return -1;
+    }
     /* SPEC.md 15.2 -- refused, never masked, for 6.4's reason: masking
      * produces a different identifier that looks entirely valid. Scoped to
      * a probe that answered: with `responded` clear the field is gated to

@@ -293,7 +293,8 @@ typedef enum {
 #define VTP_COMMIT_VALIDITY_KNOWN (~(uint32_t)VTP_COMMIT_VALIDITY_RESERVED)
 
 #define VTP_OBD_VALIDITY_RESPONDED (1u << 0)
-#define VTP_OBD_VALIDITY_RESERVED 0xFEu
+#define VTP_OBD_VALIDITY_TRUNCATED (1u << 1)
+#define VTP_OBD_VALIDITY_RESERVED 0xFCu
 #define VTP_OBD_VALIDITY_KNOWN (~(uint32_t)VTP_OBD_VALIDITY_RESERVED)
 
 /* SPEC.md 4.1 -- a capability bit and every bit it requires. */

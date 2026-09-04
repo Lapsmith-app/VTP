@@ -609,9 +609,14 @@
           "bit": 0,
           "name": "responded",
           "desc": "An OBD-II ECU answered the probe; request_id and the three supported masks are valid"
+        },
+        {
+          "bit": 1,
+          "name": "truncated",
+          "desc": "More ECUs answered than the record can name; the entries and the three masks describe the eight reported (SPEC.md 15.2)"
         }
       ],
-      "reserved_from": 1,
+      "reserved_from": 2,
       "reserved_purpose": "Validity for probe results added in a later minor"
     }
   },
@@ -1449,7 +1454,7 @@
           "offset": 1,
           "size": 1,
           "type": "u8",
-          "desc": "obd_ecu entries following; MUST be 0 exactly when `responded` is clear, and at most 8 (SPEC.md 15.2)"
+          "desc": "obd_ecu entries following; MUST be 0 exactly when `responded` is clear, and at most 8 -- a probe more than eight answered reports the eight lowest and sets `truncated` (SPEC.md 15.2)"
         },
         {
           "name": "request_id",
@@ -1465,7 +1470,7 @@
           "size": 4,
           "type": "u32",
           "valid_bit": "responded",
-          "desc": "Union over responding ECUs of Mode 01 PID support; bit n = PID 0x01+n, LSB first (SPEC.md 15.3)"
+          "desc": "Union over the ECUs this record reports of Mode 01 PID support; bit n = PID 0x01+n, LSB first (SPEC.md 15.3)"
         },
         {
           "name": "supported_21_40",

@@ -17,6 +17,9 @@ from . import Fail, Observe, Skip, check
 
 POLLING = 1 << refdec.bit("can_flags", "polling")
 RESPONDED = 1 << refdec.bit("obd_validity", "responded")
+TRUNCATED = 1 << refdec.bit("obd_validity", "truncated")
+#: SPEC.md §15.2 -- the most ECUs one obd_probe record can name.
+MAX_ECUS = 8
 
 
 def _schedule(pids, groups=None, min_ms=0):
@@ -121,20 +124,28 @@ async def obd_probe(s):
     s.state["obd_probe_raw"] = response.detail
     probe = s.state["obd_probe"]
     if probe["probe"]["validity"] & RESPONDED:
+        # §15.2 -- a truncated probe is conforming and under-reports the car,
+        # so the operator sees it here rather than inferring it from a PID
+        # the masks do not claim.
+        more = (" (`truncated`: more ECUs answered than the record names, so "
+                "the masks are a floor rather than a census)"
+                if probe["probe"]["validity"] & TRUNCATED else "")
         raise Observe(
             f"request id 0x{probe['probe']['request_id']:X}, "
             f"{probe['probe']['count']} ECU(s): "
-            + ", ".join(f"0x{e['id']:X}" for e in probe["ecus"]))
+            + ", ".join(f"0x{e['id']:X}" for e in probe["ecus"]) + more)
     raise Observe("nothing answered the probe -- a gatewayed port, or no "
                   "J1979 stack on this bus")
 
 
 @check(id="obd.count_agrees", section="15.2", phase="control", severity="MUST",
        requires=("obd",),
-       title="The probe's count agrees with `responded`, and stays within 8")
+       title="The probe's count agrees with `responded` and `truncated`, and "
+             "stays within 8")
 async def obd_count_agrees(s):
     probe = _probe(s)
     responded = bool(probe["probe"]["validity"] & RESPONDED)
+    truncated = bool(probe["probe"]["validity"] & TRUNCATED)
     count = probe["probe"]["count"]
     if responded and count == 0:
         raise Fail(
@@ -146,10 +157,24 @@ async def obd_count_agrees(s):
             f"count is {count} with `responded` clear: an ECU is listed on a "
             f"probe that says nothing answered (§15.2)",
             detail=s.state["obd_probe_raw"].hex())
-    if count > 8:
+    if count > MAX_ECUS:
         raise Fail(
-            f"count is {count}; ISO 15765-4 caps the responders to a "
-            f"functional request at eight (§15.2)",
+            f"count is {count}; the record names at most {MAX_ECUS} ECUs, "
+            f"and a probe more than that answered reports the {MAX_ECUS} "
+            f"lowest with `truncated` set (§15.2)",
+            detail=s.state["obd_probe_raw"].hex())
+    if truncated and not responded:
+        raise Fail(
+            "`truncated` is set with `responded` clear: responders dropped "
+            "from a probe nothing answered (§15.2)",
+            detail=s.state["obd_probe_raw"].hex())
+    if truncated and count != MAX_ECUS:
+        raise Fail(
+            f"`truncated` is set beside {count} entr(ies); truncation "
+            f"happens at the cap and nowhere else, so this device dropped a "
+            f"responder it had {MAX_ECUS - count} free entr(ies) for "
+            f"(§15.2). A client reads the masks as a floor on a car that "
+            f"was reported whole",
             detail=s.state["obd_probe_raw"].hex())
 
 
