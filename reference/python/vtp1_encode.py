@@ -584,9 +584,10 @@ def encode_obd_info(probe, ecus):
 
     The decoder deliberately accepts what most of this refuses: count
     disagreeing with `responded`, duplicate or unordered entries, more than
-    eight of them. Those are content rules — the device MUST NOT emit them,
-    a receiver decodes and flags them — so the refusals live here, on the
-    device side, and conformance/encoders.json holds each one."""
+    eight of them, and `truncated` set behind a cleared `responded` or beside
+    fewer than eight entries. Those are content rules — the device MUST NOT
+    emit them, a receiver decodes and flags them — so the refusals live here,
+    on the device side, and conformance/encoders.json holds each one."""
     if len(ecus) != probe.get("count", 0):
         raise EncodeError(
             f"obd_probe.count is {probe.get('count', 0)} but {len(ecus)} "

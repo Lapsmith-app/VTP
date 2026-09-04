@@ -339,9 +339,11 @@ static inline int vtp_obd_identifier_ok(uint32_t raw) {
 
 /* Validates length arithmetic and §15.2's identifier validity for the whole
  * response before returning. The content rules -- count agreeing with
- * `responded`, entries strictly ascending, at most eight -- are NOT rejected
- * here: the layout is sound, so the response decodes and the CLIENT flags
- * the contradiction. The encoder refuses all of them (vtp1_encode.c). */
+ * `responded`, entries strictly ascending, at most eight, and `truncated`
+ * riding only on a probe that answered and named the full eight -- are NOT
+ * rejected here: the layout is sound, so the response decodes and the CLIENT
+ * flags the contradiction. The encoder refuses all of them
+ * (vtp1_encode.c). */
 int vtp_decode_obd_info(const uint8_t *buf, size_t len,
                         vtp_obd_probe_t *out, const char **err);
 /* Caller supplies index < out->count; the buffer must already have been
