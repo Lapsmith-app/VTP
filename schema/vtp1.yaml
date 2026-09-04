@@ -392,13 +392,23 @@ bitmasks:
     reserved_purpose: "Validity for commit results added in a later minor"
   obd_validity:
     width: 1
-    # One bit gating four fields, because they are one measurement: a probe
+    # Bit 0 gates four fields, because they are one measurement: a probe
     # that nothing answered has no request identifier that worked and no
     # masks that were read. Splitting them would let a device report masks
     # from a car that never replied.
+    #
+    # Bit 1 qualifies the same four rather than gating them. What is absent
+    # behind it is the rest of the car: SPEC.md 15.2 caps the entry list at
+    # eight, 29-bit functional addressing does not, and a report that
+    # silently dropped a responder is exactly the plausible wrong value
+    # SPEC.md 1.1 forbids -- a client would read "unsupported" off a car
+    # that supports the PID. One bit is the whole actionable content: the
+    # dropped ECUs' identifiers are not recoverable from the record either
+    # way, so what a client can act on is "this is a floor, not a census".
     bits:
       - {bit: 0, name: responded, desc: "An OBD-II ECU answered the probe; request_id and the three supported masks are valid"}
-    reserved_from: 1
+      - {bit: 1, name: truncated, desc: "More ECUs answered than the record can name; the entries and the three masks describe the eight reported (SPEC.md 15.2)"}
+    reserved_from: 2
     reserved_purpose: "Validity for probe results added in a later minor"
 
 records:
@@ -683,6 +693,12 @@ records:
   # per-ECU attribution is already carried by the response identifier on
   # every answering frame. The cost is stated in SPEC.md 15.3 rather than
   # discovered.
+  #
+  # The union is over the ECUs the record REPORTS, not over everything that
+  # answered. Scoped that way the record cannot claim a PID no entry answers,
+  # so every poll it invites has a reply SPEC.md 15.5 delivers; scoped the
+  # other way a truncated probe would invite a transmission whose answer
+  # arrives on an identifier the client was never told about.
   obd_probe:
     access: control
     size: 20
@@ -694,7 +710,7 @@ records:
       # layout, not content. Its agreement with `responded` -- zero if and
       # only if the bit is clear -- is a content rule (SPEC.md 15.2), decoded
       # and flagged rather than rejected.
-      - {name: count, offset: 1, size: 1, type: u8, desc: "obd_ecu entries following; MUST be 0 exactly when `responded` is clear, and at most 8 (SPEC.md 15.2)"}
+      - {name: count, offset: 1, size: 1, type: u8, desc: "obd_ecu entries following; MUST be 0 exactly when `responded` is clear, and at most 8 -- a probe more than eight answered reports the eight lowest and sets `truncated` (SPEC.md 15.2)"}
       # Identifier layout shared with can_record.id and CAN_SUBSCRIBE: bits
       # 0-28 arbitration, bit 29 the format bit. So 11-versus-29-bit
       # addressing is DERIVED from the identifier rather than stated beside
@@ -702,7 +718,7 @@ records:
       - {name: request_id, offset: 2, size: 4, type: u32, valid_bit: responded,
          desc: "The identifier this device transmits requests on; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero (SPEC.md 15.2)"}
       - {name: supported_01_20, offset: 6, size: 4, type: u32, valid_bit: responded,
-         desc: "Union over responding ECUs of Mode 01 PID support; bit n = PID 0x01+n, LSB first (SPEC.md 15.3)"}
+         desc: "Union over the ECUs this record reports of Mode 01 PID support; bit n = PID 0x01+n, LSB first (SPEC.md 15.3)"}
       - {name: supported_21_40, offset: 10, size: 4, type: u32, valid_bit: responded,
          desc: "As supported_01_20 for PIDs 0x21-0x40; bit n = PID 0x21+n (SPEC.md 15.3)"}
       - {name: supported_41_60, offset: 14, size: 4, type: u32, valid_bit: responded,

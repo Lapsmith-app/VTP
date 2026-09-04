@@ -573,6 +573,18 @@ every batch flushed while the poll set is non-empty. The values derive from
 the same motion state as everything else: PID `0x0C` decodes to the same rpm
 `0x0C0` carries.
 
+Two ECUs is the ordinary case and not the interesting one. `OBD_ECUS` is a
+class attribute so a test can replace the car wholesale, and the selftest
+does: a gatewayed port that answers nothing, a 29-bit car answering on
+`18DAF1xx`, and a **nine-ECU** 29-bit car, which is the case SPEC.md §15.2's
+cap of eight does not reach by arithmetic. The device reports the eight
+numerically lowest identifiers, unions *their* masks and sets `truncated` —
+so a PID only the dropped ECU implements is reported unsupported, and the
+bit is what tells a client the masks are a floor rather than a census. The
+dropped ECU still answers on the bus; §15.5's fallback is scoped to the
+reported identifiers, so its frames reach a client through the subscription
+table or not at all.
+
 ## The screen
 
 The window is a debug panel as well as the device's display, laid out around

@@ -8,6 +8,76 @@ conformance vector.
 
 ## [Unreleased]
 
+### §15: the union over every ECU that answered had no conforming record once a ninth answered
+
+Reported from the first VTP/1 device firmware, and not as a decode
+disagreement — no payload can show it, because the payload that would is the
+one §15.2 says cannot exist. It is a question a device has to answer before it
+can answer `OBD_INFO` at all, and §15 did not answer it.
+
+§15.3 scoped the three `supported_*` masks to "the union over every ECU that
+answered". §15.2 capped the entry list at eight, on the strength of ISO
+15765-4 capping the responders to a functional request at eight, and required
+`count` to be non-zero exactly when `responded` is set. Those three are
+consistent while at most eight answer — and on **11-bit** functional
+addressing nothing else can, because ISO 15765-4 legislates exactly eight
+response identifiers, `0x7E8`–`0x7EF`, so the cap there is arithmetic rather
+than a rule a device enforces.
+
+The **29-bit** fallback §15.2 itself prescribes is not so bounded. Responses to
+`18DB33F1` arrive on `18DAF1xx`, whose low byte is the responding ECU's source
+address: 256 identifiers, not eight. A ninth responder there is not a
+malformed bus — it is a bus with nine ECUs on it, reached by the addressing
+this section requires — and for it there was no conforming `obd_probe` at all.
+The entry list could not name nine, `count` could not say nine, and
+`responded` could not be clear because something plainly answered.
+
+§15.2 and §15.3 now say what a device reports:
+
+- The record names the **eight numerically lowest** response identifiers,
+  compared over bits 0–29, and drops the rest. Lowest rather than first to
+  answer, because arrival order is not reproducible and §15.2's ascending-entry
+  rule exists so that two conforming devices probing one car produce identical
+  bytes — on the case where that is hardest to reproduce most of all.
+- The three `supported_*` masks are the union over **the ECUs the record
+  reports**, not over everything that answered. Scoped that way the record
+  cannot claim a PID no entry answers; scoped the other way it invites a poll
+  whose reply §15.5's fallback does not deliver, on an identifier the client
+  was never told about.
+- `obd_validity` **bit 1 (`truncated`)** is set when responders were dropped.
+  Without it the under-report is silent, and a client reads "unsupported" off
+  a car that supports the PID — a plausible wrong value in §1.1's sense, on a
+  record every byte of which is well-formed.
+
+Raising the cap was considered and declined. `count` is a `u8` and an entry is
+four bytes, so the binding constraint is the control response at §2's minimum
+ATT MTU, which holds eighteen entries rather than eight — but a higher cap
+moves the cliff instead of closing it, and the truncation rule would still
+have to exist at nineteen.
+
+Two content rules bind the new bit, in §1.1's sense — decoded, flagged, never
+repaired: `truncated` MUST be clear when `responded` is clear, and MUST NOT be
+set unless `count` is 8. A device that dropped a responder while naming fewer
+than eight dropped one it had room for.
+
+Wire change, additive: `obd_validity` bit 1 was reserved and is now assigned,
+so a VTP/1.0 client that ignores it is unaffected (§2). No field, enum value,
+UUID or existing conformance vector moves. Three vectors are added — the
+conforming nine-ECU answer on 29-bit addressing, and the two ways `truncated`
+can contradict the record it rides on — plus three producer cases: two
+refusals and one that goes the other way, because no refusal can assert that
+the truncated record is legal. An encoder that refuses `truncated` outright
+leaves a device on a nine-ECU bus with no conforming answer at all, and fails
+that one. The corpus is 172 vectors and 70 producer cases. Reasoning in the
+RATIONALE contradictions section.
+
+The reference peripheral implements the selection rather than describing it:
+`_obd_probe` fixes the reported set from the PID `0x00` window, unions only
+those ECUs' masks through the `0x20` and `0x40` windows, and scopes §15.5's
+fallback to the reported identifiers — so a dropped ECU's answers reach a
+client through the subscription table or not at all, which is what the bit
+warns about. The harness gains the matching seeded defect.
+
 ### Harness: §14.6 made the `applied` path unreachable, so a conforming device got half of §14.4 tested
 
 Reported from the first VTP/1 device firmware, and not as a false failure —
@@ -188,8 +258,8 @@ encoders refuse them. Two producer cases go the other way, because no refusal
 can assert what is legal: a time-only fix carrying `num_sv`, and a
 `dead_reckon` fix whose satellite count is a measurement of zero. An encoder
 that gates `num_sv` on a position — the reading this section closed — passes
-every refusal in the file and fails both of those. The corpus is 169 vectors
-and 67 producer cases. Reasoning in the RATIONALE contradictions section.
+every refusal in the file and fails both of those. Reasoning in the RATIONALE
+contradictions section.
 
 Two things that hold the change up rather than state it.
 `tools/check_baseline.py` now covers `conformance/encoders.json` as well as the decode vectors: the

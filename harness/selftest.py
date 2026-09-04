@@ -125,6 +125,7 @@ CAUGHT_BY = {
     "obd_probe_unsupported": "obd.probe",
     "obd_responded_without_ecus": "obd.count_agrees",
     "obd_entries_descending": "obd.entries_ascending",
+    "obd_truncated_below_cap": "obd.count_agrees",
     "obd_stale_behind_bit": "obd.absent_fields_zero",
     "obd_reserved_nonzero": "obd.reserved",
     "obd_capacity_zero": "obd.capacities",

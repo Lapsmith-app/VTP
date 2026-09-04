@@ -221,6 +221,19 @@ CAN_FLAG_POLLING = next(1 << b["bit"]
                         if b["name"] == "polling")
 # SPEC.md 15.1 -- everything a Mode 01 request may name.
 OBD_PID_FLOOR, OBD_PID_CEILING = 0x01, 0x60
+# SPEC.md 15.2 -- the most ECUs one obd_probe record can name. On 11-bit
+# functional addressing nothing can exceed it: ISO 15765-4 legislates eight
+# response identifiers, 0x7E8-0x7EF. On the 29-bit fallback 18DAF1xx carries
+# 256, so the cap becomes a rule the device applies -- report the eight
+# lowest, union THEIR masks, and say so with `truncated`.
+OBD_MAX_ECUS = 8
+# SPEC.md 15.2's obd_validity bits, schema-derived like the flags above.
+OBD_RESPONDED = next(1 << b["bit"]
+                     for b in enc.SCHEMA["bitmasks"]["obd_validity"]["bits"]
+                     if b["name"] == "responded")
+OBD_TRUNCATED = next(1 << b["bit"]
+                     for b in enc.SCHEMA["bitmasks"]["obd_validity"]["bits"]
+                     if b["name"] == "truncated")
 
 
 def _pid_mask(base, pids):
@@ -1454,6 +1467,11 @@ class VtpDevice:
         if self._obd_last_tx_us is not None:
             t = max(t, self._obd_last_tx_us + step_us)
         answered = {}
+        # SPEC.md 15.2 -- the eight this record can name, fixed by the PID
+        # 0x00 window: everything that answers 0x00 is a responder, and the
+        # eight numerically lowest of them are what the entry list carries.
+        # None until that window has been collected.
+        reported = None
         union = [0, 0, 0]
         # PID 0x00 first; 0x20 and 0x40 only if the union so far claims them
         # (SPEC.md 15.2 -- a device MUST NOT request a mask PID the union
@@ -1461,16 +1479,29 @@ class VtpDevice:
         for window, mask_pid in enumerate((0x00, 0x20, 0x40)):
             if mask_pid and not self._mask_has(union, mask_pid):
                 continue
+            answered_now = []
             for ecu_id in sorted(self.OBD_ECUS):
                 masks = self.OBD_ECUS[ecu_id]
                 if mask_pid and not self._mask_has(masks, mask_pid):
                     continue
-                answered[ecu_id] = True
-                union[window] |= masks[window]
+                answered_now.append(ecu_id)
+                answered[ecu_id] = masks
                 self._obd_rx.append(
                     (t, ecu_id,
                      self._obd_response_frame(
                          mask_pid, _j1979_mask_bytes(masks[window]))))
+            if reported is None:
+                reported = frozenset(sorted(answered)[:OBD_MAX_ECUS])
+            # SPEC.md 15.3 -- the union ranges over the ECUs the record
+            # REPORTS, not over everything that answered. A dropped ECU's
+            # mask would claim a PID no entry answers, and a poll for it
+            # would be a transmission whose reply SPEC.md 15.5 does not
+            # deliver. Its response frame still went on the bus above:
+            # dropping it from the union is a reporting decision, not a
+            # pretence that the ECU is silent.
+            for ecu_id in answered_now:
+                if ecu_id in reported:
+                    union[window] |= answered[ecu_id][window]
             self._obd_last_tx_us = t
             t += step_us
         # Window 0 always transmits, so `_obd_last_tx_us` names the final
@@ -1483,13 +1514,20 @@ class VtpDevice:
             self._obd_ecu_ids = frozenset()
             return done_us, enc.encode_obd_info(dict(validity=0, count=0), [])
         self._obd_masks = tuple(union)
-        self._obd_ecu_ids = frozenset(answered)
+        # The fallback (SPEC.md 15.5) delivers on the identifiers the probe
+        # REPORTED, so a dropped ECU's answers reach a client through the
+        # subscription table or not at all -- which is why the report says
+        # it dropped one.
+        self._obd_ecu_ids = frozenset(reported)
+        validity = OBD_RESPONDED
+        if len(answered) > len(reported):
+            validity |= OBD_TRUNCATED
         return done_us, enc.encode_obd_info(
-            dict(validity=1, count=len(answered),
+            dict(validity=validity, count=len(reported),
                  request_id=self.OBD_REQUEST_ID,
                  supported_01_20=union[0], supported_21_40=union[1],
                  supported_41_60=union[2]),
-            [dict(id=ecu_id) for ecu_id in sorted(answered)])
+            [dict(id=ecu_id) for ecu_id in sorted(reported)])
 
     def due_control_response(self, now=None):
         """The deferred OBD_INFO response, once its probe has completed.

@@ -2009,6 +2009,40 @@ def main():
     check({f["id"] for f in frames29} <= {0x18DAF110, 0x18DAF118},
           "29-bit responses carry the masked arbitration id")
 
+    # SPEC.md 15.2 -- nine ECUs on 29-bit functional addressing: the case the
+    # cap of eight does not reach by arithmetic, because 18DAF1xx carries 256
+    # response identifiers and not ISO 15765-4's eight. The device reports the
+    # eight numerically lowest, unions THEIR masks and sets `truncated`. The
+    # ninth ECU implements a PID none of the eight do, so the union is the
+    # visible half of the choice: a mask over all nine would claim 0x1F, and
+    # a poll for it would be a transmission whose answer §15.5 cannot deliver.
+    nine = dev.VtpDevice(now_us=lambda: obd_clock[0], gps_hz=0, imu_hz=0)
+    nine.OBD_REQUEST_ID = 0x18DB33F1 | (1 << 29)
+    nine.OBD_ECUS = {
+        (0x18DAF100 + 8 * i) | (1 << 29): (
+            dev._pid_mask(0x01, [0x0C, 0x0D] if i < 8 else [0x0C, 0x1F]),
+            0, 0)
+        for i in range(9)}
+    dropped = max(nine.OBD_ECUS)
+    nine.on_connect()
+    pn = vtp1.decode_obd_info(probe_sync(nine, 0x7D)[3:])
+    check(pn["probe"]["count"] == 8
+          and [e["id"] for e in pn["ecus"]] == sorted(nine.OBD_ECUS)[:8],
+          "nine responders are reported as the eight numerically lowest, "
+          "not by arrival order (SPEC.md 15.2)")
+    check(pn["probe"]["validity"] & dev.OBD_TRUNCATED,
+          "a probe that dropped a responder sets `truncated` -- the masks "
+          "are a floor, not a census (SPEC.md 15.2)")
+    check(not pn["probe"]["supported_01_20"] & (1 << (0x1F - 0x01)),
+          "the union is over the REPORTED ECUs, so a PID only the dropped "
+          "ECU implements is not claimed (SPEC.md 15.3)")
+    check(pn["probe"]["supported_01_20"] & (1 << (0x0D - 0x01)),
+          "the union still carries what the reported ECUs implement")
+    check(dropped not in nine._obd_ecu_ids,
+          "§15.5's fallback delivers on the reported identifiers only, so a "
+          "dropped ECU's answers reach a client through the table or not at "
+          "all")
+
     # SPEC.md 15.7 -- transmit never survives the link.
     car.on_disconnect()
     car.on_connect()

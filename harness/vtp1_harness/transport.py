@@ -360,6 +360,7 @@ FAULTS = {
     "obd_probe_unsupported": "SPEC.md §15.2 — OBD_INFO refused by a device that declares the capability owning it",
     "obd_responded_without_ecus": "SPEC.md §15.2 — `responded` set with no ECU listed",
     "obd_entries_descending": "SPEC.md §15.2 — the ECU list is not strictly ascending",
+    "obd_truncated_below_cap": "SPEC.md §15.2 — `truncated` set beside fewer than eight entries, claiming a responder was dropped from a record with room for it",
     "obd_stale_behind_bit": "SPEC.md §15.2 — a previous car's probe left in the bytes behind a cleared `responded` bit",
     "obd_reserved_nonzero": "SPEC.md §15.2 — the reserved bytes of obd_probe are not zero",
     "obd_capacity_zero": "SPEC.md §15 — the `obd` bit declared with obd_poll_slots 0, a poll set nothing fits",
@@ -1560,6 +1561,12 @@ class LoopbackTransport(Transport):
                            for i in range(len(response[start:]) // esz)]
                 if len(entries) >= 2:
                     response[start:] = b"".join(reversed(entries))
+            if "obd_truncated_below_cap" in self.faults:
+                # §15.2 -- truncation happens at the cap and nowhere else. A
+                # client reading this believes the car has PIDs the record
+                # does not claim, on a probe that dropped nothing.
+                response[base + refdec.offset("obd_probe", "validity")] |= (
+                    1 << refdec.bit("obd_validity", "truncated"))
             if "obd_stale_behind_bit" in self.faults:
                 # The previous car's masks and request id, behind a cleared
                 # bit -- §1.1's stale-value shape, on the record that decides

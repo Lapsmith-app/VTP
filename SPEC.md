@@ -2289,9 +2289,9 @@ Total: **20 bytes**. All fields little-endian.
 | Off | Size | Type | Field | Notes |
 | --- | --- | --- | --- | --- |
 | 0 | 1 | `u8` | `validity` | bitmask `obd_validity` |
-| 1 | 1 | `u8` | `count` | obd_ecu entries following; MUST be 0 exactly when `responded` is clear, and at most 8 (SPEC.md 15.2) |
+| 1 | 1 | `u8` | `count` | obd_ecu entries following; MUST be 0 exactly when `responded` is clear, and at most 8 -- a probe more than eight answered reports the eight lowest and sets `truncated` (SPEC.md 15.2) |
 | 2 | 4 | `u32` | `request_id` | The identifier this device transmits requests on; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero (SPEC.md 15.2); valid when `validity` bit 0 (`responded`) is set |
-| 6 | 4 | `u32` | `supported_01_20` | Union over responding ECUs of Mode 01 PID support; bit n = PID 0x01+n, LSB first (SPEC.md 15.3); valid when `validity` bit 0 (`responded`) is set |
+| 6 | 4 | `u32` | `supported_01_20` | Union over the ECUs this record reports of Mode 01 PID support; bit n = PID 0x01+n, LSB first (SPEC.md 15.3); valid when `validity` bit 0 (`responded`) is set |
 | 10 | 4 | `u32` | `supported_21_40` | As supported_01_20 for PIDs 0x21-0x40; bit n = PID 0x21+n (SPEC.md 15.3); valid when `validity` bit 0 (`responded`) is set |
 | 14 | 4 | `u32` | `supported_41_60` | As supported_01_20 for PIDs 0x41-0x60; bit n = PID 0x41+n (SPEC.md 15.3); valid when `validity` bit 0 (`responded`) is set |
 | 18 | 2 | `u16` | `reserved_18` | Probe metadata; **reserved — MUST be zero** |
@@ -2303,7 +2303,8 @@ Total: **20 bytes**. All fields little-endian.
 | Bit | Name | Meaning |
 | --- | --- | --- |
 | 0 | `responded` | An OBD-II ECU answered the probe; request_id and the three supported masks are valid |
-| 1+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+| 1 | `truncated` | More ECUs answered than the record can name; the entries and the three masks describe the eight reported (SPEC.md 15.2) |
+| 2+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:obd_validity -->
 
 <!-- BEGIN GENERATED: obd_ecu -->
@@ -2347,7 +2348,7 @@ fallback delivers on while a poll set is active, and the values a client
 uses directly if it chooses to govern that delivery with subscriptions of
 its own.
 
-Four rules bind the record's content, and they are content rules in §1.1's
+Five rules bind the record's content, and they are content rules in §1.1's
 sense — the layout is sound, so a receiver MUST decode the response, MUST
 NOT repair it, and SHOULD surface a violation as a device defect:
 
@@ -2360,10 +2361,49 @@ NOT repair it, and SHOULD surface a violation as a device defect:
   cannot appear to be two. A duplicate here is decoded and flagged, where a
   duplicate Monitor slot rejects (§13.3): a slot is an address whose
   ambiguity poisons every later update, an entry here is a report.
-- `count` MUST NOT exceed 8: ISO 15765-4 caps the responders to a
-  functional request at eight.
+- `count` MUST NOT exceed 8. Eight is how many response identifiers ISO
+  15765-4 gives an 11-bit functional request, and how many this record
+  names; the rule below says what a device does when a ninth ECU answers.
+- `truncated` MUST be clear when `responded` is clear, and MUST NOT be set
+  unless `count` is 8. Nothing was dropped from a probe nothing answered,
+  and a device that dropped a responder while naming fewer than eight
+  dropped one it had room for.
 - A device MUST NOT report through this record any ECU that did not answer
   this probe.
+
+**When more than eight ECUs answer.** On 11-bit functional addressing a
+ninth responder does not exist: ISO 15765-4 legislates exactly eight
+response identifiers, `0x7E8`–`0x7EF`, so on that addressing the cap above
+is arithmetic rather than a rule to enforce. The 29-bit fallback this
+section requires is not so bounded — responses to `18DB33F1` arrive on
+`18DAF1xx`, whose low byte is the responding ECU's source address, which is
+256 identifiers and not eight. A ninth responder there is a bus with nine
+ECUs on it, reached by the fallback this section prescribes, and a device
+MUST resolve it this way:
+
+- It reports the **eight numerically lowest** response identifiers, compared
+  over bits 0–29, and drops the rest.
+- The three `supported_*` masks are the union over **those eight** and not
+  over everything that answered (§15.3).
+- It sets `truncated`.
+
+Lowest rather than first to answer, for the reason the ascending-entry rule
+already gives: arrival order is not reproducible, and two conforming devices
+probing one car have to produce identical bytes — on the case where that is
+hardest to reproduce most of all. The union follows the entry list so the
+record cannot claim a PID no ECU it names answers: polling such a PID would
+be a transmission whose reply §15.5 does not deliver, which is the shape
+§15.1's bounds exist to make unexpressible.
+
+What that costs is under-reporting the car, and `truncated` is why the cost
+is stated rather than hidden. A PID only a dropped ECU implements is
+reported unsupported, and a receiver reading that off a car which supports
+it is exactly the plausible wrong value §1.1 forbids; the bit says the masks
+are a floor rather than a census. The dropped ECUs' answers are not the
+fallback's either (§15.5) — they arrive on identifiers the probe did not
+report — so a client that wants them installs a subscription of its own,
+which on 29-bit addressing is one `CAN_SUBSCRIBE_MASK` over the `18DAF1xx`
+range where the device declares `masked_subscriptions` (§9.1).
 
 Identifier validity is not a content rule, and it is scoped by the
 validity mask. Every entry `id` — and `request_id` when `responded` is set
@@ -2403,10 +2443,13 @@ unconverted produces a mask that is plausible, non-zero and wrong for
 nearly every car — which is why the order is stated here and pinned by a
 conformance vector rather than left to convention.
 
-The fields carry the **union over every ECU that answered**, not a mask per
-ECU. The union answers the question the poll set asks — may this PID be
+The fields carry the **union over the ECUs this record reports**, not a mask
+per ECU. The union answers the question the poll set asks — may this PID be
 polled at all — and per-ECU attribution is already carried by the response
-identifier on every answering frame. What is genuinely not carried is the
+identifier on every answering frame. Over the *reported* ECUs rather than
+over every ECU that answered, because the two differ only on a truncated
+probe (§15.2) and there the second reading would have the record claim a PID
+whose only responder it does not name. What is genuinely not carried is the
 per-ECU supported *set*: a client cannot learn from this record which of
 two ECUs implements a PID without polling it and watching who answers.
 That cost is accepted, and stated here: eight ECUs of per-ECU masks do not
@@ -2676,10 +2719,14 @@ would through an explicit subscription. That is deliberate — the frames are
 self-describing, as the next paragraph makes them, and a logger that
 suppressed them would be hiding real traffic — and it is the stated cost: a
 client is delivered
-frames on identifiers it never named. A probe's own mask responses ride the
-same rule: delivered through a matching subscription, or through the
-fallback when a poll set is already active, and otherwise not at all — the
-client gets their content in the `OBD_INFO` detail either way.
+frames on identifiers it never named. The converse holds after a truncated
+probe (§15.2): the ECUs the record dropped still hear a functionally
+addressed poll and still answer it, on identifiers the probe did not report,
+so those frames reach a client through the table or not at all. A probe's
+own mask responses ride the same rule: delivered through a matching
+subscription, or through the fallback when a poll set is already active, and
+otherwise not at all — the client gets their content in the `OBD_INFO`
+detail either way.
 
 **The CAN stream carries what the device hears, never what it says.** A
 device MUST NOT emit a `can_record` for a frame it transmitted itself,
@@ -2832,7 +2879,7 @@ record tables above.
 | `power_state.validity` | bits 2–7 | Validity for power fields added in a later minor |
 | `gnss_aid_caps.validity` | bits 1–7 | Validity for aiding capabilities added in a later minor |
 | `aid_commit_result.validity` | bits 1–7 | Validity for commit results added in a later minor |
-| `obd_probe.validity` | bits 1–7 | Validity for probe results added in a later minor |
+| `obd_probe.validity` | bits 2–7 | Validity for probe results added in a later minor |
 | `info.reserved_22` | 2 bytes | Was obd_min_interval_ms; withdrawn with the fixed poll clock (SPEC.md 15.4) |
 | `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |

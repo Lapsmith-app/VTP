@@ -1032,6 +1032,11 @@ def _reserved_case(schema, record, field, value):
 # combination that can.
 LEGAL_ASSIGNED = {
     "fix_flags": 0b0001_1101,   # differential, rtk_fixed, disciplined, epoch
+    # `truncated` belongs to an eight-entry probe (SPEC.md 15.2) and the
+    # reserved-bit builder below writes a one-entry one, so the largest
+    # combination this case can carry is `responded` alone. The truncated
+    # record gets its own vector and its own encoder case instead.
+    "obd_validity": 0b0000_0001,
 }
 
 
@@ -2495,6 +2500,19 @@ def vectors(schema):
     W1 = pid_mask(0x01, [0x01, 0x04, 0x05, 0x0C, 0x0D, 0x11, 0x1C, 0x20])
     W2 = pid_mask(0x21, [0x2F, 0x31, 0x40])
     W3 = pid_mask(0x41, [0x46, 0x51])
+    # And a third for the truncated probe (SPEC.md 15.2): the union over the
+    # EIGHT reported ECUs, which is what the record carries -- not the union
+    # over the nine that answered. A vector cannot show the difference in
+    # bytes, which is exactly why the mask here is its own car rather than
+    # W1-W3 reused: the case is about which ECUs the union ranges over.
+    T1 = pid_mask(0x01, [0x01, 0x05, 0x0C, 0x0D, 0x0F, 0x10, 0x11, 0x1F,
+                         0x20])
+    T2 = pid_mask(0x21, [0x21, 0x2F, 0x33, 0x40])
+    T3 = pid_mask(0x41, [0x42, 0x45, 0x4C, 0x51])
+    # Nine ECUs on 29-bit functional addressing, ascending by source address.
+    # The probe reports the eight LOWEST; 0x40 is the one that falls off.
+    TRUNC_IDS = [0x18DAF100 + a | EXT
+                 for a in (0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38)]
 
     nominal_probe = dict(validity=OV["responded"], count=2, request_id=0x7DF,
                          supported_01_20=U1, supported_21_40=U2,
@@ -2614,14 +2632,51 @@ def vectors(schema):
                  [dict(id=0x7E9), dict(id=0x7E8)],
                  no_roundtrip=True, refused_by="obd-ecu-ids-not-ascending"),
         obd_info("nine-ecus",
-                 "Nine entries. ISO 15765-4 caps the responders to a "
-                 "functional request at eight, so a ninth is a claim about a "
-                 "bus that cannot happen (SPEC.md 15.2). The layout is sound "
-                 "-- the length arithmetic agrees with count -- so it "
-                 "decodes, and SHOULD be flagged.",
+                 "Nine entries. The record names at most eight, and a probe "
+                 "more than eight answered reports the eight lowest with "
+                 "`truncated` set (SPEC.md 15.2) -- so a ninth entry is a "
+                 "device that skipped the rule, not a car this record can "
+                 "describe. The layout is sound -- the length arithmetic "
+                 "agrees with count -- so it decodes, and SHOULD be flagged.",
                  dict(nominal_probe, count=9),
                  [dict(id=0x7E8 + i) for i in range(9)],
                  no_roundtrip=True, refused_by="obd-nine-ecus"),
+        obd_info("nine-answered-eight-reported",
+                 "The conforming answer on a 29-bit bus with nine ECUs on "
+                 "it -- the case SPEC.md 15.2's cap does not reach on its "
+                 "own, because 18DAF1xx carries 256 response identifiers "
+                 "and not eight. The device reports the eight numerically "
+                 "lowest, unions their masks and sets `truncated`. Lowest "
+                 "rather than first to answer, so two conforming devices "
+                 "probing this car still produce identical bytes; "
+                 "`truncated`, so a client reads the masks as a floor "
+                 "rather than as a census of the car.",
+                 dict(validity=OV["responded"] | OV["truncated"], count=8,
+                      request_id=0x18DB33F1 | EXT,
+                      supported_01_20=T1, supported_21_40=T2,
+                      supported_41_60=T3),
+                 [dict(id=i) for i in TRUNC_IDS],
+                 note="The dropped ECU leaves no trace in the bytes beyond "
+                      "this bit, and cannot: its identifier is what the "
+                      "record has no room for. A client that wants its "
+                      "frames subscribes over the 18DAF1xx range itself "
+                      "(SPEC.md 15.5)."),
+        obd_info("truncated-behind-a-silent-probe",
+                 "`truncated` set with `responded` clear: responders "
+                 "dropped from a probe nothing answered. A device-side "
+                 "violation of SPEC.md 15.2; decodes, SHOULD be flagged.",
+                 dict(validity=OV["truncated"], count=0), [],
+                 no_roundtrip=True,
+                 refused_by="obd-truncated-behind-a-silent-probe"),
+        obd_info("truncated-below-the-cap",
+                 "`truncated` set beside two entries. Truncation happens at "
+                 "the cap and nowhere else (SPEC.md 15.2), so a device that "
+                 "dropped a responder while naming two dropped one it had "
+                 "six free entries for. Decodes, SHOULD be flagged.",
+                 dict(nominal_probe,
+                      validity=OV["responded"] | OV["truncated"]),
+                 [dict(id=0x7E8), dict(id=0x7E9)],
+                 no_roundtrip=True, refused_by="obd-truncated-below-the-cap"),
         obd_info("request-id-flag-bits",
                  "request_id with bit 31 set. Bits 30-31 say how a frame "
                  "travelled, and this field names an identifier, not a "
@@ -3199,12 +3254,30 @@ def vectors(schema):
                    "ecus": [dict(id=0x7E9), dict(id=0x7E8)]}},
         {"name": "obd-nine-ecus",
          "record": "obd_info", "must_refuse": True, "vector": "nine-ecus",
-         "desc": "SPEC.md 15.2 -- ISO 15765-4 caps the responders to a "
-                 "functional request at eight.",
+         "desc": "SPEC.md 15.2 -- the record names at most eight ECUs, and a "
+                 "probe more than eight answered reports the eight lowest "
+                 "with `truncated` set rather than listing a ninth.",
          "input": {"probe": dict(validity=1, count=9, request_id=0x7DF,
                                  supported_01_20=U1, supported_21_40=U2,
                                  supported_41_60=U3),
                    "ecus": [dict(id=0x7E8 + i) for i in range(9)]}},
+        {"name": "obd-truncated-behind-a-silent-probe",
+         "record": "obd_info", "must_refuse": True,
+         "vector": "truncated-behind-a-silent-probe",
+         "desc": "SPEC.md 15.2 -- `truncated` set with `responded` clear "
+                 "says responders were dropped from a probe nothing "
+                 "answered.",
+         "input": {"probe": dict(validity=2, count=0), "ecus": []}},
+        {"name": "obd-truncated-below-the-cap",
+         "record": "obd_info", "must_refuse": True,
+         "vector": "truncated-below-the-cap",
+         "desc": "SPEC.md 15.2 -- truncation happens at the cap: a device "
+                 "that dropped a responder while naming two entries dropped "
+                 "one it had room for.",
+         "input": {"probe": dict(validity=3, count=2, request_id=0x7DF,
+                                 supported_01_20=U1, supported_21_40=U2,
+                                 supported_41_60=U3),
+                   "ecus": [dict(id=0x7E8), dict(id=0x7E9)]}},
         # Identifier validity (SPEC.md 15.2 via 6.4): structural, because the
         # decoder rejects the same bytes.
         {"name": "obd-request-id-flag-bits",
@@ -3262,6 +3335,25 @@ def vectors(schema):
                          supported_41_60=U3, reserved_18=0))
              + encode(schema, "obd_ecu", dict(id=0x7E8))
              + encode(schema, "obd_ecu", dict(id=0x7E9))).hex()},
+        {"name": "obd-truncated-probe",
+         "record": "obd_info", "must_refuse": False,
+         "desc": "SPEC.md 15.2 -- the nine-ECU answer is a legal record, "
+                 "not a refusal: eight entries, their union, `truncated` "
+                 "set. An encoder that refuses it leaves a device on a "
+                 "29-bit bus with no conforming way to answer OBD_INFO at "
+                 "all.",
+         "input": {"probe": dict(validity=3, count=8,
+                                 request_id=0x18DB33F1 | EXT,
+                                 supported_01_20=T1, supported_21_40=T2,
+                                 supported_41_60=T3),
+                   "ecus": [dict(id=i) for i in TRUNC_IDS]},
+         "expect_hex": (
+             encode(schema, "obd_probe",
+                    dict(validity=3, count=8, request_id=0x18DB33F1 | EXT,
+                         supported_01_20=T1, supported_21_40=T2,
+                         supported_41_60=T3, reserved_18=0))
+             + b"".join(encode(schema, "obd_ecu", dict(id=i))
+                        for i in TRUNC_IDS)).hex()},
         {"name": "obd-nothing-responded",
          "record": "obd_info", "must_refuse": False,
          "desc": "SPEC.md 15.2 -- the silent-car answer is a legal record: "

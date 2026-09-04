@@ -982,7 +982,7 @@
       "record": "obd_info",
       "must_refuse": true,
       "vector": "nine-ecus",
-      "desc": "SPEC.md 15.2 -- ISO 15765-4 caps the responders to a functional request at eight.",
+      "desc": "SPEC.md 15.2 -- the record names at most eight ECUs, and a probe more than eight answered reports the eight lowest with `truncated` set rather than listing a ninth.",
       "input": {
         "probe": {
           "validity": 1,
@@ -1019,6 +1019,45 @@
           },
           {
             "id": 2032
+          }
+        ]
+      }
+    },
+    {
+      "name": "obd-truncated-behind-a-silent-probe",
+      "record": "obd_info",
+      "must_refuse": true,
+      "vector": "truncated-behind-a-silent-probe",
+      "desc": "SPEC.md 15.2 -- `truncated` set with `responded` clear says responders were dropped from a probe nothing answered.",
+      "input": {
+        "probe": {
+          "validity": 2,
+          "count": 0
+        },
+        "ecus": []
+      }
+    },
+    {
+      "name": "obd-truncated-below-the-cap",
+      "record": "obd_info",
+      "must_refuse": true,
+      "vector": "truncated-below-the-cap",
+      "desc": "SPEC.md 15.2 -- truncation happens at the cap: a device that dropped a responder while naming two entries dropped one it had room for.",
+      "input": {
+        "probe": {
+          "validity": 3,
+          "count": 2,
+          "request_id": 2015,
+          "supported_01_20": 3356884093,
+          "supported_21_40": 2282086401,
+          "supported_41_60": 2165118
+        },
+        "ecus": [
+          {
+            "id": 2024
+          },
+          {
+            "id": 2025
           }
         ]
       }
@@ -1135,6 +1174,49 @@
         ]
       },
       "expect_hex": "0102df0700007dfc15c801e005887e0921000000e8070000e9070000"
+    },
+    {
+      "name": "obd-truncated-probe",
+      "record": "obd_info",
+      "must_refuse": false,
+      "desc": "SPEC.md 15.2 -- the nine-ECU answer is a legal record, not a refusal: eight entries, their union, `truncated` set. An encoder that refuses it leaves a device on a 29-bit bus with no conforming way to answer OBD_INFO at all.",
+      "input": {
+        "probe": {
+          "validity": 3,
+          "count": 8,
+          "request_id": 953889777,
+          "supported_01_20": 3221346321,
+          "supported_21_40": 2147762177,
+          "supported_41_60": 67602
+        },
+        "ecus": [
+          {
+            "id": 953872640
+          },
+          {
+            "id": 953872648
+          },
+          {
+            "id": 953872656
+          },
+          {
+            "id": 953872664
+          },
+          {
+            "id": 953872672
+          },
+          {
+            "id": 953872680
+          },
+          {
+            "id": 953872688
+          },
+          {
+            "id": 953872696
+          }
+        ]
+      },
+      "expect_hex": "0308f133db3811d801c00140048012080100000000f1da3808f1da3810f1da3818f1da3820f1da3828f1da3830f1da3838f1da38"
     },
     {
       "name": "obd-nothing-responded",
@@ -1327,7 +1409,7 @@
       "name": "reserved-bits-obd-probe-validity",
       "record": "obd_info",
       "must_refuse": false,
-      "desc": "SPEC.md 2 -- obd_probe.validity bits 1-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "desc": "SPEC.md 2 -- obd_probe.validity bits 2-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
       "input": {
         "probe": {
           "count": 1,

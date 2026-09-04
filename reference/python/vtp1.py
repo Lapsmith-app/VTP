@@ -457,11 +457,12 @@ def _obd_identifier_valid(raw):
 def decode_obd_info(buf):
     """SPEC.md §15.2 — an obd_probe record and its obd_ecu entries.
 
-    The four content rules — count agreeing with `responded`, entries
-    strictly ascending, no duplicates, at most eight — are deliberately NOT
-    rejected here: the layout is sound, so a receiver decodes the response
-    and the client flags the contradiction (§1.1's malformed/content split).
-    Identifier validity IS rejected, per §6.4.
+    The content rules — count agreeing with `responded`, entries strictly
+    ascending, no duplicates, at most eight, and `truncated` set only on a
+    probe that answered and named all eight (§15.2's truncation rule) — are
+    deliberately NOT rejected here: the layout is sound, so a receiver
+    decodes the response and the client flags the contradiction (§1.1's
+    malformed/content split). Identifier validity IS rejected, per §6.4.
     """
     hsz, esz = _size("obd_probe"), _size("obd_ecu")
     if len(buf) < hsz:

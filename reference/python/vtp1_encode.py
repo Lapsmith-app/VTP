@@ -554,8 +554,11 @@ def encode_aid_commit_result(commit):
 OBD_RESPONDED = next(1 << b["bit"]
                      for b in SCHEMA["bitmasks"]["obd_validity"]["bits"]
                      if b["name"] == "responded")
+OBD_TRUNCATED = next(1 << b["bit"]
+                     for b in SCHEMA["bitmasks"]["obd_validity"]["bits"]
+                     if b["name"] == "truncated")
 OBD_EXTENDED = 1 << 29
-OBD_MAX_ECUS = 8               # ISO 15765-4's cap on functional responders
+OBD_MAX_ECUS = 8               # SPEC.md 15.2 -- the most one record names
 
 
 def _check_obd_identifier(field, raw):
@@ -581,9 +584,10 @@ def encode_obd_info(probe, ecus):
 
     The decoder deliberately accepts what most of this refuses: count
     disagreeing with `responded`, duplicate or unordered entries, more than
-    eight of them. Those are content rules — the device MUST NOT emit them,
-    a receiver decodes and flags them — so the refusals live here, on the
-    device side, and conformance/encoders.json holds each one."""
+    eight of them, and `truncated` set behind a cleared `responded` or beside
+    fewer than eight entries. Those are content rules — the device MUST NOT
+    emit them, a receiver decodes and flags them — so the refusals live here,
+    on the device side, and conformance/encoders.json holds each one."""
     if len(ecus) != probe.get("count", 0):
         raise EncodeError(
             f"obd_probe.count is {probe.get('count', 0)} but {len(ecus)} "
@@ -600,9 +604,22 @@ def encode_obd_info(probe, ecus):
             "answered (SPEC.md 15.2)")
     if len(ecus) > OBD_MAX_ECUS:
         raise EncodeError(
-            f"obd_probe.count is {len(ecus)}; ISO 15765-4 caps the "
-            f"responders to a functional request at {OBD_MAX_ECUS} "
+            f"obd_probe.count is {len(ecus)}; the record names at most "
+            f"{OBD_MAX_ECUS} ECUs, and a probe more than that answered "
+            f"reports the {OBD_MAX_ECUS} lowest with `truncated` set "
             f"(SPEC.md 15.2)")
+    truncated = bool(_known_bits("obd_validity")
+                     & probe.get("validity", 0) & OBD_TRUNCATED)
+    if truncated and not responded:
+        raise EncodeError(
+            "obd_probe: `truncated` set with `responded` clear says "
+            "responders were dropped from a probe nothing answered "
+            "(SPEC.md 15.2)")
+    if truncated and len(ecus) != OBD_MAX_ECUS:
+        raise EncodeError(
+            f"obd_probe: `truncated` set with {len(ecus)} entr(ies); a "
+            f"device that dropped a responder while naming fewer than "
+            f"{OBD_MAX_ECUS} dropped one it had room for (SPEC.md 15.2)")
     # §15.2 -- the identifier rule is scoped to a probe that answered: with
     # `responded` clear the field is gated to zero on the wire below, so a
     # stale invalid value in the caller's struct is normalised away, exactly
