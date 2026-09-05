@@ -130,7 +130,7 @@ The report ends with a **Not verified** section, and it is not boilerplate — i
 is assembled from the run, so a check skipped for a reason specific to your
 device appears there rather than disappearing into a count.
 
-Four things are permanently in it:
+Six things are permanently in it:
 
 - **§2.1–§2.3** — link-layer payload, PHY and connection interval. No desktop
   operating system exposes these to an application, so the harness checks the
@@ -163,6 +163,17 @@ Four things are permanently in it:
   the harness checks it is non-zero, but what happens when one lapses happens on
   the device's own display and puts nothing on the wire. Stop writing and watch
   the screen.
+- **§15.1's transmit instant, and §15.7's withdrawal of a pending frame.**
+  Whether a device runs its response window from the controller's
+  transmit-success rather than from the hand-over, and whether it withdraws a
+  frame the controller still holds when the poll set clears or a probe
+  begins, shows only on a bus that does not acknowledge — the one state in
+  which a frame is pending. Every frame the harness's transports carry is
+  acknowledged the instant it is offered, so both rules hold vacuously here
+  and the loopback cannot seed a defect against them. The measurement is a
+  controller on a bench bus with the other node removed: a capture shows the
+  pending frame repeating unacknowledged, and ending when the poll set
+  clears.
 
 A clean run is evidence about a device. It is not a conformance certificate, and
 the report says so on its last line.

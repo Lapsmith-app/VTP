@@ -517,6 +517,27 @@ async def obd_poll_and_flag(s):
             pass
 
 
+@check(id="obd.transmit_instant", section="15.1", phase="control",
+       severity="OBSERVE", requires=("obd",),
+       title="The transmit instant and pending-frame withdrawal cannot be "
+             "observed from here")
+async def obd_transmit_instant(s):
+    s.note("SPEC.md §15.1 runs every response window and spacing from the "
+           "controller's transmit-success -- acknowledged and free of error "
+           "through end of frame -- never from the hand-over, and SPEC.md "
+           "§15.7 withdraws a frame the controller still holds when the poll "
+           "set clears or a probe begins. Both show only on a bus that does "
+           "not acknowledge, where a frame is pending. Every frame this "
+           "harness's transports carry is acknowledged the instant it is "
+           "offered, so neither rule can fail here. Check them on a bench "
+           "bus with the other node removed: a capture of the pending frame "
+           "repeating unacknowledged until the poll set clears, and ending "
+           "when it does.")
+    raise Observe(
+        "no frame is ever pending on this link; verify the transmit instant "
+        "and the withdrawal on a bus with no acknowledging node")
+
+
 @check(id="obd.reset_stops", section="15.7", phase="control", severity="MUST",
        requires=("obd",), adversarial=True,
        title="CAN_RESET clears the poll set and silences the transmitter")

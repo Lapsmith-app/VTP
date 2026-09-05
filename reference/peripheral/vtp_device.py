@@ -1033,6 +1033,14 @@ class VtpDevice:
                 due = self._obd_next_group(now)
                 if due is not None:
                     entry, group = due
+                    # SPEC.md 15.1 -- "transmitted" is the acknowledgement.
+                    # The synthetic bus has no link layer (RATIONALE, "What
+                    # the reference peripheral cannot observe"), so `now`
+                    # is that instant here. A real transport stamps the
+                    # three clock readings -- the group's, the spacing's
+                    # and the timeout's -- from its transmit-complete path;
+                    # the answer mark and the outstanding PIDs stay at
+                    # hand-over, where an answer cannot yet have arrived.
                     entry[2] = now
                     self._obd_last_tx_us = now
                     self._obd_outstanding_since = now
@@ -1149,9 +1157,12 @@ class VtpDevice:
         the pre-stop state (so the fallback they were accepted under still
         delivers them), and the pending batch is flushed -- BEFORE the set
         clears, so the batch's polling flag is truthful. Arrivals scheduled
-        beyond `now` have not happened yet and are dropped unheard. The
-        connection edges pass flush=False: the link those frames belonged
-        to is gone.
+        beyond `now` are ECU answers in flight to a request the bus already
+        carried, and clearing the poll set cannot erase them: they stay
+        queued, the table governs them once the fallback is gone (SPEC.md
+        15.5), and the one that echoes the outstanding request's PID still
+        releases it. The connection edges pass flush=False: the link those
+        frames belonged to is gone, and they go with it.
         """
         if flush:
             now = self.now_us()
@@ -1162,18 +1173,18 @@ class VtpDevice:
                 self._deferred.append(("can", batch))
         self._obd_poll, self._obd_interval_ms = [], 0
         self._obd_index = 0
-        self._obd_rx = []
+        if not flush:
+            self._obd_rx = []
         # `_obd_outstanding_since` is NOT cleared, for the reason
         # `_obd_last_tx_us` is not: it is a fact about the BUS, and the bus
         # does not care why the client changed its mind. Clearing it let a
-        # stop-and-re-arm -- or an OBD_INFO, which calls this helper -- launch
-        # a second request while the first was still unanswered on the wire:
-        # with an 80 ms car, a stop 10 ms after a request put the next one out
-        # 5 ms later, two outstanding at once, which SPEC.md 15.1 forbids
-        # outright. The request now stays outstanding until it is answered or
-        # abandoned at OBD_RESPONSE_TIMEOUT_US, exactly as if nothing had
-        # happened -- and since `_obd_rx` is cleared here, an unanswered one
-        # reaches the timeout rather than being released by its own reply.
+        # stop-and-re-arm launch a second request while the first was still
+        # unanswered on the wire (an OBD_INFO, which also calls this helper,
+        # reads the resolution instant first -- `_obd_probe`): with an 80 ms
+        # car, a stop 10 ms after a request put the next one out 5 ms later,
+        # two outstanding at once, which SPEC.md 15.1 forbids outright. The
+        # request stays outstanding until it is answered or abandoned at
+        # OBD_RESPONSE_TIMEOUT_US, exactly as if nothing had happened.
 
     def _obd_clear(self, *, flush=False):
         """Everything _obd_stop clears, plus the probe result -- the
@@ -1426,13 +1437,34 @@ class VtpDevice:
                 yield {"id": cid, "payload": payload, "_t": t}
         self._obd_rx = hold + self._obd_rx
 
+    def _obd_outstanding_resolves_at(self, now):
+        """When the outstanding poll request is answered or abandoned
+        (SPEC.md 15.1); `now` if nothing is outstanding.
+
+        Answered means the first frame on a reported identifier echoing a
+        PID the request named, at or after the request went out -- the
+        same test `_due_obd_frames` applies -- and on this bus that frame
+        is already scheduled in `_obd_rx` when it exists at all. Abandoned
+        is OBD_RESPONSE_TIMEOUT_US after the request, and SPEC.md 15.4 says
+        whichever comes first: an answer the car will give at 300 ms
+        releases nothing, because the request was abandoned at 100.
+        """
+        since = self._obd_outstanding_since
+        if since is None:
+            return now
+        abandoned = since + OBD_RESPONSE_TIMEOUT_US
+        answers = [t for t, cid, payload in self._obd_rx
+                   if t >= since and cid in self._obd_ecu_ids
+                   and self._obd_echoed_pid(payload) in self._obd_outstanding_pids]
+        return min(answers + [abandoned])
+
     def _obd_probe(self, now):
         """SPEC.md 15.2 -- transmit the mask requests, report what answered.
 
         Measured when asked, like GET_POWER: each OBD_INFO re-probes, so the
         answer describes the car the device is plugged into now -- and every
-        completed probe replaces the probe result and clears the poll set
-        with it (§15.7): the set never outlives the result it was verified
+        probe replaces the probe result and clears the poll set with it as
+        it begins (§15.7): the set never outlives the result it was verified
         against.
 
         The probe runs on the SAME transmit schedule as the poll loop
@@ -1455,6 +1487,13 @@ class VtpDevice:
         past, carrying J1979's OWN bit order, while the detail below
         carries SPEC.md 15.3's. The transcription between them is exactly
         what the conformance vector pins."""
+        # SPEC.md 15.1 -- one request outstanding holds across the probe
+        # and the poll loop together, and the probe's first frame is a
+        # request: it waits for the loop's outstanding one to be answered
+        # or abandoned, as the loop itself would. Without this, an OBD_INFO
+        # 10 ms after a request on an 80 ms car put the probe's frame out at
+        # 50 ms with the poll request still unanswered -- two outstanding.
+        resolved_us = self._obd_outstanding_resolves_at(now)
         # SPEC.md 15.2 -- the probe replaces the result the poll set was
         # verified against, so the set clears first, flushing what it had
         # already accepted (§15.7).
@@ -1463,7 +1502,7 @@ class VtpDevice:
         # fallback-addressing logic, runs once, and has no schedule to
         # pace against. 50 ms is a collection window, not a rate bound.
         step_us = 50_000
-        t = now
+        t = max(now, resolved_us)
         if self._obd_last_tx_us is not None:
             t = max(t, self._obd_last_tx_us + step_us)
         answered = {}
