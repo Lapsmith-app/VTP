@@ -2229,8 +2229,9 @@ Three bounds hold across the probe and the poll loop together:
 - A device MUST NOT transmit until the outstanding request has been answered
   or abandoned, and while a poll set is active MUST NOT transmit two requests
   less than its `interval_ms` apart (§15.4). A probe continues from the same
-  last transmission — and since a probe clears the poll set (§15.2), its
-  requests and the poll loop's never contend.
+  last transmission and, like any request, waits for a poll request the bus
+  carried to be answered or abandoned; since a probe clears the poll set as
+  it begins (§15.2), no pending or later poll request contends with it.
 - A device MUST NOT retry an unanswered request. A request unanswered
   `OBD_RESPONSE_TIMEOUT_MS` after it was transmitted is abandoned; the poll
   loop simply comes round again (§15.4), and a probe moves on, or falls back
@@ -2245,8 +2246,9 @@ bytes whether it names one PID or six.
 **"Transmitted" means acknowledged.** Every response window and spacing in
 this section, §15.2 and §15.4 — the `OBD_RESPONSE_TIMEOUT_MS` window, the
 probe's collection window, `interval_ms`, a group's minimum interval
-(§15.4.2) — runs from the end of the frame as ISO 11898-1 completes it: sent
-without error and acknowledged in its ACK slot, the instant ISO 15765-4
+(§15.4.2) — runs from the end of the frame as ISO 11898-1 completes it:
+acknowledged in its ACK slot and free of error through its end of frame,
+which is the controller's transmit-success and the instant ISO 15765-4
 measures P2 from. None runs from the hand-over to the controller; the one
 bound that does is how long a probe frame may pend (§15.2). A device whose
 controller signals completion without a timestamp reads its clock when the
@@ -2266,8 +2268,10 @@ it lost arbitration or was not acknowledged has not been transmitted, so no
 request has yet gone unanswered for the repeat to be a retry of. A retry in
 this section's sense is a second acknowledged request for what an
 acknowledged, unanswered request already asked, and a capture tells the two
-apart by the ACK slot — the repeats of an undelivered frame are
-unacknowledged. Whether the controller's automatic retransmission is enabled,
+apart by whether the earlier attempt completed: an attempt the controller
+repeats was unacknowledged, or met an error flag between its ACK slot and
+its end of frame, and a dominant ACK alone does not make it transmitted.
+Whether the controller's automatic retransmission is enabled,
 or single-shot transmission is used and an undelivered frame re-offered, this
 section does not constrain: one frame in flight either way, and the request
 is made once, when the bus acknowledges it once. RATIONALE §11.8 is why

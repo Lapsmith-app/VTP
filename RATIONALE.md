@@ -1372,11 +1372,16 @@ same frame repeating, at 10 Hz instead of the controller's pace. What
 distinguishes a retry from the loop coming round was never how many times a
 frame appears — it is whether the frame is a second *acknowledged* request
 for what an acknowledged, unanswered one already asked, and a capture shows
-the ACK slot. The slot, and not an error flag: a frame that lost arbitration
-leaves no flag because it was never on the wire, and once the lone node is
-error-passive its flags are six recessive bits that a capture cannot tell
-from idle. SPEC §15.1 now says so, and the inspection claim holds with that
-reading rather than in spite of it. ISO 11898-1 is also kinder to the
+whether the earlier attempt completed. The complete attempt, and not the ACK
+slot alone: a frame that lost arbitration leaves nothing on the wire; a lone
+node's attempts have a recessive ACK slot and, once it is error-passive,
+flags a capture cannot tell from idle; and a frame one receiver acknowledged
+can still fail when another raises an error flag through the ACK delimiter
+or end of frame, after which ISO 11898-1 aborts the attempt and the
+controller repeats it — legal recovery that an ACK-slot test would call a
+retry. The controller's transmit-success is the same fact seen from inside.
+SPEC §15.1 now says so, and the inspection claim holds with that reading
+rather than in spite of it. ISO 11898-1 is also kinder to the
 lone node than the report assumed: its transmit error counter stops
 climbing at error-passive when the only fault is a missing acknowledgement,
 so a node alone on a bus repeats indefinitely rather than going bus-off, and

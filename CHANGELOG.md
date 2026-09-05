@@ -25,14 +25,19 @@ second. Whether that device conforms was not decidable from the text.
   (§15.1). A frame the controller repeats has not been transmitted, so no
   request has gone unanswered for the repeat to be a retry of. A retry is a
   second acknowledged request for what an acknowledged, unanswered request
-  already asked, and a capture tells the two apart by the ACK slot. Whether
-  automatic retransmission is enabled, or single-shot used and an
-  undelivered frame re-offered, is unconstrained.
-- **"Transmitted" is the acknowledgement** (§15.1), the instant ISO 15765-4
-  measures P2 from; every response window and spacing in §15 runs from it. A
-  frame the controller holds and has not transmitted is **pending**, and a
-  pending request is the outstanding one. The poll loop runs no timer
-  against a pending frame; a bus that carries nothing holds the loop.
+  already asked, and a capture tells the two apart by whether the earlier
+  attempt completed — not by its ACK slot alone, since an error flag after
+  a dominant ACK still aborts the attempt. Whether automatic retransmission
+  is enabled, or single-shot used and an undelivered frame re-offered, is
+  unconstrained.
+- **"Transmitted" is the completed transmission** (§15.1): acknowledged and
+  free of error through end of frame, the controller's transmit-success and
+  the instant ISO 15765-4 measures P2 from; every response window and
+  spacing in §15 runs from it. A frame the controller holds and has not
+  transmitted is **pending**, and a pending request is the outstanding one.
+  The poll loop runs no timer against a pending frame; a bus that carries
+  nothing holds the loop. A probe waits for a poll request the bus carried
+  like any other request.
 - **The probe is bounded** (§15.2): a probe frame still pending
   `OBD_RESPONSE_TIMEOUT_MS` after hand-over is withdrawn and treated as
   unanswered, so a probe of a sleeping car reports `responded` clear within a
@@ -50,10 +55,14 @@ Reasoning, including why single-shot was not mandated and why the poll loop
 has no pending bound, is in RATIONALE §11.8. Prose only: no field, bit, UUID,
 vector or producer case moves. The reference peripheral's synthetic bus
 acknowledges every frame at hand-over, so the pending state never exists
-there, which RATIONALE's closing section records; what the peripheral can
-exercise — a probe arriving while a poll request is outstanding — it now
-does, waiting for that request's answer or abandonment before the probe's
-first frame, with a self-test on an 80 ms car. For the reporter's transport,
+there, which RATIONALE's closing section records and the harness README
+lists among the rules a run cannot verify. What the peripheral can exercise
+— a probe arriving while a poll request is outstanding — it now does,
+waiting for that request's answer or its abandonment at 100 ms, whichever
+comes first, and an ECU's answer to a request the bus already carried is no
+longer discarded when the poll set clears: §15.5 says a matching
+subscription governs it, and it releases the request it answers. Self-tests
+drive an 80 ms car and a 300 ms one. For the reporter's transport,
 the reading asks nothing of the single-shot mode its driver refuses; what it
 does ask is the ability to withdraw a pending frame at §15.7's edges and at
 the start of a probe.
