@@ -302,6 +302,7 @@ FAULTS = {
     "clock_per_stream": "SPEC.md §8.1 — the streams are not on one clock",
     "clock_diverges": "SPEC.md §8.1 — the CAN clock runs at its own rate: it agrees with the others at connect and walks away from there",
     "drops_a_response": "SPEC.md §9 — a request is silently discarded rather than answered",
+    "att_error_when_pool_full": "SPEC.md §9.4 — the transport has no buffer for the indication, and the device answers the write with an ATT error and discards the request instead of holding the response",
     "pipelines_silently": "SPEC.md §9.4 — a second request written while a response is owed is applied, and answered by nobody",
     "owes_until_confirmed": "SPEC.md §9 — a response stays owed until its confirmation, so a client writing on arrival is refused busy (narrowed to one refusal; see _answer)",
     "busy_but_applied": "SPEC.md §9 — a request answered busy is applied anyway",
@@ -386,6 +387,7 @@ FAULTS = {
     "obd_reprobe_refused": "SPEC.md §15.2 — the first OBD_INFO of a connection answers ok and every later one is refused bad_params",
     "answers_before_the_next_write": "a device that answers inside its write handler — conforming, and quick enough that no client can pipeline against it (SPEC.md §9), which no check may Fail",
     "host_callback_lands_late": "not the device: the host stack holds each control delivery a scheduler turn, so `t_recv` lands after the next write — which no check may read as the device still owing (SPEC.md §9)",
+    "pool_full_holds_response": "a device whose transport refuses the first hand-over of every response and takes the next, one connection event later — SPEC.md §9.4's hold, conforming, which no check may Fail",
     "aid_strict_receiver": "a receiver that takes only aiding in the format the device declared — SPEC.md §14.6 as a MUST NOT, which makes the harness's synthetic payload `rejected` and §14.4's `applied` reachable only with --aiding-blob",
     "aid_tiny_chunks": "a device that chunks small and accepts large transfers — both legal, and the only shape in which SPEC.md §14.3's 65535-chunk cap binds before `max_bytes` does",
 }
@@ -1247,6 +1249,18 @@ class LoopbackTransport(Transport):
             # request is discarded unanswered and unapplied (SPEC.md §9).
             return
 
+        if "att_error_when_pool_full" in self.faults and len(request) == 2 and \
+                request[0] == refdec.OPCODE["TIME_SYNC"]:
+            # SPEC.md §9.4 -- the transport had no buffer for the indication,
+            # and this device reports that on the write instead of holding
+            # the response: an ATT error, nothing applied, nothing owed. The
+            # reporter's firmware, before the rule was written (issue #61).
+            # Narrowed to the well-formed TIME_SYNC by drops_a_response's
+            # predicate and for its reason: a real pool is full on whichever
+            # request is unlucky, and a fault that fired on any of them would
+            # be reported by whichever check ran first. Before dispatch, as
+            # the defect is -- the device never reads the request.
+            raise DeviceRefused("Unlikely Error: no ATT transmit buffer")
         response = self.device.handle_control(request, t_rx=t_rx)
         if response is None:
             return
@@ -1336,6 +1350,15 @@ class LoopbackTransport(Transport):
             await asyncio.sleep(self._control_latency)
             if lock is not self._deliver_lock:
                 return                              # a different connection
+            if "pool_full_holds_response" in self.faults:
+                # SPEC.md §9.4 -- the transport refused the hand-over, so the
+                # device keeps the response and offers it again at the next
+                # connection event. Still owed throughout, still ahead of
+                # anything else this device sends: one more interval, and
+                # nothing about the device is wrong.
+                await asyncio.sleep(self._control_latency)
+                if lock is not self._deliver_lock:
+                    return
             self._deliver_control(response)
             if not late:
                 self._owed -= 1

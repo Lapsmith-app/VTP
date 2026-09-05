@@ -26,6 +26,35 @@ class ControlTimeout(Exception):
         self.orphans = list(orphans)
 
 
+class ControlRefusedAtAtt(Exception):
+    """A Control write was answered with an ATT error by a device that
+    declares `control`.
+
+    The transport raises `DeviceRefused` for it, and `DeviceRefused` is a
+    `TransportError`, so the runner read the first outside device to do this
+    as the link dying and ended the run four seconds in (issue #61). The link
+    was up -- `DeviceRefused` is only ever raised when it is -- and the
+    refusal is a finding about the device, not about the transport.
+
+    SPEC.md §9.4: an error response on Control is what §4.1 gives a device
+    with no control plane, and a device that has read a request holds its
+    response until the transport takes it -- a transmit pool with no room now
+    is a reason to hold, never to answer at the ATT layer. A MUST, whichever
+    check happened to write the request.
+    """
+
+    def __init__(self, opcode, tag, reason):
+        name = refdec.OPCODE_NAME.get(opcode, hex(opcode))
+        super().__init__(
+            f"{name} tag {tag} was refused at the ATT layer ({reason}). §9.4: "
+            f"a device that declares control answers every request it reads "
+            f"with a response, and holds the response while the transport "
+            f"has no room for it; an ATT error on Control is §4.1's signal "
+            f"that there is no control plane at all")
+        self.opcode, self.tag, self.reason = opcode, tag, reason
+        self.evidence = {"opcode": name, "tag": tag, "att_error": str(reason)}
+
+
 class ControlEchoMismatch(Exception):
     """A response carried the right tag and the wrong opcode.
 
@@ -188,7 +217,13 @@ class ControlClient:
         try:
             await self._transport.write(
                 self._uuid, bytes([opcode, tag]) + bytes(params), response=True)
-        except (DeviceRefused, TransportError):
+        except DeviceRefused as exc:
+            # Before TransportError, which it subclasses. The link is up and
+            # the device answered; that is a verdict on the device (SPEC.md
+            # §9.4) and the run goes on to the next check.
+            self._pending.pop(tag, None)
+            raise ControlRefusedAtAtt(opcode, tag, exc) from exc
+        except TransportError:
             self._pending.pop(tag, None)
             raise
         return tag, future

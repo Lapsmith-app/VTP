@@ -6,7 +6,8 @@ import traceback
 
 from . import refdec
 from .checks import PHASES, Fail, Observe, Result, Skip, Status, load_all
-from .session import ControlEchoMismatch, ControlTimeout, Session, StreamLog
+from .session import (ControlEchoMismatch, ControlRefusedAtAtt,
+                      ControlTimeout, Session, StreamLog)
 from .transport import TransportError
 
 
@@ -178,10 +179,13 @@ class Runner:
             return finish(Status.SKIP, exc.reason, exc.evidence)
         except Observe as exc:
             return finish(Status.OBSERVE, exc.message, exc.evidence)
-        except (ControlTimeout, ControlEchoMismatch) as exc:
+        except (ControlTimeout, ControlEchoMismatch, ControlRefusedAtAtt) as exc:
             # SPEC.md §9 -- a device MUST respond to every request it applies
-            # and MUST echo the opcode and tag. Both are MUSTs regardless of
-            # the severity of the check that happened to provoke them.
+            # and MUST echo the opcode and tag; SPEC.md §9.4 -- it answers
+            # with a response and never at the ATT layer. All three are MUSTs
+            # regardless of the severity of the check that happened to
+            # provoke them. The third used to reach the clause below as a
+            # TransportError and abort the run (issue #61).
             return finish(Status.FAIL, str(exc),
                           getattr(exc, "evidence", {}), severity="MUST")
         except TransportError:

@@ -811,6 +811,75 @@ client: a device that applies a request whose response is then lost leaves the
 client to retry, and for any non-idempotent request the retry applies it
 twice. The failure was observed in practice before it was specified.
 
+**Why a full transmit pool is a hold and not a refusal (SPEC §9.4).** Reported
+from the first device firmware, and found on a bench rather than by reading:
+a conformance run ended four seconds in because `bt_gatt_indicate()` returned
+`-ENOMEM` — Zephyr's default of three ATT transmit buffers against
+fifty-eight notifications a second on a 30 ms interval — and the firmware,
+reading SPEC §9.4's principle as written, applied nothing and answered the
+write with an ATT error. The harness took the error for the link dying and
+stopped. The device had done what "MUST NOT apply a request it cannot answer"
+seems to say, and the two undeliverabilities SPEC §9.4 names are both
+knowable before dispatch while this one is knowable only by trying. The text
+did not say whether it was a third.
+
+It is not, and the reason was already in SPEC §9. A response is owed until it
+has been handed to the transport, so a hand-over the transport refuses leaves
+the device owing exactly what it owed a moment before. Nothing has been lost,
+and a lost response is the only thing SPEC §9.4 guards against: its rule
+exists so that a client is never left retrying a request that took effect
+and whose answer went nowhere. A pool that is full at this instant drains at
+the next connection event. That makes it the situation SPEC §9 already
+settles one layer up — one outstanding indication per bearer — and it gets
+the same answer: a reason to hold, not a reason to refuse. "Decided before
+dispatch" stays literally true, because what is decided is whether the device
+has room to hold the response, and SPEC §9 already requires it to: the held
+response takes the place of the indication that would otherwise be in flight.
+
+The report offered three shapes and said which it would write. The one it
+would not — the client retries, and the specification says so — fails on
+three grounds, any one of which would do. An ATT error on Control already
+means something: SPEC §4.1 makes it the entire behaviour of a device with no
+control plane, so a client receiving one from a device that declared
+`control` cannot tell "never" from "not now", which is the distinction SPEC
+§9 spends two status codes to keep. A central's stack is entitled to end the
+session on an error response it did not expect, and the only client in
+existence did. And the ATT layer is not there to answer on for a response
+composed after the write handler has returned: `OBD_INFO`'s waits for its
+probe (SPEC §15.2), and a pool that is full when the probe completes was
+answered at the ATT layer a hundred milliseconds earlier. A rule that cannot
+cover the deferred response is not the rule, and the one that covers it —
+hold, and offer again — covers the immediate case for free.
+
+The third shape — reserve transmit capacity for the control plane so the
+state is unreachable — was declined because it puts a host-stack sizing
+decision into the protocol, which leaves the link's own parameters to the
+bench for the same reason (SPEC §12.1), and because it is not sufficient on
+its own: a reserved buffer is one indication, SPEC §9
+has a device holding two responses, and a stack whose pool is shared with the
+streams does not know which buffer was reserved. What the rule keeps of it is
+the property, met at the drain rather than at the build: the held response is
+offered before the device queues another notification, so the first buffer
+the streams give back is the response's. That bounds the hold at about one
+connection event on any stack, without naming a number.
+
+The report's own second shape applied the request only once the answer was
+queued, to keep SPEC §9.4's sequence exact. The text does not, because the
+sequence was never the point — the lost response was — and for half the
+opcodes the order is not available anyway: `TIME_SYNC`'s second reading,
+`GET_POWER`'s measurement and `OBD_INFO`'s probe *are* the application, and
+the response cannot be composed until they have run. Apply, compose, hold,
+offer, and owe until the offer is taken is one order for every opcode. A
+client that times out and retries while the device holds meets `busy`, which
+SPEC §9 already tells it how to treat.
+
+The reference peripheral had been doing all of this before the rule was
+written. CoreBluetooth's `updateValue:` returning `NO` is the same event as
+Zephyr's `-ENOMEM` — the stack's transmit queue is full — and `serve.py` holds
+the response, retries it from the pump ahead of every stream, and stops
+owing when the stack accepts it. The rule was in the implementation and not
+in the text, and the first implementer on a different stack read the text.
+
 ### 8.8 Security (SPEC §10)
 
 **Why the obligation is one-sided.** Requiring encryption costs the device
@@ -1703,3 +1772,13 @@ deadline on one when the poll set clears. The harness's loopback transport
 is the same bus, so it cannot
 either. Those rules are tested by a controller on a bus with no other node on
 it, which only a device can be plugged into.
+
+The loopback transport has no transmit pool either: every hand-over is taken
+the instant it is offered, so a device holding a response the transport
+refused — SPEC §9.4's hold — cannot be exercised there, and neither can the
+ordering that ends it, the held response going out ahead of the streams. What
+the loopback can seed is the defect SPEC §9.4 now names, a write answered
+with an ATT error instead of its response held, and a device whose every
+response is taken one connection event late, which no check may fail. The
+hold itself is a bench measurement: streams subscribed at their ceilings, a
+transmit pool sized to fill, and every request still answered.

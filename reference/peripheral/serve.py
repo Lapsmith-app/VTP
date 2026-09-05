@@ -631,7 +631,10 @@ class Peripheral:
         self._note_control(request, status)
         # Queued rather than sent from here: this callback does not run on the
         # loop that owns the transport, and a refused response must be retried
-        # rather than dropped.
+        # rather than dropped. SPEC.md §9.4 -- `update_value` returning False
+        # is CoreBluetooth's transmit queue being full, the same event as a
+        # stack returning -ENOMEM from its indicate call, and it is a reason
+        # to hold the response, never to answer the write with an ATT error.
         self._control.hold(tag, response)
 
     def _note_control(self, request, status):
@@ -1052,7 +1055,11 @@ class Peripheral:
                     self._control.hold(tag, due)
 
             # Control responses first, and retried until they land. They are
-            # the one thing on this link that is owed rather than offered.
+            # the one thing on this link that is owed rather than offered, and
+            # SPEC.md §9.4 puts a held response ahead of every notification
+            # this device queues after it: the first buffer the streams give
+            # back is the response's, so the hold ends when the queue next
+            # drains and not when the streams happen to leave room.
             while len(self._control) and self._ready:
                 control = self.server.get_characteristic(CHAR["control"])
                 control.value = self._control.peek()

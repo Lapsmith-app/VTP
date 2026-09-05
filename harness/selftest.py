@@ -94,6 +94,8 @@ CAUGHT_BY = {
     "clock_diverges": "clock.one_rate",
     "drops_a_response": ("control.time_sync",
                          "control.no_busy_for_conforming_client"),
+    "att_error_when_pool_full": ("control.time_sync",
+                                 "control.no_busy_for_conforming_client"),
     "pipelines_silently": "control.busy_when_outstanding",
     "pipelined_answered_bad_params": "control.busy_when_outstanding",
     "owes_until_confirmed": ("control.no_busy_for_conforming_client",
@@ -258,6 +260,14 @@ ISOLATED = {"owes_until_confirmed", "pipelined_answered_bad_params"}
 #: still owing, and it was not (issue #48). The required verdicts are the same
 #: two, which is the point: what the report says must not turn on when the
 #: host got round to the callback.
+#: `pool_full_holds_response` is the shape issue #61 asked for: a device whose
+#: transport refuses the first hand-over of every response and takes the next,
+#: one connection event later, which SPEC.md §9.4 now says is what a device
+#: does when its transmit pool is full. It is CONFORMING -- the response is
+#: owed throughout and arrives -- and the claim under test is that a run
+#: against it fails nothing and aborts nowhere. The defect on the other side
+#: of that rule, answering the write with an ATT error, is a matrix entry
+#: (`att_error_when_pool_full`); this is the device that fixed it.
 #: `aid_strict_receiver` is the third of that shape and the reason issue #52
 #: was filed. It is a CONFORMING device -- SPEC.md §14.6's "MUST NOT accept
 #: anything but aiding in the format it declared", read as written -- and what
@@ -277,7 +287,7 @@ ISOLATED = {"owes_until_confirmed", "pipelined_answered_bad_params"}
 #: never open the transfer and call the required `bad_params` a failed MUST.
 SCENARIO_FAULTS = {"obd_pid_never_answers", "obd_reprobe_refused",
                    "answers_before_the_next_write",
-                   "host_callback_lands_late",
+                   "host_callback_lands_late", "pool_full_holds_response",
                    "aid_strict_receiver", "aid_tiny_chunks"}
 
 #: Only these faults are about state surviving a link drop, and only their runs
@@ -1029,6 +1039,7 @@ async def main():
           for faults, overlap_excluded, _ in PROMPT_SCENARIOS),
         run(faults=["obd_pid_never_answers"]),
         run(faults=["obd_pid_never_answers", "obd_reprobe_refused"]),
+        run(faults=["pool_full_holds_response"]),
         run(faults=["aid_strict_receiver"]),
         run(faults=["aid_strict_receiver"], aiding_blob=aiding_blob()),
         # The harness's OWN payload, handed back through the option: bytes
@@ -1045,7 +1056,7 @@ async def main():
     reports = started[cut:cut + len(ordered)]
     tail = started[cut + len(ordered):]
     prompts = tail[:len(PROMPT_SCENARIOS)]
-    (quiet, stacked, strict_synthetic, strict_real,
+    (quiet, stacked, held, strict_synthetic, strict_real,
      strict_wrong, tiny_chunks) = tail[len(PROMPT_SCENARIOS):]
 
     print("A conforming device")
@@ -1151,6 +1162,25 @@ async def main():
         problems += prompt
         if not prompt:
             print(f"  ok   {headline}")
+
+    # SPEC.md §9.4 -- a device that holds a response the transport refused
+    # and offers it again is doing what the rule says. Every check must still
+    # pass against it, and the run must reach its end: the reporter's run did
+    # not, and that is the abort this scenario exists to keep from returning.
+    held_problems = [
+        f"a device holding a response for a full transmit pool was reported "
+        f"{r.status.value} on {r.check.id}: {r.message}"
+        for r in held.failures + held.warnings + held.errors]
+    if held.aborted:
+        held_problems.append(f"the pool_full_holds_response run aborted: "
+                             f"{held.aborted}")
+    elif not held.counts["pass"]:
+        held_problems.append("not one check passed against a device holding "
+                             "its responses; something is not running")
+    problems += held_problems
+    if not held_problems:
+        print("  ok   a device whose transport takes every response one "
+              "connection event late fails nothing (SPEC.md §9.4)")
 
     result = result_for(quiet, "obd.poll_and_flag")
     if result is None:
