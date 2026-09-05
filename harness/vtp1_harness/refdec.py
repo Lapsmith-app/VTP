@@ -122,6 +122,16 @@ IMPLIES = {b["name"]: tuple(b.get("implies", ()))
 
 OPCODE = {op["name"]: op["value"] for op in SCHEMA["control"]["opcodes"]}
 OPCODE_NAME = {v: k for k, v in OPCODE.items()}
+
+
+def opcode_name(opcode):
+    """An opcode as a report names it: the schema's name, else the byte.
+
+    One fallback for every message and evidence field. Four sites had their
+    own, and an unallocated opcode came out as `0x5` in one exception and
+    `0x05` in the evidence of its sibling.
+    """
+    return OPCODE_NAME.get(opcode, f"0x{opcode:02x}")
 #: SPEC.md §9 -- every opcode is owned by a capability, and availability is
 #: decided before parameters. None means the opcode belongs to the clock,
 #: which every device has.

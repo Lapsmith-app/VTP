@@ -1313,29 +1313,22 @@ device that applies a request whose response is then lost leaves the client no
 way to find out what happened.
 
 **A transport with no room for the indication is not an undeliverable
-response; it is §9's reason to hold, one layer down.** What a device decides
-before dispatch is what it can know before dispatch: that indications are
-enabled, that nothing is owed, and that it has the room §9 requires it to have
-for the response. A host stack refusing the hand-over because its transmit
-pool is full at that instant is none of those, and it is not a lost response
-either — the pool drains at the next connection event. The response stays
-owed exactly as §9 says, until it has been *handed to the transport*: a
-hand-over the transport refused is not one. A device MUST keep the response
-and offer it again, and MUST NOT queue a notification on any stream ahead of
-it, so that the hold ends when the pool the streams filled next drains and
-not when the streams happen to leave room. The held response takes the place
-of the one §9 has in flight, and the one behind it is still one, so a device
-that meets §9 already has the room.
+response; it is §9's reason to hold, one layer down.** The response stays
+owed until it has been handed to the transport — a hand-over the transport
+refused is not one — and the room §9 requires for one held response is the
+room this needs: the held response stands where §9's in-flight one would
+(RATIONALE §8.7).
 
-A device MUST NOT answer the write with an ATT error for it, and MUST NOT
-discard the request. An error response on Control is what §4.1 gives a device
-with no control plane at all, so a client cannot tell "never" from "not now"
-by one, and a central's stack is entitled to end the session on an error it
-did not expect. Nor is the ATT layer still available once the write has been
-answered there: a response composed after the write handler has returned —
-`OBD_INFO`'s (§15.2) — meets the same full pool with no way left to report
-it. A client that times out and retries while the response is held is
-answered `busy`, which §9 already tells it how to treat.
+A device MUST keep the response and offer it again, and until the transport
+has taken it MUST NOT hand the transport a notification on any stream, so
+that the first buffer the streams give back is the response's. A device MUST
+NOT answer the write with an ATT error, and MUST NOT drop the response it
+holds: an error response on Control is §4.1's "no control plane", and a
+response composed after the write handler has returned — `OBD_INFO`'s
+(§15.2) — has no ATT layer left to answer on. A client that times out and
+retries while the response is held meets §9 exactly as written: refused
+`busy` from the one slot §9 has a device hold behind the response in flight,
+or discarded when that slot is already taken.
 
 **Every opcode in this specification is safe to retry:**
 

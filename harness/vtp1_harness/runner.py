@@ -8,7 +8,7 @@ from . import refdec
 from .checks import PHASES, Fail, Observe, Result, Skip, Status, load_all
 from .session import (ControlEchoMismatch, ControlRefusedAtAtt,
                       ControlTimeout, Session, StreamLog)
-from .transport import TransportError
+from .transport import DeviceRefused, TransportError
 
 
 @dataclasses.dataclass
@@ -179,21 +179,64 @@ class Runner:
             return finish(Status.SKIP, exc.reason, exc.evidence)
         except Observe as exc:
             return finish(Status.OBSERVE, exc.message, exc.evidence)
-        except (ControlTimeout, ControlEchoMismatch, ControlRefusedAtAtt) as exc:
+        except ControlRefusedAtAtt as exc:
+            if exc.needs_pairing:
+                # SPEC.md §10 -- the device wants an encrypted link and this
+                # host has not paired with it. Pairing is the client's job,
+                # and a client meeting this MUST NOT report the device as
+                # faulty: not verified, and the operator is told what to do.
+                return finish(Status.SKIP,
+                              f"{refdec.opcode_name(exc.opcode)} was refused "
+                              f"at the ATT layer ({exc.reason}). SPEC.md §10 "
+                              f"puts pairing on the client: pair this host "
+                              f"with the device and run again", exc.evidence)
+            # SPEC.md §9.4 -- a device that declares control answers with a
+            # response and never at the ATT layer. A MUST regardless of the
+            # severity of the check that happened to provoke it; it used to
+            # reach the TransportError clause below and abort (issue #61).
+            message, evidence = _with_superseded(exc, str(exc), exc.evidence)
+            return finish(Status.FAIL, message, evidence, severity="MUST")
+        except (ControlTimeout, ControlEchoMismatch) as exc:
             # SPEC.md §9 -- a device MUST respond to every request it applies
-            # and MUST echo the opcode and tag; SPEC.md §9.4 -- it answers
-            # with a response and never at the ATT layer. All three are MUSTs
-            # regardless of the severity of the check that happened to
-            # provoke them. The third used to reach the clause below as a
-            # TransportError and abort the run (issue #61).
-            return finish(Status.FAIL, str(exc),
-                          getattr(exc, "evidence", {}), severity="MUST")
+            # and MUST echo the opcode and tag. Both are MUSTs regardless of
+            # the severity of the check that happened to provoke them.
+            message, evidence = _with_superseded(
+                exc, str(exc), getattr(exc, "evidence", {}))
+            return finish(Status.FAIL, message, evidence, severity="MUST")
+        except DeviceRefused as exc:
+            # Before TransportError, which it subclasses. The transport says
+            # "refused" only while the link is up, so the device is still
+            # there for every check after this one; what this check cannot
+            # say is what it was going to, because an operation it did not
+            # guard was refused. An error in this check's run, not a dead
+            # link -- which is what letting it through made it (issue #61).
+            return finish(Status.ERROR,
+                          f"the device refused an operation this check did "
+                          f"not expect it to: {exc}")
         except TransportError:
             raise
         except Exception as exc:                    # noqa: BLE001
             return finish(Status.ERROR, f"{type(exc).__name__}: {exc}",
                           {"traceback": traceback.format_exc(limit=4)})
         return finish(Status.PASS)
+
+
+def _with_superseded(exc, message, evidence):
+    """A control-layer finding raised while a Fail was already propagating.
+
+    A cleanup request in a check's `finally` that times out or is refused
+    replaces the check's own verdict on the way out, and the report showed
+    only the replacement: the rule the check was written for was lost to
+    the rule the cleanup broke. Both are true of that device, so both are
+    reported -- the control-layer MUST as the verdict, and the finding it
+    superseded beside it.
+    """
+    context = exc.__context__
+    if not isinstance(context, Fail):
+        return message, evidence
+    evidence = dict(evidence, superseded=context.message)
+    return (f"{message}. This was raised by the check's cleanup and "
+            f"superseded its own finding: {context.message}"), evidence
 
 
 async def run_once(transport, target, **kwargs):

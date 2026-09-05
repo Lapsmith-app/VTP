@@ -42,6 +42,13 @@ from vtp1_harness.transport import FAULTS, LoopbackTransport  # noqa: E402
 #: validity bit knowing only half of it breaks §9.1's validity grouping AND
 #: reports a PHY §2.2 asks it not to be on, and both are true statements about
 #: that device rather than one finding counted twice.
+#: The two checks that send a well-formed TIME_SYNC, which is the request the
+#: transport narrows three of its control-plane faults to (see
+#: `LoopbackTransport._control_write`). Named once so the faults that share
+#: the narrowing share the claim.
+TIME_SYNC_SENDERS = ("control.time_sync",
+                     "control.no_busy_for_conforming_client")
+
 CAUGHT_BY = {
     "missing_characteristic": "gatt.attribute_table",
     "extra_characteristic": "gatt.no_extra_characteristics",
@@ -92,10 +99,8 @@ CAUGHT_BY = {
     "gps_scope_bits_ignored": "gps.solution_scoped_bits",
     "clock_per_stream": "clock.one_clock",
     "clock_diverges": "clock.one_rate",
-    "drops_a_response": ("control.time_sync",
-                         "control.no_busy_for_conforming_client"),
-    "att_error_when_pool_full": ("control.time_sync",
-                                 "control.no_busy_for_conforming_client"),
+    "drops_a_response": TIME_SYNC_SENDERS,
+    "att_error_when_pool_full": TIME_SYNC_SENDERS,
     "pipelines_silently": "control.busy_when_outstanding",
     "pipelined_answered_bad_params": "control.busy_when_outstanding",
     "owes_until_confirmed": ("control.no_busy_for_conforming_client",
@@ -997,6 +1002,30 @@ def _chunk_cap_problems(report):
     return problems
 
 
+def _conforming_problems(report, who, min_pass=1):
+    """What a run against a device that is not in violation may not say.
+
+    A failure, a warning or an error is a verdict against a conforming
+    device. An abort is not a verdict and is not among them either:
+    Runner.run records it on the report rather than raising, and `errors`
+    counts only checks that ran, so a run that died in session.open has an
+    empty result list, prints zeroes across the board and appends nothing --
+    the roles it exists to test go unexamined and the file still says ok.
+    Fewer passes than the run should have is the same thing found the other
+    way round. One function, because the third hand-written copy of this had
+    already lost the abort clause's reason.
+    """
+    problems = [f"{who} was reported {r.status.value} on {r.check.id}: "
+                f"{r.message}"
+                for r in report.failures + report.warnings + report.errors]
+    if report.aborted:
+        problems.append(f"the run against {who} aborted: {report.aborted}")
+    elif report.counts["pass"] < min_pass:
+        problems.append(f"only {report.counts['pass']} check(s) passed against "
+                        f"{who}; something is not running")
+    return problems
+
+
 def _failed(problems):
     print("\nFAILED")
     for problem in problems:
@@ -1023,7 +1052,7 @@ async def main():
     #
     # A run is ~55s of almost pure waiting: the CAN and OBD checks listen for
     # periodic frames, and the loop has nothing to compute while they do. The
-    # fault matrix already knew that and gathered its ninety. The seven runs
+    # fault matrix already knew that and gathered its ninety. The eight runs
     # around it did not, and waiting for each other in turn was most of this
     # file's wall clock -- three minutes of it, spent asleep, for no reason
     # anyone had chosen.
@@ -1064,15 +1093,8 @@ async def main():
     print(f"  {counts['pass']} passed, {counts['fail']} failed, "
           f"{counts['warn']} warnings, {counts['skip']} skipped, "
           f"{counts['error']} errors")
-    for result in clean.failures + clean.warnings + clean.errors:
-        problems.append(f"the reference peripheral was reported "
-                        f"{result.status.value} on {result.check.id}: "
-                        f"{result.message}")
-    if clean.aborted:
-        problems.append(f"the clean run aborted: {clean.aborted}")
-    if counts["pass"] < 30:
-        problems.append(f"only {counts['pass']} checks passed against the "
-                        f"reference peripheral; something is not running")
+    problems += _conforming_problems(clean, "the reference peripheral",
+                                     min_pass=30)
     problems += _skip_problems(clean)
     problems += _verdict_problems(clean)
 
@@ -1083,23 +1105,7 @@ async def main():
         counts = report.counts
         print(f"  {profile:<16} {counts['pass']} passed, {counts['fail']} failed, "
               f"{counts['skip']} skipped, {counts['error']} errors")
-        for result in report.failures + report.warnings + report.errors:
-            problems.append(f"a {profile} device was reported "
-                            f"{result.status.value} on {result.check.id}: "
-                            f"{result.message}")
-        # An abort is not a verdict, and it is not among the failures either:
-        # Runner.run records it on the report rather than raising, and
-        # `errors` only counts checks that ran. A run that died in
-        # session.open therefore has an empty result list, prints zeroes
-        # across the board and appends nothing -- so the roles this profile
-        # exists to test go unexamined and the file still says ok. The clean
-        # run above is held to both of these; there is no reason these are
-        # not.
-        if report.aborted:
-            problems.append(f"the {profile} run aborted: {report.aborted}")
-        elif not counts["pass"]:
-            problems.append(f"not one check passed against a {profile} "
-                            f"device; something is not running")
+        problems += _conforming_problems(report, f"a {profile} device")
 
     print("\nA device with one specific defect")
     width = max(len(f) for f in ordered)
@@ -1167,16 +1173,15 @@ async def main():
     # and offers it again is doing what the rule says. Every check must still
     # pass against it, and the run must reach its end: the reporter's run did
     # not, and that is the abort this scenario exists to keep from returning.
-    held_problems = [
-        f"a device holding a response for a full transmit pool was reported "
-        f"{r.status.value} on {r.check.id}: {r.message}"
-        for r in held.failures + held.warnings + held.errors]
-    if held.aborted:
-        held_problems.append(f"the pool_full_holds_response run aborted: "
-                             f"{held.aborted}")
-    elif not held.counts["pass"]:
-        held_problems.append("not one check passed against a device holding "
-                             "its responses; something is not running")
+    # The same full-role device as the clean run, one interval slower, so it
+    # is held to the clean run's baselines too: a MUST that the extra
+    # latency pushed onto a Skip or an Observe branch would otherwise leave
+    # this run green with nothing to notice.
+    held_problems = _conforming_problems(
+        held, "a device holding a response for a full transmit pool",
+        min_pass=30)
+    held_problems += _skip_problems(held)
+    held_problems += _verdict_problems(held)
     problems += held_problems
     if not held_problems:
         print("  ok   a device whose transport takes every response one "

@@ -180,10 +180,13 @@ Seven things are permanently in it:
   for the indication keeps the response and offers it again ahead of the
   streams, and the harness cannot fill a device's pool to order: all it sees
   is a response that arrived, whether or not it was held. What it can see is
-  the defect on the other side of that rule — a Control write answered with
+    the defect on the other side of that rule — a Control write answered with
   an ATT error — and it reports that as the failed MUST it is and goes on to
   the next check, rather than ending the run as it did for the first device
-  to do it. The hold itself is a bench measurement: every stream subscribed at
+  to do it. Two exceptions, both the host's: a central whose own stack drops
+  the link on the error response still ends the run, and says the link died;
+  and a refusal for insufficient authentication or encryption is §10's, so
+  the control checks are not verified and you are told to pair first. The hold itself is a bench measurement: every stream subscribed at
   its ceiling, a transmit pool sized to fill, and every request still
   answered.
 

@@ -32,25 +32,35 @@ dying and ended the run four seconds in.
   a device that meets §9 already has the room. "Decided before dispatch"
   stays literally true: what is decided is the room to hold.
 - **A device MUST NOT answer the write with an ATT error for it, and MUST
-  NOT discard the request** (§9.4). An error response on Control is what
-  §4.1 gives a device with no control plane, so a client cannot tell "never"
-  from "not now" by one; a central's stack may end the session on it, and
-  the only client in existence did; and it is not available at all for a
-  response composed after the write handler returns — `OBD_INFO`'s. A client
-  that times out and retries while the response is held meets `busy`.
+  NOT drop the response it holds** (§9.4). An error response on Control is
+  what §4.1 gives a device with no control plane, so a client cannot tell
+  "never" from "not now" by one; a central's stack may end the session on
+  it, and the only client in existence did; and it is not available at all
+  for a response composed after the write handler returns — `OBD_INFO`'s. A
+  client that times out and retries while the response is held meets §9 as
+  written: `busy` from the one slot §9 has a device hold, or its discard.
 - RATIONALE §8.7 records why, including why reserving transmit capacity was
-  declined and why the request is applied before the hand-over rather than
-  after it. The reference peripheral had been holding for CoreBluetooth's
-  queue-full return since before the rule existed; the rule was in the
-  implementation and not in the text.
+  declined, why the request is applied before the hand-over rather than
+  after it, and — from the reporter's reading of the ruling against its
+  firmware — why the ordering clause is one line in a single-loop peripheral
+  and a producer gate in a multi-threaded one. The reference peripheral had
+  been holding for CoreBluetooth's queue-full return since before the rule
+  existed; the rule was in the implementation and not in the text.
 
 Prose only; no wire change and no vector moves. The harness now reports a
 Control write answered with an ATT error as the failed MUST it is, on
 whichever check wrote it, and goes on to the next check instead of aborting
-the run. A seeded fault holds it to that, and a conforming scenario — every
-response taken one connection event late — holds it to failing nothing. The
-loopback has no transmit pool, so the hold itself is a bench measurement,
-which RATIONALE's closing section and the harness README now record.
+the run — provided the central's own stack keeps the link up on the error
+response; one that drops it still ends the run, as a dead link, and says so.
+A refusal whose reason names insufficient authentication or encryption is
+§10's, not §9.4's: the control checks are reported as not verified and the
+operator told to pair. Any other refusal with the link up is now an error on
+the check that met it rather than the end of the run. A seeded fault holds
+the harness to the §9.4 verdict, and a conforming scenario — every response,
+the deferred `OBD_INFO` reply included, taken one connection event late —
+holds it to failing nothing. The loopback has no transmit pool, so the hold
+itself is a bench measurement, which RATIONALE's closing section and the
+harness README now record.
 
 ### §15.7: a pending frame has a deadline, not a withdrawal
 

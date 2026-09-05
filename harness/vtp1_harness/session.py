@@ -6,6 +6,7 @@ is being interrogated, and the request/response correlation that SPEC.md §9
 puts on the tag.
 """
 import asyncio
+import re
 import dataclasses
 import struct
 import time
@@ -20,39 +21,52 @@ class ControlTimeout(Exception):
 
     def __init__(self, opcode, tag, waited, orphans=()):
         super().__init__(
-            f"no response to {refdec.OPCODE_NAME.get(opcode, hex(opcode))} "
+            f"no response to {refdec.opcode_name(opcode)} "
             f"tag {tag} within {waited:.1f}s")
         self.opcode, self.tag, self.waited = opcode, tag, waited
         self.orphans = list(orphans)
 
 
+#: How a host reports that the device wanted an encrypted or authenticated
+#: link and this client had not paired -- three platforms, three wordings.
+#: SPEC.md §10 puts pairing on the client and says a client meeting this MUST
+#: NOT report the device as faulty, so it is the one ATT refusal on Control
+#: that is not a finding about the device.
+_NEEDS_PAIRING = re.compile(
+    r"insufficient (authentication|encryption)|authentication is insufficient"
+    r"|not ?authori[sz]ed", re.IGNORECASE)
+
+
 class ControlRefusedAtAtt(Exception):
-    """A Control write was answered with an ATT error by a device that
-    declares `control`.
+    """A Control write answered with an ATT error, on a device that declares
+    `control`.
 
-    The transport raises `DeviceRefused` for it, and `DeviceRefused` is a
-    `TransportError`, so the runner read the first outside device to do this
-    as the link dying and ended the run four seconds in (issue #61). The link
-    was up -- `DeviceRefused` is only ever raised when it is -- and the
-    refusal is a finding about the device, not about the transport.
+    The transport reports it as `DeviceRefused`, a `TransportError`, and the
+    runner read the first outside device to do this as the link dying and
+    ended the run four seconds in (issue #61). The link is up -- the
+    transport only says "refused" when it is -- and SPEC.md §9.4 leaves a
+    device that declares control no ATT-layer refusal to give, so this is a
+    MUST finding about the device, on whichever check wrote the request.
 
-    SPEC.md §9.4: an error response on Control is what §4.1 gives a device
-    with no control plane, and a device that has read a request holds its
-    response until the transport takes it -- a transmit pool with no room now
-    is a reason to hold, never to answer at the ATT layer. A MUST, whichever
-    check happened to write the request.
+    The message states what was observed and nothing about why: the host
+    keeps no ATT error code, so the harness cannot tell a full transmit
+    pool from anything else. `needs_pairing` is the one cause it can read,
+    from the reason's own words, and it is SPEC.md §10's rather than §9.4's.
     """
 
     def __init__(self, opcode, tag, reason):
-        name = refdec.OPCODE_NAME.get(opcode, hex(opcode))
+        self.opcode, self.tag, self.reason = opcode, tag, str(reason)
         super().__init__(
-            f"{name} tag {tag} was refused at the ATT layer ({reason}). §9.4: "
-            f"a device that declares control answers every request it reads "
-            f"with a response, and holds the response while the transport "
-            f"has no room for it; an ATT error on Control is §4.1's signal "
-            f"that there is no control plane at all")
-        self.opcode, self.tag, self.reason = opcode, tag, reason
-        self.evidence = {"opcode": name, "tag": tag, "att_error": str(reason)}
+            f"{refdec.opcode_name(opcode)} tag {tag} was refused at the ATT "
+            f"layer ({self.reason}). SPEC.md §9.4: a device that declares "
+            f"control answers every request it reads with a response, held "
+            f"until the transport takes it, and never with an ATT error")
+        self.evidence = {"att_error": self.reason}
+
+    @property
+    def needs_pairing(self):
+        """SPEC.md §10 -- the device wants a link this host has not paired."""
+        return bool(_NEEDS_PAIRING.search(self.reason))
 
 
 class ControlEchoMismatch(Exception):
@@ -66,11 +80,11 @@ class ControlEchoMismatch(Exception):
 
     def __init__(self, sent, response):
         super().__init__(
-            f"wrote {refdec.OPCODE_NAME.get(sent, hex(sent))} and the response "
-            f"carrying that tag echoed "
-            f"{refdec.OPCODE_NAME.get(response.opcode, hex(response.opcode))}. "
+            f"wrote {refdec.opcode_name(sent)} and the response carrying "
+            f"that tag echoed {refdec.opcode_name(response.opcode)}. "
             f"§9 requires the opcode to be echoed from the request")
-        self.evidence = {"sent": f"0x{sent:02x}", "response": response.raw.hex()}
+        self.evidence = {"sent": refdec.opcode_name(sent),
+                         "response": response.raw.hex()}
 
 
 @dataclasses.dataclass
@@ -95,7 +109,7 @@ class Response:
 
     @property
     def opcode_name(self):
-        return refdec.OPCODE_NAME.get(self.opcode, f"0x{self.opcode:02x}")
+        return refdec.opcode_name(self.opcode)
 
     @property
     def round_trip_s(self):
@@ -217,14 +231,14 @@ class ControlClient:
         try:
             await self._transport.write(
                 self._uuid, bytes([opcode, tag]) + bytes(params), response=True)
-        except DeviceRefused as exc:
-            # Before TransportError, which it subclasses. The link is up and
-            # the device answered; that is a verdict on the device (SPEC.md
-            # §9.4) and the run goes on to the next check.
+        except TransportError as exc:
             self._pending.pop(tag, None)
-            raise ControlRefusedAtAtt(opcode, tag, exc) from exc
-        except TransportError:
-            self._pending.pop(tag, None)
+            if isinstance(exc, DeviceRefused):
+                # The link is up and the device answered: a verdict on the
+                # device (SPEC.md §9.4), and the run goes on to the next
+                # check. Let through as the TransportError it subclasses, it
+                # was the link dying (issue #61).
+                raise ControlRefusedAtAtt(opcode, tag, exc) from exc
             raise
         return tag, future
 

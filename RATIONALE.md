@@ -855,13 +855,34 @@ The third shape — reserve transmit capacity for the control plane so the
 state is unreachable — was declined because it puts a host-stack sizing
 decision into the protocol, which leaves the link's own parameters to the
 bench for the same reason (SPEC §12.1), and because it is not sufficient on
-its own: a reserved buffer is one indication, SPEC §9
-has a device holding two responses, and a stack whose pool is shared with the
-streams does not know which buffer was reserved. What the rule keeps of it is
+its own: a reserved buffer is one indication, a device in this situation
+holds two responses — the refused one and the `busy` SPEC §9 has it hold
+behind it — and a stack whose pool is shared with the streams does not know
+which buffer was reserved. What the rule keeps of it is
 the property, met at the drain rather than at the build: the held response is
 offered before the device queues another notification, so the first buffer
 the streams give back is the response's. That bounds the hold at about one
 connection event on any stack, without naming a number.
+
+**The ordering clause is not the same price everywhere, and the reference
+makes it look free.** `serve.py` meets it in one line, because one event
+loop owns every send on that device and "control responses first" is a
+priority inside a single loop. A firmware whose streams are separate
+producer threads, each calling the stack's notify directly, cannot impose an
+order at the point of sending: a producer already inside that call is
+waiting on a buffer, and the thread that would tell it to stand down is the
+one whose completions free the buffers. There the clause is a gate — each
+producer stopped from starting a send, and given a bounded moment to finish
+one already running, before the response is offered — and its cost is
+cross-thread coordination that no diff of this repository shows. The
+reporter, whose firmware is that shape, read `serve.py` as the model and
+found the difference by looking; the second device implementer is likely to
+be embedded, likely to have per-stream producers, and likely to read it the
+same way, so it is recorded here to be found once. The requirement stands
+regardless: a device whose streams could take the queue ahead of a held
+response would hold it until the streams happened to leave room, which is
+the indefinite hold the clause exists to forbid. The cost is the device's,
+not the protocol's.
 
 The report's own second shape applied the request only once the answer was
 queued, to keep SPEC §9.4's sequence exact. The text does not, because the
@@ -870,8 +891,10 @@ opcodes the order is not available anyway: `TIME_SYNC`'s second reading,
 `GET_POWER`'s measurement and `OBD_INFO`'s probe *are* the application, and
 the response cannot be composed until they have run. Apply, compose, hold,
 offer, and owe until the offer is taken is one order for every opcode. A
-client that times out and retries while the device holds meets `busy`, which
-SPEC §9 already tells it how to treat.
+client that times out and retries while the device holds meets SPEC §9 as
+written — `busy` from the one slot behind the held response, or the discard
+§9 already prescribes when that slot is taken — and needs nothing §9 did not
+already give it.
 
 The reference peripheral had been doing all of this before the rule was
 written. CoreBluetooth's `updateValue:` returning `NO` is the same event as
