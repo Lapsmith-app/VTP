@@ -231,12 +231,35 @@ def _with_superseded(exc, message, evidence):
     reported -- the control-layer MUST as the verdict, and the finding it
     superseded beside it.
     """
-    context = exc.__context__
-    if not isinstance(context, Fail):
+    finding = _superseded_finding(exc)
+    if finding is None:
         return message, evidence
-    evidence = dict(evidence, superseded=context.message)
+    evidence = dict(evidence, superseded=finding.message)
     return (f"{message}. This was raised by the check's cleanup and "
-            f"superseded its own finding: {context.message}"), evidence
+            f"superseded its own finding: {finding.message}"), evidence
+
+
+def _superseded_finding(exc):
+    """The Fail a control-layer finding buried, wherever it is in the chain.
+
+    Not the immediate context alone. `ControlClient.send` raises the finding
+    `from` the transport's DeviceRefused, and it is THAT exception which was
+    raised while the check's Fail was propagating, so the chain is finding ->
+    DeviceRefused -> Fail and the first link is never the one. Both links of
+    every exception are walked, cause and context, because either can hold
+    the next step, and a Fail anywhere along them was a verdict this check
+    reached before its cleanup spoke over it.
+    """
+    seen, frontier = set(), [exc]
+    while frontier:
+        current = frontier.pop(0)
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, Fail):
+            return current
+        frontier += [current.__cause__, current.__context__]
+    return None
 
 
 async def run_once(transport, target, **kwargs):

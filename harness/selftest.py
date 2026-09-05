@@ -27,10 +27,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from vtp1_harness import refdec                             # noqa: E402
 sys.path.insert(0, str(refdec.ROOT / "reference" / "peripheral"))
 
-from vtp1_harness.checks import Status, load_all           # noqa: E402
+from vtp1_harness.checks import Check, Fail, Status, load_all  # noqa: E402
 from vtp1_harness.checks import aiding as aiding_checks    # noqa: E402
 from vtp1_harness.checks import control as control_checks  # noqa: E402
 from vtp1_harness.runner import Runner                     # noqa: E402
+from vtp1_harness.session import Session                   # noqa: E402
 from vtp1_harness.transport import FAULTS, LoopbackTransport  # noqa: E402
 
 #: Each fault, and the check -- or checks -- that must catch it. Every entry in
@@ -680,6 +681,59 @@ async def _model_device_problems():
     return problems
 
 
+async def _superseded_finding_problems():
+    """A check's own finding survives its cleanup being refused.
+
+    A check that raises Fail and then, in its `finally`, writes a request the
+    device refuses at the ATT layer raises the refusal OVER its finding, and
+    the runner reports what it caught. The first version of the runner's
+    remedy looked one link up the chain and found nothing: ControlClient
+    raises the finding `from` the transport's DeviceRefused, so the check's
+    Fail is two links away, behind the exception that was actually raised
+    while it propagated. Found by review of PR #62, reproduced through
+    `ControlClient.request` -- the path every cleanup uses -- and pinned.
+    """
+    problems = []
+    primary = "the finding this check was written for (SPEC.md 9.3)"
+
+    async def cleanup_refused(s):
+        try:
+            raise Fail(primary)
+        finally:
+            await s.control.request(refdec.OPCODE["TIME_SYNC"])
+
+    probe = Check(id="selftest.cleanup_refused", section="9.4",
+                  title="A refused cleanup keeps the finding it interrupted",
+                  severity="MUST", requires=(), phase="control",
+                  adversarial=False, fn=cleanup_refused)
+    transport = LoopbackTransport(faults=["att_error_when_pool_full"])
+    session = Session(transport, adversarial=True)
+    try:
+        await session.open((await transport.scan(0))[0])
+        await session.read_info()
+        await session.start_control()
+        result = await Runner(transport)._one(session, probe)
+    finally:
+        await session.close()
+
+    if result.status is not Status.FAIL:
+        problems.append(f"a check whose cleanup was refused at the ATT layer "
+                        f"was reported {result.status.value}, not fail")
+    if "refused at the ATT layer" not in result.message:
+        problems.append(f"the cleanup's refusal is not the verdict: "
+                        f"{result.message}")
+    if result.evidence.get("superseded") != primary:
+        problems.append(f"the finding the cleanup superseded is not in the "
+                        f"evidence: {result.evidence}")
+    if primary not in result.message:
+        problems.append(f"the finding the cleanup superseded is not in the "
+                        f"message: {result.message}")
+    if not problems:
+        print("  ok   a check's finding survives its cleanup being refused "
+              "(SPEC.md 9.4)")
+    return problems
+
+
 async def _diverge_anchor_problems():
     """The diverging-clock seed re-anchors on every connection.
 
@@ -1045,6 +1099,7 @@ async def main():
         return _failed(problems)
     problems += await _model_device_problems()
     problems += await _diverge_anchor_problems()
+    problems += await _superseded_finding_problems()
 
     # Every run below is independent -- its own transport, its own device,
     # sharing nothing but the event loop -- so they are all started here and
