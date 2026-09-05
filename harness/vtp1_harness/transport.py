@@ -302,6 +302,7 @@ FAULTS = {
     "clock_per_stream": "SPEC.md §8.1 — the streams are not on one clock",
     "clock_diverges": "SPEC.md §8.1 — the CAN clock runs at its own rate: it agrees with the others at connect and walks away from there",
     "drops_a_response": "SPEC.md §9 — a request is silently discarded rather than answered",
+    "att_error_when_pool_full": "SPEC.md §9.4 — the transport has no buffer for the indication, and the device answers the write with an ATT error and discards the request instead of holding the response",
     "pipelines_silently": "SPEC.md §9.4 — a second request written while a response is owed is applied, and answered by nobody",
     "owes_until_confirmed": "SPEC.md §9 — a response stays owed until its confirmation, so a client writing on arrival is refused busy (narrowed to one refusal; see _answer)",
     "busy_but_applied": "SPEC.md §9 — a request answered busy is applied anyway",
@@ -386,6 +387,7 @@ FAULTS = {
     "obd_reprobe_refused": "SPEC.md §15.2 — the first OBD_INFO of a connection answers ok and every later one is refused bad_params",
     "answers_before_the_next_write": "a device that answers inside its write handler — conforming, and quick enough that no client can pipeline against it (SPEC.md §9), which no check may Fail",
     "host_callback_lands_late": "not the device: the host stack holds each control delivery a scheduler turn, so `t_recv` lands after the next write — which no check may read as the device still owing (SPEC.md §9)",
+    "pool_full_holds_response": "a device whose transport refuses the first hand-over of every response and takes the next, one connection event later — SPEC.md §9.4's hold, conforming, which no check may Fail",
     "aid_strict_receiver": "a receiver that takes only aiding in the format the device declared — SPEC.md §14.6 as a MUST NOT, which makes the harness's synthetic payload `rejected` and §14.4's `applied` reachable only with --aiding-blob",
     "aid_tiny_chunks": "a device that chunks small and accepts large transfers — both legal, and the only shape in which SPEC.md §14.3's 65535-chunk cap binds before `max_bytes` does",
 }
@@ -901,6 +903,17 @@ class LoopbackTransport(Transport):
             return
         t_rx = self.device.now_us()
         self._rates_before = (self.device.gps_hz, self.device.imu_hz)
+        # The well-formed TIME_SYNC, decided once: three of the control-plane
+        # faults below are narrowed to it. A device with any of those defects
+        # has it on every request, so a fault that fired on any request would
+        # be reported by whichever check happened to run first; narrowed to
+        # TIME_SYNC, the checks that meet it are the two that send one --
+        # control.no_busy_for_conforming_client, which sends the first of a
+        # run, and control.time_sync, which sends seven more -- and
+        # selftest.TIME_SYNC_SENDERS names both. True at every use below:
+        # each rewrite of `request` in between is gated on another opcode.
+        bare_time_sync = (len(request) == 2
+                          and request[0] == refdec.OPCODE["TIME_SYNC"])
         if "params_ignored" in self.faults:
             request = self._parse_leniently(request)
         request = self._indulge_aiding(request)
@@ -1247,6 +1260,14 @@ class LoopbackTransport(Transport):
             # request is discarded unanswered and unapplied (SPEC.md §9).
             return
 
+        if "att_error_when_pool_full" in self.faults and bare_time_sync:
+            # SPEC.md §9.4 -- the transport had no buffer for the indication,
+            # and this device reports that on the write instead of holding
+            # the response: an ATT error, nothing applied, nothing owed. The
+            # reporter's firmware, before the rule was written (issue #61).
+            # Before dispatch, as the defect is -- the device never reads
+            # the request.
+            raise DeviceRefused("Unlikely Error: no ATT transmit buffer")
         response = self.device.handle_control(request, t_rx=t_rx)
         if response is None:
             return
@@ -1274,28 +1295,14 @@ class LoopbackTransport(Transport):
             # CAN_RESET, as a shipped device would carry it.
             self.device._obd_poll = obd_poll_before[0]
             self.device._obd_interval_ms = obd_poll_before[1]
-        if "drops_a_response" in self.faults and len(request) == 2 and \
-                request[0] == refdec.OPCODE["TIME_SYNC"]:
-            # Only the well-formed one, so the set of checks that meet it is
-            # fixed rather than an accident of ordering. A device that drops
-            # responses drops them for every request, so a fault that dropped
-            # any of them would be reported by whichever check happened to run
-            # first. Narrowed to TIME_SYNC it is met by the two checks that
-            # send one -- control.time_sync and, before it,
-            # control.no_busy_for_conforming_client -- and selftest.py names
-            # both.
+        if "drops_a_response" in self.faults and bare_time_sync:
             return                                  # answered by nobody
-        # Narrowed to a well-formed TIME_SYNC for the same reason, and by the
-        # same predicate, as `drops_a_response` above: a real device with this
-        # defect owes late on EVERY response and refuses every client that
-        # writes on arrival, which is every request this harness makes -- so
-        # the unnarrowed fault fails fourteen checks and says only that it ran
-        # first. Narrowed, the set of checks that meet it is fixed:
-        # control.no_busy_for_conforming_client sends the first well-formed
-        # TIME_SYNC of a run, and control.time_sync -- which sends seven more
-        # back to back -- would meet it if that check were ever deleted.
-        late = (self._late_armed and len(request) == 2
-                and request[0] == refdec.OPCODE["TIME_SYNC"])
+        # `owes_until_confirmed`, narrowed the same way: a real device with
+        # this defect owes late on EVERY response and refuses every client
+        # that writes on arrival, which is every request this harness makes,
+        # so the unnarrowed fault fails fourteen checks and says only that
+        # it ran first.
+        late = self._late_armed and bare_time_sync
         response = self._corrupt_response(bytearray(response), request)
         if "answers_before_the_next_write" in self.faults:
             # SPEC.md §9's window, closed. This device sends its answer before
@@ -1332,8 +1339,14 @@ class LoopbackTransport(Transport):
         count refuses the next request `busy` for no reason at all.
         """
         lock = self._deliver_lock
+        # SPEC.md §9.4 -- `pool_full_holds_response`: the transport refused
+        # the hand-over, so the device keeps the response and offers it again
+        # at the next connection event. Still owed throughout, still ahead of
+        # anything else this device sends: one more interval, and nothing
+        # about the device is wrong.
+        intervals = 2 if "pool_full_holds_response" in self.faults else 1
         async with lock:
-            await asyncio.sleep(self._control_latency)
+            await asyncio.sleep(self._control_latency * intervals)
             if lock is not self._deliver_lock:
                 return                              # a different connection
             self._deliver_control(response)
@@ -1744,9 +1757,14 @@ class LoopbackTransport(Transport):
                 if due is not None:
                     request = self._pending_ctl_request
                     self._pending_ctl_request = None
-                    self._deliver_control(bytes(
-                        self._corrupt_response(bytearray(due), request)))
-                    self._owed -= 1
+                    # Delivered as every other response is, on the device's
+                    # schedule and through its one delivery slot -- which is
+                    # where SPEC.md §9.4's hold lives, and this is the
+                    # response that section names as the one the ATT layer
+                    # can never carry a refusal for. `_answer` decrements
+                    # `_owed`; the increment was at dispatch.
+                    asyncio.create_task(self._answer(bytes(
+                        self._corrupt_response(bytearray(due), request))))
             for stream, payload in self.device.poll():
                 uuid = refdec.CHAR[self._STREAM_CHAR[stream]]
                 cb = self._subs.get(uuid)

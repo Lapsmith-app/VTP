@@ -366,6 +366,36 @@ def main():
           f"a refused control response MUST be retried until it lands, not "
           f"dropped; wire holds {got}")
 
+    # ---- Timed recovery does not send a stream past a held response ------
+    # SPEC.md §9.4 -- a held response goes before every notification the
+    # device queues after it. The pump's retry timer ran AFTER the control
+    # loop and set `_ready` for the stream block of the same pass, so a GPS
+    # notification went out while the response the loop had just been refused
+    # on was still held. Found by review of PR #62 and reproduced here: the
+    # fake's queue empties SILENTLY -- no ready callback, which is the case
+    # the timer exists for -- and the first pass after it must deliver the
+    # response before anything else, whatever the stream has pending.
+    peripheral, server, _ = build(gps_hz=1000)
+    server.connect(subscribe=("control", "gps"))
+    run(peripheral, 5)
+    server.stall()
+    peripheral.write_request(
+        gattsim.FakeCharacteristic(serve.CHAR["control"]),
+        bytes([dev.CAN_RESET, 11]))
+    run(peripheral, 5)
+    check(len(peripheral._control) == 1 and not peripheral._ready,
+          "the stall should have left the response held and the pump blocked")
+    server.accepting = True                    # emptied, and nobody said so
+    peripheral._blocked_since = time.monotonic() - 1.0   # past RETRY_BLOCKED_S
+    gps_before = len(server.sent("gps"))
+    run(peripheral, 1)
+    check(len(peripheral._control) == 0,
+          "the first pass after a silent recovery MUST deliver the held "
+          "response; it is still held")
+    check(not (len(server.sent("gps")) > gps_before and len(peripheral._control)),
+          "a stream notification went out while a control response was held "
+          "(SPEC.md 9.4)")
+
     # ---- Owing ends at the send, over the real pump (SPEC.md 9) ---------
     # The isolated ControlQueue test in selftest.py calls delivered() by hand,
     # so it pins the admission rule but not the wiring that drives it. This

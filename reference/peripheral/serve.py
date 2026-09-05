@@ -631,7 +631,10 @@ class Peripheral:
         self._note_control(request, status)
         # Queued rather than sent from here: this callback does not run on the
         # loop that owns the transport, and a refused response must be retried
-        # rather than dropped.
+        # rather than dropped. SPEC.md §9.4 -- `update_value` returning False
+        # is CoreBluetooth's transmit queue being full, the same event as a
+        # stack returning -ENOMEM from its indicate call, and it is a reason
+        # to hold the response, never to answer the write with an ATT error.
         self._control.hold(tag, response)
 
     def _note_control(self, request, status):
@@ -1051,8 +1054,30 @@ class Peripheral:
                     self._note_control(request, status)
                     self._control.hold(tag, due)
 
+            # Try again without waiting for a callback that may not come. This
+            # used to be a 250 ms last resort against a wedged device; it is
+            # now the ordinary path, because `update_value` answers the same
+            # question the callback does and answers it on demand. See
+            # RETRY_BLOCKED_S for why the difference between 250 ms and 10 ms
+            # is the difference between shedding and not.
+            #
+            # BEFORE the control loop, not after it. Placed after, the retry
+            # set `_ready` and the stream block below sent on it in the same
+            # pass, while a control response the loop had been refused on was
+            # still held -- a GPS notification ahead of the response SPEC.md
+            # §9.4 puts ahead of everything.
+            if (not self._ready and self._blocked_since
+                    and time.monotonic() - self._blocked_since > RETRY_BLOCKED_S):
+                self._ready = True
+                self._blocked_since = None
+                self._timeouts += 1
+
             # Control responses first, and retried until they land. They are
-            # the one thing on this link that is owed rather than offered.
+            # the one thing on this link that is owed rather than offered, and
+            # SPEC.md §9.4 puts a held response ahead of every notification
+            # this device queues after it: the first buffer the streams give
+            # back is the response's, so the hold ends when the queue next
+            # drains and not when the streams happen to leave room.
             while len(self._control) and self._ready:
                 control = self.server.get_characteristic(CHAR["control"])
                 control.value = self._control.peek()
@@ -1078,23 +1103,17 @@ class Peripheral:
                     refused[characteristic] += 1
                 self._pending[characteristic] = payload
 
-            # Try again without waiting for a callback that may not come. This
-            # used to be a 250 ms last resort against a wedged device; it is
-            # now the ordinary path, because `update_value` answers the same
-            # question the callback does and answers it on demand. See
-            # RETRY_BLOCKED_S for why the difference between 250 ms and 10 ms
-            # is the difference between shedding and not.
-            if (not self._ready and self._blocked_since
-                    and time.monotonic() - self._blocked_since > RETRY_BLOCKED_S):
-                self._ready = True
-                self._blocked_since = None
-                self._timeouts += 1
-
             # Rotate which stream is offered first. The queue is finite, and a
             # fixed order means the LAST stream absorbs every refusal: with
             # GPS, IMU and CAN all subscribed, CAN was refused almost in full
             # while the other two flowed, purely because it was sent last.
-            if self._ready and self._pending:
+            #
+            # And nothing while a response is held. The control loop above
+            # leaves `_ready` false when it was refused, but the ready
+            # callback lands on CoreBluetooth's thread and can set it true
+            # between that loop and this line; the queue's length is the
+            # fact SPEC.md §9.4 is about, so it is the gate.
+            if self._ready and self._pending and not len(self._control):
                 self._turn = (self._turn + 1) % len(self.STREAM_ORDER)
                 order = (self.STREAM_ORDER[self._turn:]
                          + self.STREAM_ORDER[:self._turn])

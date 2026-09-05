@@ -130,7 +130,7 @@ The report ends with a **Not verified** section, and it is not boilerplate — i
 is assembled from the run, so a check skipped for a reason specific to your
 device appears there rather than disappearing into a count.
 
-Six things are permanently in it:
+Seven things are permanently in it:
 
 - **§2.1–§2.3** — link-layer payload, PHY and connection interval. No desktop
   operating system exposes these to an application, so the harness checks the
@@ -176,6 +176,19 @@ Six things are permanently in it:
   repeating unacknowledged, and ending within 100 ms of the poll set
   clearing — or, if the driver's stop cannot end it, not ending, which is
   the defect.
+- **§9.4's hold on a full transmit pool.** A device whose stack has no buffer
+  for the indication keeps the response and offers it again ahead of the
+  streams, and the harness cannot fill a device's pool to order: all it sees
+  is a response that arrived, whether or not it was held. What it can see is
+    the defect on the other side of that rule — a Control write answered with
+  an ATT error — and it reports that as the failed MUST it is and goes on to
+  the next check, rather than ending the run as it did for the first device
+  to do it. Two exceptions, both the host's: a central whose own stack drops
+  the link on the error response still ends the run, and says the link died;
+  and a refusal for insufficient authentication or encryption is §10's, so
+  the control checks are not verified and you are told to pair first. The hold itself is a bench measurement: every stream subscribed at
+  its ceiling, a transmit pool sized to fill, and every request still
+  answered.
 
 A clean run is evidence about a device. It is not a conformance certificate, and
 the report says so on its last line.

@@ -27,10 +27,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from vtp1_harness import refdec                             # noqa: E402
 sys.path.insert(0, str(refdec.ROOT / "reference" / "peripheral"))
 
-from vtp1_harness.checks import Status, load_all           # noqa: E402
+from vtp1_harness.checks import Check, Fail, Status, load_all  # noqa: E402
 from vtp1_harness.checks import aiding as aiding_checks    # noqa: E402
 from vtp1_harness.checks import control as control_checks  # noqa: E402
 from vtp1_harness.runner import Runner                     # noqa: E402
+from vtp1_harness.session import Session                   # noqa: E402
 from vtp1_harness.transport import FAULTS, LoopbackTransport  # noqa: E402
 
 #: Each fault, and the check -- or checks -- that must catch it. Every entry in
@@ -42,6 +43,13 @@ from vtp1_harness.transport import FAULTS, LoopbackTransport  # noqa: E402
 #: validity bit knowing only half of it breaks §9.1's validity grouping AND
 #: reports a PHY §2.2 asks it not to be on, and both are true statements about
 #: that device rather than one finding counted twice.
+#: The two checks that send a well-formed TIME_SYNC, which is the request the
+#: transport narrows three of its control-plane faults to (see
+#: `LoopbackTransport._control_write`). Named once so the faults that share
+#: the narrowing share the claim.
+TIME_SYNC_SENDERS = ("control.time_sync",
+                     "control.no_busy_for_conforming_client")
+
 CAUGHT_BY = {
     "missing_characteristic": "gatt.attribute_table",
     "extra_characteristic": "gatt.no_extra_characteristics",
@@ -92,8 +100,8 @@ CAUGHT_BY = {
     "gps_scope_bits_ignored": "gps.solution_scoped_bits",
     "clock_per_stream": "clock.one_clock",
     "clock_diverges": "clock.one_rate",
-    "drops_a_response": ("control.time_sync",
-                         "control.no_busy_for_conforming_client"),
+    "drops_a_response": TIME_SYNC_SENDERS,
+    "att_error_when_pool_full": TIME_SYNC_SENDERS,
     "pipelines_silently": "control.busy_when_outstanding",
     "pipelined_answered_bad_params": "control.busy_when_outstanding",
     "owes_until_confirmed": ("control.no_busy_for_conforming_client",
@@ -258,6 +266,14 @@ ISOLATED = {"owes_until_confirmed", "pipelined_answered_bad_params"}
 #: still owing, and it was not (issue #48). The required verdicts are the same
 #: two, which is the point: what the report says must not turn on when the
 #: host got round to the callback.
+#: `pool_full_holds_response` is the shape issue #61 asked for: a device whose
+#: transport refuses the first hand-over of every response and takes the next,
+#: one connection event later, which SPEC.md §9.4 now says is what a device
+#: does when its transmit pool is full. It is CONFORMING -- the response is
+#: owed throughout and arrives -- and the claim under test is that a run
+#: against it fails nothing and aborts nowhere. The defect on the other side
+#: of that rule, answering the write with an ATT error, is a matrix entry
+#: (`att_error_when_pool_full`); this is the device that fixed it.
 #: `aid_strict_receiver` is the third of that shape and the reason issue #52
 #: was filed. It is a CONFORMING device -- SPEC.md §14.6's "MUST NOT accept
 #: anything but aiding in the format it declared", read as written -- and what
@@ -277,7 +293,7 @@ ISOLATED = {"owes_until_confirmed", "pipelined_answered_bad_params"}
 #: never open the transfer and call the required `bad_params` a failed MUST.
 SCENARIO_FAULTS = {"obd_pid_never_answers", "obd_reprobe_refused",
                    "answers_before_the_next_write",
-                   "host_callback_lands_late",
+                   "host_callback_lands_late", "pool_full_holds_response",
                    "aid_strict_receiver", "aid_tiny_chunks"}
 
 #: Only these faults are about state surviving a link drop, and only their runs
@@ -665,6 +681,59 @@ async def _model_device_problems():
     return problems
 
 
+async def _superseded_finding_problems():
+    """A check's own finding survives its cleanup being refused.
+
+    A check that raises Fail and then, in its `finally`, writes a request the
+    device refuses at the ATT layer raises the refusal OVER its finding, and
+    the runner reports what it caught. The first version of the runner's
+    remedy looked one link up the chain and found nothing: ControlClient
+    raises the finding `from` the transport's DeviceRefused, so the check's
+    Fail is two links away, behind the exception that was actually raised
+    while it propagated. Found by review of PR #62, reproduced through
+    `ControlClient.request` -- the path every cleanup uses -- and pinned.
+    """
+    problems = []
+    primary = "the finding this check was written for (SPEC.md 9.3)"
+
+    async def cleanup_refused(s):
+        try:
+            raise Fail(primary)
+        finally:
+            await s.control.request(refdec.OPCODE["TIME_SYNC"])
+
+    probe = Check(id="selftest.cleanup_refused", section="9.4",
+                  title="A refused cleanup keeps the finding it interrupted",
+                  severity="MUST", requires=(), phase="control",
+                  adversarial=False, fn=cleanup_refused)
+    transport = LoopbackTransport(faults=["att_error_when_pool_full"])
+    session = Session(transport, adversarial=True)
+    try:
+        await session.open((await transport.scan(0))[0])
+        await session.read_info()
+        await session.start_control()
+        result = await Runner(transport)._one(session, probe)
+    finally:
+        await session.close()
+
+    if result.status is not Status.FAIL:
+        problems.append(f"a check whose cleanup was refused at the ATT layer "
+                        f"was reported {result.status.value}, not fail")
+    if "refused at the ATT layer" not in result.message:
+        problems.append(f"the cleanup's refusal is not the verdict: "
+                        f"{result.message}")
+    if result.evidence.get("superseded") != primary:
+        problems.append(f"the finding the cleanup superseded is not in the "
+                        f"evidence: {result.evidence}")
+    if primary not in result.message:
+        problems.append(f"the finding the cleanup superseded is not in the "
+                        f"message: {result.message}")
+    if not problems:
+        print("  ok   a check's finding survives its cleanup being refused "
+              "(SPEC.md 9.4)")
+    return problems
+
+
 async def _diverge_anchor_problems():
     """The diverging-clock seed re-anchors on every connection.
 
@@ -987,6 +1056,30 @@ def _chunk_cap_problems(report):
     return problems
 
 
+def _conforming_problems(report, who, min_pass=1):
+    """What a run against a device that is not in violation may not say.
+
+    A failure, a warning or an error is a verdict against a conforming
+    device. An abort is not a verdict and is not among them either:
+    Runner.run records it on the report rather than raising, and `errors`
+    counts only checks that ran, so a run that died in session.open has an
+    empty result list, prints zeroes across the board and appends nothing --
+    the roles it exists to test go unexamined and the file still says ok.
+    Fewer passes than the run should have is the same thing found the other
+    way round. One function, because the third hand-written copy of this had
+    already lost the abort clause's reason.
+    """
+    problems = [f"{who} was reported {r.status.value} on {r.check.id}: "
+                f"{r.message}"
+                for r in report.failures + report.warnings + report.errors]
+    if report.aborted:
+        problems.append(f"the run against {who} aborted: {report.aborted}")
+    elif report.counts["pass"] < min_pass:
+        problems.append(f"only {report.counts['pass']} check(s) passed against "
+                        f"{who}; something is not running")
+    return problems
+
+
 def _failed(problems):
     print("\nFAILED")
     for problem in problems:
@@ -1006,6 +1099,7 @@ async def main():
         return _failed(problems)
     problems += await _model_device_problems()
     problems += await _diverge_anchor_problems()
+    problems += await _superseded_finding_problems()
 
     # Every run below is independent -- its own transport, its own device,
     # sharing nothing but the event loop -- so they are all started here and
@@ -1013,7 +1107,7 @@ async def main():
     #
     # A run is ~55s of almost pure waiting: the CAN and OBD checks listen for
     # periodic frames, and the loop has nothing to compute while they do. The
-    # fault matrix already knew that and gathered its ninety. The seven runs
+    # fault matrix already knew that and gathered its ninety. The eight runs
     # around it did not, and waiting for each other in turn was most of this
     # file's wall clock -- three minutes of it, spent asleep, for no reason
     # anyone had chosen.
@@ -1029,6 +1123,7 @@ async def main():
           for faults, overlap_excluded, _ in PROMPT_SCENARIOS),
         run(faults=["obd_pid_never_answers"]),
         run(faults=["obd_pid_never_answers", "obd_reprobe_refused"]),
+        run(faults=["pool_full_holds_response"]),
         run(faults=["aid_strict_receiver"]),
         run(faults=["aid_strict_receiver"], aiding_blob=aiding_blob()),
         # The harness's OWN payload, handed back through the option: bytes
@@ -1045,7 +1140,7 @@ async def main():
     reports = started[cut:cut + len(ordered)]
     tail = started[cut + len(ordered):]
     prompts = tail[:len(PROMPT_SCENARIOS)]
-    (quiet, stacked, strict_synthetic, strict_real,
+    (quiet, stacked, held, strict_synthetic, strict_real,
      strict_wrong, tiny_chunks) = tail[len(PROMPT_SCENARIOS):]
 
     print("A conforming device")
@@ -1053,15 +1148,8 @@ async def main():
     print(f"  {counts['pass']} passed, {counts['fail']} failed, "
           f"{counts['warn']} warnings, {counts['skip']} skipped, "
           f"{counts['error']} errors")
-    for result in clean.failures + clean.warnings + clean.errors:
-        problems.append(f"the reference peripheral was reported "
-                        f"{result.status.value} on {result.check.id}: "
-                        f"{result.message}")
-    if clean.aborted:
-        problems.append(f"the clean run aborted: {clean.aborted}")
-    if counts["pass"] < 30:
-        problems.append(f"only {counts['pass']} checks passed against the "
-                        f"reference peripheral; something is not running")
+    problems += _conforming_problems(clean, "the reference peripheral",
+                                     min_pass=30)
     problems += _skip_problems(clean)
     problems += _verdict_problems(clean)
 
@@ -1072,23 +1160,7 @@ async def main():
         counts = report.counts
         print(f"  {profile:<16} {counts['pass']} passed, {counts['fail']} failed, "
               f"{counts['skip']} skipped, {counts['error']} errors")
-        for result in report.failures + report.warnings + report.errors:
-            problems.append(f"a {profile} device was reported "
-                            f"{result.status.value} on {result.check.id}: "
-                            f"{result.message}")
-        # An abort is not a verdict, and it is not among the failures either:
-        # Runner.run records it on the report rather than raising, and
-        # `errors` only counts checks that ran. A run that died in
-        # session.open therefore has an empty result list, prints zeroes
-        # across the board and appends nothing -- so the roles this profile
-        # exists to test go unexamined and the file still says ok. The clean
-        # run above is held to both of these; there is no reason these are
-        # not.
-        if report.aborted:
-            problems.append(f"the {profile} run aborted: {report.aborted}")
-        elif not counts["pass"]:
-            problems.append(f"not one check passed against a {profile} "
-                            f"device; something is not running")
+        problems += _conforming_problems(report, f"a {profile} device")
 
     print("\nA device with one specific defect")
     width = max(len(f) for f in ordered)
@@ -1151,6 +1223,24 @@ async def main():
         problems += prompt
         if not prompt:
             print(f"  ok   {headline}")
+
+    # SPEC.md §9.4 -- a device that holds a response the transport refused
+    # and offers it again is doing what the rule says. Every check must still
+    # pass against it, and the run must reach its end: the reporter's run did
+    # not, and that is the abort this scenario exists to keep from returning.
+    # The same full-role device as the clean run, one interval slower, so it
+    # is held to the clean run's baselines too: a MUST that the extra
+    # latency pushed onto a Skip or an Observe branch would otherwise leave
+    # this run green with nothing to notice.
+    held_problems = _conforming_problems(
+        held, "a device holding a response for a full transmit pool",
+        min_pass=30)
+    held_problems += _skip_problems(held)
+    held_problems += _verdict_problems(held)
+    problems += held_problems
+    if not held_problems:
+        print("  ok   a device whose transport takes every response one "
+              "connection event late fails nothing (SPEC.md §9.4)")
 
     result = result_for(quiet, "obd.poll_and_flag")
     if result is None:

@@ -1099,9 +1099,9 @@ measures the round trip it is already waiting for (RATIONALE §8.7).
 
 **A response is owed from the moment its request is accepted until the device
 has sent it** — handed it to the transport with nothing further for the device
-to do. A response it has not composed yet is owed too: `OBD_INFO` is answered
-only once its probe completes (§15.2), and its request is outstanding for the
-whole of that.
+to do. A hand-over the transport refuses is not one (§9.4). A response it has
+not composed yet is owed too: `OBD_INFO` is answered only once its probe
+completes (§15.2), and its request is outstanding for the whole of that.
 
 **The send, and not the confirmation, because the client's boundary is the
 arrival.** A client writes again as soon as the response reaches it, and ATT
@@ -1311,6 +1311,24 @@ earlier request — the request MUST NOT take effect, and the device MUST NOT
 count it as received. Deliverability is decided *before* dispatch, not after: a
 device that applies a request whose response is then lost leaves the client no
 way to find out what happened.
+
+**A transport with no room for the indication is not an undeliverable
+response; it is §9's reason to hold, one layer down.** The response stays
+owed until it has been handed to the transport — a hand-over the transport
+refused is not one — and the room §9 requires for one held response is the
+room this needs: the held response stands where §9's in-flight one would
+(RATIONALE §8.7).
+
+A device MUST keep the response and offer it again, and until the transport
+has taken it MUST NOT hand the transport a notification on any stream, so
+that the first buffer the streams give back is the response's. A device MUST
+NOT answer the write with an ATT error, and MUST NOT drop the response it
+holds: an error response on Control is §4.1's "no control plane", and a
+response composed after the write handler has returned — `OBD_INFO`'s
+(§15.2) — has no ATT layer left to answer on. A client that times out and
+retries while the response is held meets §9 exactly as written: refused
+`busy` from the one slot §9 has a device hold behind the response in flight,
+or discarded when that slot is already taken.
 
 **Every opcode in this specification is safe to retry:**
 

@@ -9,7 +9,7 @@ import asyncio
 import struct
 
 from .. import refdec
-from ..session import ControlTimeout
+from ..session import ControlRefusedAtAtt, ControlTimeout
 from ..transport import DeviceRefused, TransportError
 from . import Fail, Observe, Skip, check
 
@@ -70,8 +70,16 @@ async def _raw(s, opcode, tag, params=b"", settle=1.0):
     correlated -- a duplicated tag, or one the device failed to echo."""
     c = _control(s)
     first = len(c.history)
-    await s.transport.write(refdec.CHAR["control"],
-                            bytes([opcode, tag]) + bytes(params), response=True)
+    try:
+        await s.transport.write(refdec.CHAR["control"],
+                                bytes([opcode, tag]) + bytes(params),
+                                response=True)
+    except DeviceRefused as exc:
+        # SPEC.md §9.4 -- the finding ControlClient.send raises, for the one
+        # write that goes round it. Left as DeviceRefused it read to the
+        # runner as the link dying, on the one check the seeded fault cannot
+        # reach (issue #61).
+        raise ControlRefusedAtAtt(opcode, tag, exc) from exc
     await asyncio.sleep(settle)
     return c.history[first:]
 
