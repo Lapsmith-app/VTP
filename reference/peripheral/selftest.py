@@ -1592,8 +1592,8 @@ def main():
           "two requests closer than interval_ms apart: a replacement MUST "
           "NOT reset the spacing clock (SPEC.md 15.1)")
 
-    # SPEC.md 15.2 -- EVERY completed probe clears the poll set, answered or
-    # not: the set never outlives the probe result it was verified against.
+    # SPEC.md 15.2 -- EVERY probe clears the poll set as it begins, answered
+    # or not: the set never outlives the probe result it was verified against.
     re = probe_sync(car, 0x79)
     check(re[2] == dev.ST_OK
           and vtp1.decode_obd_info(re[3:])["probe"]["count"] == 2,
@@ -1920,6 +1920,60 @@ def main():
           f"a live bus that the client declined (SPEC.md 15.4.2)")
     check(poll_set(0x7D, 25, 0x0C)[2] == dev.ST_OK,
           "a plain set must reinstall after the replacement checks")
+
+    # SPEC.md 15.1 -- one request outstanding holds across the probe and the
+    # poll loop together. An OBD_INFO arriving while a poll request is still
+    # unanswered must not put the probe's first frame on the bus before that
+    # request is answered or abandoned. Invisible on the default car, which
+    # answers in the same tick; an 80 ms car shows it.
+    def probe_after_poll(latency_us, gap_us):
+        clk = [0]
+        c = dev.VtpDevice(now_us=lambda: clk[0], mtu=247, gps_hz=0, imu_hz=0,
+                          obd_latency_us=latency_us)
+        c.on_connect()
+        c.handle_control(bytes([dev.CAN_SUBSCRIBE_MASK, 0x01])
+                         + struct.pack("<IIBH", 0x7E8, 0x3FFFFFF8, 0, 0))
+        c.handle_control(bytes([dev.OBD_INFO, 0x02]))
+        for _ in range(400):
+            clk[0] += 5_000
+            if c.due_control_response() is not None:
+                break
+        c.handle_control(bytes([dev.OBD_POLL_SET, 0x03])
+                         + struct.pack("<HB", 0, 1)
+                         + bytes([0x0C]) + struct.pack("<H", 0))
+        # The first request goes out on the next tick: the probe's last
+        # transmission is long past and interval_ms is 0.
+        clk[0] += 5_000
+        c.poll()
+        request_us = clk[0]
+        clk[0] += gap_us
+        c.poll()
+        c.handle_control(bytes([dev.OBD_INFO, 0x04]))
+        first_probe_frame = None
+        for _ in range(200):
+            clk[0] += 5_000
+            for ch, payload in c.poll():
+                if ch != "can":
+                    continue
+                b = decode("can", c.stamp_seq(ch, payload))
+                c.commit_seq(ch)
+                if b is None:
+                    continue
+                for rec in b["records"]:
+                    f = bytes.fromhex(rec["payload"])
+                    if f[1] == 0x41 and f[2] == 0x00 \
+                            and first_probe_frame is None:
+                        first_probe_frame = rec["t_device_us"]
+            if c.due_control_response() is not None:
+                break
+        return first_probe_frame - request_us
+
+    spacing = probe_after_poll(80_000, 10_000)
+    check(spacing >= 80_000,
+          f"the probe's first request went out {spacing / 1000:.0f} ms after "
+          f"a poll request an 80 ms car had not yet answered: two requests "
+          f"outstanding, which SPEC.md 15.1 forbids across the probe and the "
+          f"poll loop together")
 
     # SPEC.md 15.7 -- the empty set stops the transmitter, and the polling
     # flag's falling edge is on the wire: a batch flushed after the stop

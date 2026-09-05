@@ -1340,16 +1340,16 @@ inspection as the check. On a car the two never meet — any awake node
 acknowledges a well-formed frame, so an unanswered request is on the wire
 exactly once — but a dongle in a car with the ignition off is a node alone on
 its bus, and a capture there shows the same Mode 01 request repeating at the
-link layer's pace, thousands of times a second, each attempt ending in an
-error flag. Three readings were on the table: the rule binds the
+link layer's pace, thousands of times a second, none of them acknowledged. Three readings were on the table: the rule binds the
 application, and the link layer is CAN's business; it binds the wire, so a
 device MUST use single-shot transmission where its controller offers it and
 MUST NOT declare bit 10 where it does not; or it binds only on a bus with a
 car on it. The first won, and the question exposed two sentences the section
 had needed all along.
 
-**The rule binds what the device asks.** Its reason — stated in SPEC §15.1 and
-in the proposal the pacing came from — is that a tester re-asking a question
+**The rule binds what the device asks.** Its reason — recorded in the proposal
+the pacing came from, `proposals/obd-response-paced-polling.md` — is that a
+tester re-asking a question
 an ECU declined to answer is how a tester becomes a fault: it adds load to a
 bus that is already not behaving, at exactly the wrong moment. That reason
 needs a request the ECU received. Link-layer retransmission is ISO 11898-1's
@@ -1372,8 +1372,11 @@ same frame repeating, at 10 Hz instead of the controller's pace. What
 distinguishes a retry from the loop coming round was never how many times a
 frame appears — it is whether the frame is a second *acknowledged* request
 for what an acknowledged, unanswered one already asked, and a capture shows
-acknowledgement. SPEC §15.1 now says so, and the inspection claim holds with
-that reading rather than in spite of it. ISO 11898-1 is also kinder to the
+the ACK slot. The slot, and not an error flag: a frame that lost arbitration
+leaves no flag because it was never on the wire, and once the lone node is
+error-passive its flags are six recessive bits that a capture cannot tell
+from idle. SPEC §15.1 now says so, and the inspection claim holds with that
+reading rather than in spite of it. ISO 11898-1 is also kinder to the
 lone node than the report assumed: its transmit error counter stops
 climbing at error-passive when the only fault is a missing acknowledgement,
 so a node alone on a bus repeats indefinitely rather than going bus-off, and
@@ -1396,7 +1399,12 @@ stalling there is the truth about that bus. The probe cannot wait, because it
 owes a control response, so SPEC §15.2 withdraws a probe frame still pending
 after the same 100 ms and counts it as unanswered; a probe of a sleeping car
 concludes `responded` clear in a few hundred milliseconds, which is also the
-truth. And SPEC §15.7 withdraws whatever is pending when the poll set clears: a
+truth. The probe also begins by clearing the poll set and withdrawing the
+loop's pending frame, where an earlier draft cleared the set only when the
+probe completed: a probe that had to wait behind a pending poll frame could
+never start on the one bus that needs it, and the control plane would be
+`busy` until link loss. And SPEC §15.7 withdraws whatever is pending when the
+poll set clears: a
 frame left in the controller after link loss goes out when the driver turns
 the key, minutes after the client went away — the transmission that section
 exists to make impossible, reachable only through a state the section had
