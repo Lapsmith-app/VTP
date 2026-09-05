@@ -1424,6 +1424,74 @@ it. The reporter's controller offers it in silicon and its driver refuses
 it, and a rule met only by working behind a driver's back, on a reading of
 what a section wants, is not one this specification should write.
 
+The three places this section says "withdraws" are the three places the
+next section replaced the word.
+
+### 11.9 Why a pending frame has a deadline rather than a withdrawal
+
+Reported from the same firmware once the transport was being specified:
+SPEC §15.7 and SPEC §15.2 said a pending frame MUST be *withdrawn from the
+controller*, and no portable CAN API can do that to one frame. Zephyr's only
+abort is `can_stop()`, which aborts every pending transmission, disables the
+transceiver and receives nothing until `can_start()`; SocketCAN has no cancel
+at all once a frame is written. The rule was implementable, but only
+wholesale — and the objection §11.8 had just made to single-shot applied to
+it word for word. A rule met only by working behind the driver, on a part
+whose driver happens to expose the register, is not a rule.
+
+**The reporter's worry was that meeting it broke SPEC §6.** While the
+controller is stopped the device receives nothing, and the frames it misses
+are in no category: not delivered, and not `dropped`, because SPEC §8.3
+counts what was accepted and then discarded and these were never accepted.
+Two MUSTs seemed to disagree and the text did not say which yielded. Neither
+does, because SPEC §6 makes no promise the stop could break: it has no rule
+that the stream is a complete record of the bus, and it already lives with
+gaps no counter explains — bus-off, a receive overrun in the controller, the
+interval before a subscription was programmed. SPEC §15.7 now says so,
+because a rule that is true but unstated is a rule two implementers read
+differently.
+
+**The deadline is what makes the wholesale way cost nothing.** Walk the
+edges. Link loss and `CAN_RESET` clear the subscription table, so nobody is
+subscribed when the controller stops; bus-off means it was not receiving
+anyway. That leaves the empty poll set and the probe, the two edges where a
+subscribed, connected client could lose frames to a stop — and on those, ask
+what a pending frame is. It is a frame the bus has not acknowledged, and any
+awake node acknowledges a well-formed frame, so a frame still pending
+`OBD_RESPONSE_TIMEOUT_MS` after the edge is on a bus with no node awake. A
+controller stopped on that bus misses nothing. A frame the bus does carry
+inside the window was asked for by a connected client and is
+indistinguishable from one that completed a microsecond before the edge,
+which the old rule tolerated without saying so: withdrawal was always a race
+against the controller, and a frame that won it was never a violation. The
+reporter noticed the asymmetry — the stop costs receive exactly where a
+frame is least likely to be stuck — and the window turns it from an
+observation into a guarantee.
+
+**It is the existing constant, and not the bound §11.8 declined.** SPEC §15.1
+refuses a second timing knob, and 100 ms was already the probe's pending
+bound; reusing it means the probe's rule is the same rule. The declined bound
+was on how long the *loop* lets a frame pend while polling continues: it
+would have withdrawn a frame every 100 ms and handed over the next, which
+pends identically, changing nothing on the wire. This one runs once, after
+the client has stopped asking, and ends a frame that would otherwise go out
+when the driver turns the key.
+
+**The burden runs the wrong way, which is worth recording.** A hand-rolled
+implementation on an MCP2515 clears one request bit and the frame is gone,
+with no side effects. The difficulty is a consequence of standing on a
+portable driver model — the abstraction converges on what every controller
+can do, and per-frame abort is not in that set — so this rule is easy on
+bare metal and awkward on an RTOS, the opposite of the usual gradient.
+
+One thing the deadline does not settle, and a device is responsible for: on
+some parts a mode change waits for pending transmissions to complete unless
+an abort bit is set first, and on a bus that never acknowledges that wait
+has no end. Whether a given driver's stop actually ends a pending frame on
+such a bus is a bench measurement, and the check is the one SPEC §15.7 now
+names — a capture after the edge shows the frame within the window, or
+never.
+
 ---
 
 ## Contradictions found by review, and how each was closed
@@ -1629,8 +1697,9 @@ The synthetic CAN bus has no link layer. Every frame the device hands over is
 acknowledged at the instant it is handed over, so the two instants SPEC §15.1
 distinguishes — hand-over and acknowledgement — coincide, a frame is never
 pending, and nothing there can exercise the rules that follow from the
-difference: the poll loop waiting on a pending frame, the probe withdrawing
-one at `OBD_RESPONSE_TIMEOUT_MS`, SPEC §15.7 withdrawing one when the poll set
-clears. The harness's loopback transport is the same bus, so it cannot
+difference: the poll loop waiting on a pending frame, the probe treating
+one still pending at `OBD_RESPONSE_TIMEOUT_MS` as unanswered, SPEC §15.7's
+deadline on one when the poll set clears. The harness's loopback transport
+is the same bus, so it cannot
 either. Those rules are tested by a controller on a bus with no other node on
 it, which only a device can be plugged into.

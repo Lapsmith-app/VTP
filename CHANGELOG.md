@@ -8,6 +8,34 @@ conformance vector.
 
 ## [Unreleased]
 
+### §15.7: a pending frame has a deadline, not a withdrawal
+
+Reported from the first VTP/1 device firmware against the revision below.
+§15.7 and §15.2 required a frame still pending in the controller to be
+*withdrawn* from it on the edges that stop the transmitter, and no portable
+CAN API can withdraw one frame: Zephyr's only abort is a controller stop,
+SocketCAN has none, and a stopped controller receives nothing. The rule
+named a mechanism, and the only portable substitute opened a receive gap
+the text did not account for.
+
+§15 now says:
+
+- **The rule is the property** (§15.7): a frame pending on an edge MUST NOT
+  pend past `OBD_RESPONSE_TIMEOUT_MS` after it — by then it is transmitted
+  or the device has made it impossible for the bus ever to carry it, by
+  whatever its stack offers. A capture checks it. The probe's own pending
+  bound (§15.2) is the same rule applied to the probe's frame.
+- **A controller stop is an acceptable way to meet it, and its receive gap
+  is not a loss** (§15.7). Frames the controller does not receive while
+  stopped were never accepted, so they are neither delivered nor `dropped`,
+  as during bus-off. The window is what makes the stop free: a frame the
+  bus has not carried in 100 ms is on a bus with no node awake, so there is
+  nothing to miss; on link loss and `CAN_RESET` the table is already clear;
+  on bus-off the controller was not receiving. A device stopping for
+  `CAN_RESET` does so before it responds.
+- RATIONALE §11.9 records why, and why the burden of this rule falls on a
+  portable driver model rather than on bare metal.
+
 ### §15.1: link-layer retransmission is not a retry, and "transmitted" means acknowledged
 
 Reported from the first VTP/1 device firmware as a question about which layer

@@ -2319,11 +2319,12 @@ Each probe request is transmitted in §15.1's sense, so its collection window
 opens when the frame is acknowledged. Unlike the poll loop, the probe owes a
 control response (§9) and MUST NOT wait indefinitely for a bus to carry its
 frame: a probe request still pending `OBD_RESPONSE_TIMEOUT_MS` after
-hand-over MUST be withdrawn from the controller and treated as a request
-nothing answered — the probe falls back to the other addressing, which is
-the addressing fallback above and not a retry, or concludes. On a bus with
-no other node a probe therefore reports `responded` clear within a few
-hundred milliseconds.
+hand-over is treated as a request nothing answered, and MUST NOT be carried
+by the bus after that — the device makes it impossible by whatever means its
+stack offers, which is §15.7's rule applied to the probe's own frame. The
+probe then falls back to the other addressing, which is the addressing
+fallback above and not a retry, or concludes. On a bus with no other node a
+probe therefore reports `responded` clear within a few hundred milliseconds.
 
 The detail of a successful response is one `obd_probe` record followed by
 `count` `obd_ecu` entries:
@@ -2373,9 +2374,10 @@ receiver MUST NOT read an empty mask out of a silent car — "no PIDs
 supported" and "nothing answered" are different findings.
 
 Every probe — answered or not — also **clears the poll set** (§15.7), and
-does so **as it begins**: an accepted `OBD_INFO` clears the set and withdraws
-the loop's pending frame, if there is one, before the probe's first frame is
-handed over. A probe cannot begin behind a pending poll frame (§15.1), and
+does so **as it begins**: an accepted `OBD_INFO` clears the set and, if the
+loop's frame is still pending, sees it transmitted or made impossible within
+§15.7's bound before the probe's first frame is handed over. A probe cannot
+begin behind a pending poll frame (§15.1), and
 the poll set never outlives the probe result it was verified against, which
 a probe replaces. The uniform rule closes both
 failure shapes at once. A silent re-probe would otherwise leave a device
@@ -2848,13 +2850,38 @@ A device MUST NOT re-arm polling itself in any of these cases, and MUST
 NOT persist a poll set across connections. There is no state in which a
 VTP/1 device transmits and no connected client asked it to.
 
-A frame still pending in the controller (§15.1) on any of these edges MUST
-be withdrawn from it: the poll loop's on every edge, and a probe's on link
-loss and bus-off, the two that can fall inside a probe. A pending frame is
-carried the moment a node wakes, and on a car whose ECUs are asleep that
-moment may be minutes after the client stopped polling or went away — a
-transmission no connected client asked for, which is the state this section
-exists to make impossible.
+A frame still pending in the controller (§15.1) on any of these edges — the
+poll loop's on every edge, and a probe's on link loss and bus-off, the two
+that can fall inside a probe — MUST NOT pend past `OBD_RESPONSE_TIMEOUT_MS`
+after the edge. By then it has been transmitted, or the device has made it
+impossible for the bus ever to carry it. A pending frame is carried the
+moment a node wakes, and on a car whose ECUs are asleep that moment may be
+minutes after the client stopped polling or went away — a transmission no
+connected client asked for, which is the state this section exists to make
+impossible. A capture checks it: after the edge, the frame appears within
+the window or never.
+
+The rule is the property, not the mechanism. Withdrawing the one frame,
+clearing a mailbox's request bit, and stopping the controller are all ways
+to meet it, and a device uses whichever its stack offers; no portable CAN
+API can cancel a single frame, and this specification does not require a
+device to reach behind its driver for one (RATIONALE §11.9). The window is
+what makes the wholesale way affordable. Any awake node acknowledges a
+well-formed frame, so a frame the bus has not carried in
+`OBD_RESPONSE_TIMEOUT_MS` is a frame on a bus with no node awake to carry
+it, and a controller stopped then has nothing to miss. A frame the bus does
+carry inside the window was handed over while a client was asking, and its
+answer is delivered, or not, by the rules above.
+
+Frames the controller does not receive while it is stopped were never
+accepted: they are neither delivered nor counted in `dropped` (§8.3),
+exactly as during bus-off — a gap in the record of the bus, not a loss the
+device had. On link loss and `CAN_RESET` the subscription table is already
+clear, so there is no client the gap could cost; on bus-off the controller
+was not receiving. A device that stops its controller for `CAN_RESET` does
+so before it responds: the response says the role is reset, and a client
+rebuilding its table on the strength of it finds a controller that is
+listening.
 
 §15.5's fallback delivery ends with the poll set, in every one of these
 cases: it exists so a polling client receives the answers, and once nothing
