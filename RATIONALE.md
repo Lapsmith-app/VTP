@@ -1330,6 +1330,87 @@ transmit must not outlive the client that asked for it; the CAN role's
 subscriptions already die with the link, and the transmitter holds to the
 stricter version of the same rule).
 
+### 11.8 Where "never retries" lands, and which instant is "transmitted"
+
+Reported from the first device firmware before it had a transport, as a
+question rather than a defect: a CAN controller retransmits a frame that was
+not acknowledged or lost arbitration, below anything the firmware sees, and
+SPEC §15.1 says a device MUST NOT retry an unanswered request and offers
+inspection as the check. On a car the two never meet — any awake node
+acknowledges a well-formed frame, so an unanswered request is on the wire
+exactly once — but a dongle in a car with the ignition off is a node alone on
+its bus, and a capture there shows the same Mode 01 request repeating at the
+link layer's pace, thousands of times a second, each attempt ending in an
+error flag. Three readings were on the table: the rule binds the
+application, and the link layer is CAN's business; it binds the wire, so a
+device MUST use single-shot transmission where its controller offers it and
+MUST NOT declare bit 10 where it does not; or it binds only on a bus with a
+car on it. The first won, and the question exposed two sentences the section
+had needed all along.
+
+**The rule binds what the device asks.** Its reason — stated in SPEC §15.1 and
+in the proposal the pacing came from — is that a tester re-asking a question
+an ECU declined to answer is how a tester becomes a fault: it adds load to a
+bus that is already not behaving, at exactly the wrong moment. That reason
+needs a request the ECU received. Link-layer retransmission is ISO 11898-1's
+error recovery, which every node on the bus performs and every ECU relies
+on; a device that switched it off would be the one node on the bus behaving
+unlike the others, and less reliable for it rather than safer. Single-shot
+also drops a frame that lost arbitration, which is not an error at all:
+`0x7DF` is near the bottom of the priority order, and on a loaded bus a
+request on it loses arbitration routinely. The request would then be
+abandoned as unanswered when the car was never asked, and the client reads a
+gap SPEC §15.4 promises is the truth off a PID the car answers — the plausible
+wrong value SPEC §1.1 forbids, produced by the rule meant to prevent harm. So
+the wire reading costs every car something to change what happens on a bus
+with no car on it.
+
+**And on that bus it changes less than it looks.** Under single-shot the frame
+goes out once and is abandoned; the loop comes round; on a one-group
+schedule the next request is the same request. The capture still shows the
+same frame repeating, at 10 Hz instead of the controller's pace. What
+distinguishes a retry from the loop coming round was never how many times a
+frame appears — it is whether the frame is a second *acknowledged* request
+for what an acknowledged, unanswered one already asked, and a capture shows
+acknowledgement. SPEC §15.1 now says so, and the inspection claim holds with
+that reading rather than in spite of it. ISO 11898-1 is also kinder to the
+lone node than the report assumed: its transmit error counter stops
+climbing at error-passive when the only fault is a missing acknowledgement,
+so a node alone on a bus repeats indefinitely rather than going bus-off, and
+SPEC §15.7 already covers a controller that does.
+
+**"Transmitted" had no instant.** SPEC §15.1 measured `OBD_RESPONSE_TIMEOUT_MS`
+from when the request "was transmitted" and never said when that was. With
+automatic retransmission there is no single instant the firmware can see
+except the controller's completion, which fires when the frame is
+acknowledged — and on a bus that never acknowledges, never. A device that
+timed from the hand-over instead would abandon the pending frame at 100 ms
+and hand the controller the next one, behind it: a queue that empties as a
+burst the moment a node wakes, several requests outstanding and none of them
+spaced, on the one bus where the firmware could least see it happening. The
+instant is now the acknowledgement, which is also the instant ISO 15765-4
+measures P2 from, so the 100 ms window measures what it was sized against. A
+pending frame is the outstanding request, and the poll loop waits for it —
+there is nothing to poll on a bus that will not carry a frame, and the loop
+stalling there is the truth about that bus. The probe cannot wait, because it
+owes a control response, so SPEC §15.2 withdraws a probe frame still pending
+after the same 100 ms and counts it as unanswered; a probe of a sleeping car
+concludes `responded` clear in a few hundred milliseconds, which is also the
+truth. And SPEC §15.7 withdraws whatever is pending when the poll set clears: a
+frame left in the controller after link loss goes out when the driver turns
+the key, minutes after the client went away — the transmission that section
+exists to make impossible, reachable only through a state the section had
+not named.
+
+Declined: a bound on how long the poll loop lets a frame pend. On a live bus
+the frame goes out in milliseconds and the bound never trips; on a bus with
+no node it withdraws one frame so the loop can hand over the next, which
+pends identically — a controller abort every 100 ms that changes nothing on
+the wire. Also declined: requiring single-shot where the controller offers
+it. The reporter's controller offers it in silicon and its driver refuses
+it, and a rule met only by working behind a driver's back, on a reading of
+what a section wants, is not one this specification should write.
+
 ---
 
 ## Contradictions found by review, and how each was closed
@@ -1530,3 +1611,13 @@ SPEC.md §8.2 and SPEC.md §9.2 exist to prevent and no client can detect.
 
 This is a property of that backend, not of VTP/1. A BlueZ peripheral has a real
 `InterfacesRemoved` signal and needs none of it.
+
+The synthetic CAN bus has no link layer. Every frame the device hands over is
+acknowledged at the instant it is handed over, so the two instants SPEC §15.1
+distinguishes — hand-over and acknowledgement — coincide, a frame is never
+pending, and nothing there can exercise the rules that follow from the
+difference: the poll loop waiting on a pending frame, the probe withdrawing
+one at `OBD_RESPONSE_TIMEOUT_MS`, SPEC §15.7 withdrawing one when the poll set
+clears. The harness's loopback transport is the same bus, so it cannot
+either. Those rules are tested by a controller on a bus with no other node on
+it, which only a device can be plugged into.

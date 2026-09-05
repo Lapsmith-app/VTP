@@ -2241,6 +2241,55 @@ per pass of the schedule, never retried. Grouping therefore does not move any
 bound in this section, and cannot — the request frame is padded to eight
 bytes whether it names one PID or six.
 
+**"Transmitted" means acknowledged.** Every instant this section and §15.4
+measure from — the `OBD_RESPONSE_TIMEOUT_MS` window, `interval_ms`, a
+group's minimum interval (§15.4.2) — is the end of the frame as ISO 11898-1
+completes it: sent without error and acknowledged in its ACK slot, which is
+the instant ISO 15765-4 measures P2 from. Nothing is measured from the
+hand-over to the controller. On a loaded bus that instant precedes the frame
+by however long arbitration takes, so a window started there is shorter than
+it looks; on a bus with no other node it precedes the frame indefinitely,
+and a device timing from it abandons a request the bus has never carried and
+queues the next behind it, to go out together the moment a node wakes —
+several requests outstanding at once, none of them spaced. A device whose
+controller signals completion without a timestamp reads its clock when the
+completion is signalled: that reading is late, never early, and late by
+microseconds against a window chosen to be generous.
+
+A frame the controller holds and has not yet transmitted is **pending**, and
+a pending request is the outstanding request under all three bounds: a
+device MUST NOT hand its controller a second request while one is pending.
+The poll loop runs no timer against a pending frame — a request the bus has
+not carried is not unanswered, and the loop waits for it to be carried
+exactly as it waits for an answer. The probe cannot wait indefinitely,
+because it owes a control response, and §15.2 bounds it.
+
+**Link-layer retransmission is not a retry.** The rule binds what the device
+asks, not how ISO 11898-1 delivers it. A frame the controller repeats because
+it lost arbitration or was not acknowledged has not been transmitted, so no
+request has yet gone unanswered for the repeat to be a retry of. A retry in
+this section's sense is a second acknowledged request for what an
+acknowledged, unanswered request already asked. A device MAY leave its
+controller's automatic retransmission enabled, and MAY instead use
+single-shot transmission and re-offer a frame the controller reports it
+could not deliver — one frame in flight either way, and either way the
+request is made once, when the bus acknowledges it once. Neither is
+required. Single-shot drops a frame that lost arbitration, which a request
+on `0x7DF` does routinely on a loaded bus, and then abandons a request the
+car was never asked: the client reads the gap §15.4 promises is the truth
+off a PID the car would have answered.
+
+The inspection this section offers survives the distinction because a
+capture shows it: the repeats of an undelivered frame are unacknowledged and
+each ends in an error flag, where a retry is a second acknowledged request.
+The one bus on which the repeats appear at all is one with no other node on
+it — a car with the ignition off and every ECU asleep. There the controller
+repeats the one pending frame at the link layer's pace and the device
+transmits nothing else, until a node wakes and carries it or the poll set
+clears and §15.7 withdraws it. Whether the controller reaches bus-off
+meanwhile is the controller's affair; §15.7 says what a device does if it
+does.
+
 **`OBD_RESPONSE_TIMEOUT_MS` is 100.** It exists only so a PID nothing answers
 cannot stall the schedule, and is deliberately generous rather than tuned:
 ISO 15765-4's P2max of 50 ms is the figure a dedicated tester uses, and a
@@ -2251,10 +2300,12 @@ knob is a second thing for a client to guess wrong.
 These bounds are what make the role auditable, and the claim is a discipline
 rather than a rate: **a conforming device has at most one diagnostic request
 outstanding, waits for its answer, never retries, and transmits nothing a
-client did not ask for.** That is checkable by inspection, true on every car,
-and — unlike a published interval — needs no guess about a vehicle the device
-has never met. What actually bounds the request rate is the car: a device
-that waits for an answer cannot outrun the ECU replying to it.
+client did not ask for.** That is checkable by inspection, since a capture
+tells an acknowledged second request from the repeats of an undelivered
+frame; it is true on every car; and — unlike a published interval — it needs
+no guess about a vehicle the device has never met. What actually bounds the
+request rate is the car: a device that waits for an answer cannot outrun the
+ECU replying to it.
 
 ### 15.2 OBD_INFO — the probe
 
@@ -2277,6 +2328,17 @@ that result claims `0x40`, it requests `0x40`; it MUST NOT request a mask
 PID the union does not claim. A whole probe is therefore at most a handful
 of single frames, and the response is sent only when the probe is complete
 — the round trip is slow because it is measuring, which is the §9.5 shape.
+
+Each probe request is transmitted in §15.1's sense: its collection window
+opens when the frame is acknowledged, not when it is handed to the
+controller. Unlike the poll loop, the probe MUST NOT wait indefinitely for a
+frame to be carried, because it owes a control response (§9): a probe
+request still pending `OBD_RESPONSE_TIMEOUT_MS` after hand-over MUST be
+withdrawn from the controller and counts as one nothing answered — the probe
+falls back to the other addressing, or concludes, exactly as it would after
+a request that went out and met silence. On a bus with no other node a probe
+therefore reports `responded` clear within a few hundred milliseconds, which
+is the truth about a car whose ECUs are asleep.
 
 The detail of a successful response is one `obd_probe` record followed by
 `count` `obd_ecu` entries:
@@ -2483,7 +2545,8 @@ transmits the next group when *both* hold:
 1. the previous request has been **answered** — the first frame received on
    an identifier the most recent probe reported **whose echoed Mode 01 PID is
    one the outstanding request named** — or `OBD_RESPONSE_TIMEOUT_MS` has
-   elapsed since it was transmitted, whichever comes first; and
+   elapsed since it was transmitted — acknowledged on the bus, §15.1 —
+   whichever comes first; and
 2. at least `interval_ms` has elapsed since the previous transmission.
 
 `interval_ms` is a **minimum spacing, not a period**, and **0 means the client
@@ -2796,6 +2859,13 @@ cleared, and polling therefore stops, on every one of:
 A device MUST NOT re-arm polling itself in any of these cases, and MUST
 NOT persist a poll set across connections. There is no state in which a
 VTP/1 device transmits and no connected client asked it to.
+
+A frame still pending in the controller (§15.1) on any of these edges MUST
+be withdrawn from it, a probe's as much as the poll loop's. A pending frame
+is carried the moment a node wakes, and on a car whose ECUs are asleep that
+moment may be minutes after the client stopped polling or went away — a
+transmission no connected client asked for, which is the state this section
+exists to make impossible.
 
 §15.5's fallback delivery ends with the poll set, in every one of these
 cases: it exists so a polling client receives the answers, and once nothing

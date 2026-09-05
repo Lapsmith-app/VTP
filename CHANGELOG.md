@@ -8,6 +8,69 @@ conformance vector.
 
 ## [Unreleased]
 
+### §15.1: link-layer retransmission is not a retry, and "transmitted" means acknowledged
+
+Reported from the first VTP/1 device firmware as a question about which layer
+a rule lands on, not as a decode disagreement. A CAN controller retransmits a
+frame that was not acknowledged or lost arbitration, below anything the
+firmware sees; §15.1 says a device MUST NOT retry an unanswered request and
+offers inspection as the way to check it. On a car the two never meet — any
+awake node acknowledges a well-formed frame, so an unanswered request is on
+the wire once — but a dongle in a car with the ignition off is a node alone
+on its bus, and a capture there shows the same Mode 01 request repeating
+thousands of times a second. Whether that device conforms was not decidable
+from the text, and the implementation nearly wrote "requires a second node"
+into its own design before its review caught it.
+
+Three readings were weighed, and §15.1 now takes the first:
+
+- **The rule binds what the device asks, not how ISO 11898-1 delivers it.** A
+  frame the controller repeats because it lost arbitration or was not
+  acknowledged has not been transmitted, so no request has gone unanswered
+  for the repeat to be a retry of. A device MAY leave automatic
+  retransmission enabled, MAY use single-shot and re-offer an undelivered
+  frame, and is required to do neither. Single-shot was not mandated because
+  it drops a frame that lost arbitration — routine for `0x7DF` on a loaded
+  bus — and then reports the car silent on a PID it was never asked, which is
+  §1.1's plausible wrong value produced by the rule meant to prevent harm.
+- **A retry is a second acknowledged request** for what an acknowledged,
+  unanswered request already asked, and a capture distinguishes it from the
+  repeats of an undelivered frame, which are unacknowledged and each end in
+  an error flag. The inspection claim holds with that reading rather than in
+  spite of it — and single-shot would not have changed the capture in kind:
+  on a one-group schedule the loop comes round to the same request, at 10 Hz
+  instead of the controller's pace.
+- **"Transmitted" is the acknowledgement**: the end of the frame as ISO
+  11898-1 completes it, and the instant ISO 15765-4 measures P2 from. Every
+  instant §15 measures from — the 100 ms window, `interval_ms`, a group's
+  minimum interval — is that one, never the hand-over to the controller. A
+  frame the controller holds and has not transmitted is **pending**, and a
+  pending request is the outstanding one: a device MUST NOT hand over a
+  second while one pends. The poll loop runs no timer against a pending
+  frame. A device that timed from the hand-over would abandon it at 100 ms
+  and queue the next behind it, and the queue empties as a burst the moment
+  a node wakes — several requests outstanding, none of them spaced, on the
+  one bus where the firmware could least see it.
+- **The probe is bounded** (§15.2), because it owes a control response: a
+  probe frame still pending `OBD_RESPONSE_TIMEOUT_MS` after hand-over is
+  withdrawn and counts as unanswered, so a probe of a sleeping car reports
+  `responded` clear within a few hundred milliseconds.
+- **§15.7 withdraws whatever is pending** when the poll set clears, a probe's
+  frame as much as the loop's. A frame left in the controller after link loss
+  goes out when the driver turns the key, minutes after the client went away
+  — the transmission that section exists to make impossible.
+
+Prose only: no field, bit, UUID, vector or producer case moves, and the
+corpus cannot reach any of it — the reference peripheral's synthetic bus and
+the harness's loopback acknowledge every frame at the hand-over instant, so
+the pending state never exists there, which RATIONALE's closing section now
+records beside the other things the peripheral cannot observe. Reasoning in
+RATIONALE §11.8. For the reporter's transport, the reading asks nothing of
+the single-shot mode its driver refuses; what it does ask is the ability to
+withdraw a pending frame at §15.7's edges, and the one bench the reporter
+offered — a controller on a bus with and without a second node — is exactly
+the one that would show these rules being met.
+
 ### §15: the union over every ECU that answered had no conforming record once a ninth answered
 
 Reported from the first VTP/1 device firmware, and not as a decode

@@ -1034,6 +1034,15 @@ class VtpDevice:
                 if due is not None:
                     entry, group = due
                     entry[2] = now
+                    # SPEC.md 15.1 -- "transmitted" is the acknowledgement,
+                    # and every interval below runs from it. The synthetic
+                    # bus acknowledges a frame at the instant it is handed
+                    # over, so hand-over and acknowledgement coincide here
+                    # and a frame is never pending; a transport with a real
+                    # link layer takes these three readings in its
+                    # transmit-complete path, hands over nothing else while
+                    # a frame pends, and withdraws a pending frame on every
+                    # SPEC.md 15.7 edge.
                     self._obd_last_tx_us = now
                     self._obd_outstanding_since = now
                     self._obd_answer_mark = self._obd_answers
