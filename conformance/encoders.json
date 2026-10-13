@@ -3,6 +3,16 @@
   "generated_by": "tools/generate.py",
   "cases": [
     {
+      "name": "obd-status-suspended-without-installed",
+      "record": "obd_status",
+      "must_refuse": true,
+      "vector": "status-suspended-without-installed",
+      "desc": "SPEC.md 15.6.1 -- `suspended` without `installed`. A suspension belongs to a poll set, so this state names neither of the two a client must choose between: waiting on a sleeping car, or re-arming a set that is gone.",
+      "input": {
+        "state": 2
+      }
+    },
+    {
       "name": "power-percent-above-full",
       "record": "power_state",
       "must_refuse": true,
@@ -1426,6 +1436,16 @@
         ]
       },
       "expect_hex": "0101df07000005101c9801e000887e1380000000e8070000"
+    },
+    {
+      "name": "reserved-bits-obd-status-state",
+      "record": "obd_status",
+      "must_refuse": false,
+      "desc": "SPEC.md 2 -- obd_status.state bits 2-7 are reserved in VTP/1.0, so an encoder MUST zero them rather than publish a meaning this version has not assigned. Bit 7 is set because an encoder masking at the wrong width passes on the lowest reserved bit and fails on the highest.",
+      "input": {
+        "state": 131
+      },
+      "expect_hex": "03000000"
     },
     {
       "name": "control-detail-on-ok",

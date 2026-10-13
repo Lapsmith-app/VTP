@@ -437,6 +437,9 @@ decode_power_state = _decode_fixed("power_state")
 decode_gnss_aid_caps = _decode_fixed("gnss_aid_caps")
 decode_aid_begin_result = _decode_fixed("aid_begin_result")
 decode_aid_commit_result = _decode_fixed("aid_commit_result")
+# SPEC.md §15.6.1. `suspended` without `installed` is a content rule, so it
+# decodes like percent above 100 does, and the client flags it.
+decode_obd_status = _decode_fixed("obd_status")
 
 
 def _obd_identifier_valid(raw):
@@ -516,6 +519,7 @@ DECODERS = {
     "aid_begin_result": decode_aid_begin_result,
     "aid_commit_result": decode_aid_commit_result,
     "obd_info": decode_obd_info,
+    "obd_status": decode_obd_status,
 }
 
 

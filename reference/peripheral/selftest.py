@@ -2146,6 +2146,174 @@ def main():
           == dev.ST_BAD_PARAMS,
           "nothing is pollable on a car that answered nothing")
 
+    # ---- A car that goes to sleep (SPEC.md 15.1.1) ------------------------
+    # The ignition goes off with a poll set installed. Nothing acknowledges
+    # the next request, so it pends; once it has pended OBD_RESPONSE_TIMEOUT
+    # with nothing received, the set is suspended -- kept, silent, re-offered
+    # at the floors, and resumed by the first frame the car sends.
+    def sleepy(**kw):
+        clk = [0]
+        d = dev.VtpDevice(now_us=lambda: clk[0], gps_hz=0, imu_hz=0, **kw)
+        d.on_connect()
+        sent, handed = [], []
+        real = d._obd_transmit
+
+        def transmit(group, now):
+            sent.append(now)
+            real(group, now)
+        d._obd_transmit = transmit
+
+        def step(seconds):
+            for _ in range(int(seconds * 1_000_000) // 5_000):
+                clk[0] += 5_000
+                d.poll()
+                d.due_control_response()
+                pend = d._obd_pending
+                if pend is not None and (not handed or handed[-1] != pend[2]):
+                    handed.append(pend[2])
+
+        def ctl(op, tag, params=b""):
+            r = d.handle_control(bytes([op, tag]) + params)
+            if r is dev.RESPONSE_PENDING:
+                for _ in range(400):
+                    clk[0] += 5_000
+                    r = d.due_control_response()
+                    if r is not None:
+                        break
+            return r
+
+        def status():
+            r = ctl(dev.OBD_STATUS, 0x7F)
+            check(r[2] == dev.ST_OK and len(r) == 3 + 4,
+                  "OBD_STATUS answers ok with a four-byte obd_status")
+            return vtp1.decode_obd_status(r[3:])["state"]
+
+        check(vtp1.decode_obd_info(ctl(dev.OBD_INFO, 0x70)[3:])["probe"]
+              ["validity"] & dev.OBD_RESPONDED, "the awake car answers the probe")
+        n, body = schedule(0x0C)
+        check(ctl(dev.OBD_POLL_SET, 0x71,
+                  struct.pack("<HB", 0, n) + body)[2] == dev.ST_OK,
+              "a poll set installs on the awake car")
+        return d, clk, sent, handed, step, ctl, status, (n, body)
+
+    INSTALLED = dev.OBD_STATE["installed"]
+    SUSPENDED = dev.OBD_STATE["suspended"]
+
+    d, clk, sent, handed, step, ctl, status, (n, body) = sleepy()
+    step(0.5)
+    check(sent and status() == INSTALLED,
+          "polling on an awake car is installed and not suspended")
+    asleep_at = clk[0]
+    d.set_bus_awake(False)
+    step(0.3)
+    first_quiet = len(sent)
+    check(status() == INSTALLED | SUSPENDED,
+          "a request nothing acknowledges suspends the set within "
+          "OBD_RESPONSE_TIMEOUT_MS of the bus falling silent, and the set "
+          "stays installed (SPEC.md 15.1.1)")
+    suspended_at = d._obd_suspended_at
+    check(suspended_at is not None
+          and suspended_at - asleep_at <= 2 * dev.OBD_RESPONSE_TIMEOUT_US,
+          "the suspension comes within a request's pending window of the "
+          "bus going quiet")
+    check(not d._obd_pending, "the unacknowledged frame is ended, not left "
+                              "pending (SPEC.md 15.1.1)")
+    step(14.0)
+    check(len(handed) == 1 and len(sent) == first_quiet,
+          "nothing is offered before the first re-offer floor, 15 s")
+    step(200.0)
+    gaps = [b - a for a, b in zip([suspended_at] + handed[1:], handed[1:])]
+    check(gaps[:4] == [dev.OBD_REOFFER_FIRST_US, dev.OBD_REOFFER_SECOND_US,
+                       dev.OBD_REOFFER_LATER_US, dev.OBD_REOFFER_LATER_US],
+          f"re-offers land on the floors 15 s, 30 s, 60 s, 60 s and no "
+          f"sooner (SPEC.md 15.1.1); got gaps {[g / 1e6 for g in gaps]}")
+    check(len(sent) == first_quiet,
+          "no re-offer is transmitted on a bus that acknowledges nothing")
+    check(status() == INSTALLED | SUSPENDED,
+          "unacknowledged re-offers leave the set suspended, not cleared")
+    d.set_bus_awake(True)
+    step(0.05)
+    check(status() == INSTALLED and len(sent) > first_quiet,
+          "the first frame from a waking car ends the suspension and the "
+          "loop polls at once (SPEC.md 15.1.1, condition 1)")
+
+    # Condition 3, and that it restarts nothing it should not: a client
+    # re-arming a suspended set on a car still asleep spends one offer, and
+    # the set suspends again.
+    d.set_bus_awake(False)
+    step(0.5)
+    check(status() == INSTALLED | SUSPENDED, "asleep again, suspended again")
+    before = len(handed)
+    check(ctl(dev.OBD_POLL_SET, 0x72,
+              struct.pack("<HB", 0, n) + body)[2] == dev.ST_OK,
+          "re-installing a suspended set is accepted")
+    step(0.01)
+    check(len(handed) == before + 1,
+          "a re-install offers one request at once (SPEC.md 15.4)")
+    step(0.3)
+    check(status() == INSTALLED | SUSPENDED and len(handed) == before + 1,
+          "the re-install's offer, unacknowledged, suspends the set again")
+    check(d._obd_next_reoffer_us - d._obd_suspended_at
+          == dev.OBD_REOFFER_FIRST_US,
+          "a fresh suspension starts the re-offer floors again at 15 s")
+
+    # Every §15.7 edge clears a suspended set, and the suspension with it.
+    check(ctl(dev.CAN_RESET, 0x73)[2] == dev.ST_OK, "CAN_RESET answers ok")
+    check(status() == 0, "CAN_RESET clears a suspended set: nothing "
+                         "installed, nothing suspended (SPEC.md 15.7)")
+    quiet = len(handed)
+    step(120.0)
+    check(len(handed) == quiet,
+          "a cleared set re-offers nothing: the suspension went with it")
+
+    # A probe of the sleeping car: nothing acknowledges it, so it reports
+    # `responded` clear, and like every probe it clears the set first.
+    d.set_bus_awake(True)
+    step(0.1)
+    ctl(dev.OBD_INFO, 0x74)
+    check(ctl(dev.OBD_POLL_SET, 0x75,
+              struct.pack("<HB", 0, n) + body)[2] == dev.ST_OK,
+          "re-armed on the awake car")
+    d.set_bus_awake(False)
+    step(0.5)
+    silent = vtp1.decode_obd_info(ctl(dev.OBD_INFO, 0x76)[3:])
+    check(not silent["probe"]["validity"] & dev.OBD_RESPONDED,
+          "a probe of a sleeping car reports responded clear (SPEC.md 15.2)")
+    check(status() == 0, "the probe cleared the suspended set (SPEC.md 15.7)")
+    check(ctl(dev.OBD_STATUS, 0x77, b"\x00")[2] == dev.ST_BAD_PARAMS,
+          "OBD_STATUS is parameterless")
+
+    # A gatewayed port: the car wakes and sends nothing, so only a re-offer
+    # the bus acknowledges can end the suspension (condition 2).
+    g, gclk, gsent, ghanded, gstep, gctl, gstatus, _ = sleepy(gatewayed=True)
+    gstep(0.5)
+    g.set_bus_awake(False)
+    gstep(0.3)
+    check(gstatus() == INSTALLED | SUSPENDED, "the gatewayed car suspends too")
+    g.set_bus_awake(True)
+    woke = len(gsent)
+    gstep(10.0)
+    check(gstatus() == INSTALLED | SUSPENDED and len(gsent) == woke,
+          "a gateway that broadcasts nothing does not end a suspension by "
+          "itself; the device waits for its re-offer")
+    for _ in range(1200):
+        gstep(0.005)
+        if len(gsent) > woke:
+            break
+    # Asked in the same tick the re-offer went out, before any answer to it
+    # can have arrived: the acknowledgement alone ends the suspension.
+    check(len(gsent) == woke + 1 and gstatus() == INSTALLED,
+          "the 15 s re-offer is acknowledged and that alone ends the "
+          "suspension (SPEC.md 15.1.1, condition 2)")
+
+    # Only the obd role answers it.
+    plain = dev.VtpDevice(now_us=lambda: 0, gps_hz=0, imu_hz=0,
+                          capabilities=dev.CAP_GPS | dev.CAP_CAN
+                          | dev.CAP_CONTROL)
+    check(plain.handle_control(bytes([dev.OBD_STATUS, 1]))[2]
+          == dev.ST_UNSUPPORTED,
+          "a device without `obd` answers OBD_STATUS unsupported_opcode")
+
     # ---- The real clock, which the injected one above never exercises ---
     live = dev.VtpDevice(mtu=247, gps_hz=10, imu_hz=100)
     ticks = [live.now_us() for _ in range(200)]

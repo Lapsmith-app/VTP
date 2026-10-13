@@ -229,6 +229,16 @@ static void atomicity(void) {
            "power_state wrote nothing when it refused");
     }
     {
+        SETUP;
+        vtp_obd_status_t st;
+        memset(&st, 0, sizeof st);
+        st.state = VTP_OBD_STATE_SUSPENDED;  /* SPEC.md 15.6.1 -- no set to suspend */
+        ok(vtp_encode_obd_status(&st, out, sizeof out) == -1,
+           "obd_status refuses suspended without installed");
+        ok(untouched(out, sizeof out),
+           "obd_status wrote nothing when it refused");
+    }
+    {
         /* The refusal is found at entry 1, after entry 0 already validated:
          * exactly the shape that leaks a half-written record if the checks
          * live in the write loop. SPEC.md 15.2. */
@@ -286,6 +296,15 @@ static void short_buffers(void) {
            "power_state refuses a buffer one byte short");
         ok(untouched(out, sizeof out),
            "power_state wrote nothing into a short buffer");
+    }
+    {
+        SETUP;
+        vtp_obd_status_t st;
+        memset(&st, 0, sizeof st);
+        ok(vtp_encode_obd_status(&st, out, VTP_OBD_STATUS_SIZE - 1) == -1,
+           "obd_status refuses a buffer one byte short");
+        ok(untouched(out, sizeof out),
+           "obd_status wrote nothing into a short buffer");
     }
     {
         SETUP;

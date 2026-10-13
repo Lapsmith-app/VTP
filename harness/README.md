@@ -176,6 +176,19 @@ Seven things are permanently in it:
   repeating unacknowledged, and ending within 100 ms of the poll set
   clearing — or, if the driver's stop cannot end it, not ending, which is
   the defect.
+- **§15.1.1's suspension.** A device on a bus that acknowledges nothing
+  suspends its poll set, re-offers at 15, 45 and 105 s, then once a minute,
+  and resumes when its car wakes. None of that can be asked of a car from
+  here: switching the ignition off is the operator's job. `obd.status`
+  checks `OBD_STATUS` in the states a live bus produces. The poll set is
+  reported installed exactly while it is, and not suspended while the car
+  answers it. The measurement is the same bench as the item above, with a
+  poll set installed when the other node goes: a capture shows a burst of
+  unacknowledged attempts ending within about 100 ms, nothing until the
+  first re-offer, and `OBD_STATUS` answering `installed` and `suspended`
+  throughout. The reference peripheral's `--ignition` reproduces the
+  sequence for a client to develop against, but it does not stand in for
+  the controller.
 - **§9.4's hold on a full transmit pool.** A device whose stack has no buffer
   for the indication keeps the response and offers it again ahead of the
   streams, and the harness cannot fill a device's pool to order: all it sees

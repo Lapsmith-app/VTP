@@ -618,6 +618,23 @@
       ],
       "reserved_from": 2,
       "reserved_purpose": "Validity for probe results added in a later minor"
+    },
+    "obd_state": {
+      "width": 1,
+      "bits": [
+        {
+          "bit": 0,
+          "name": "installed",
+          "desc": "The poll set is non-empty, as can_flags.polling would say on a batch flushed now (SPEC.md 15.6)"
+        },
+        {
+          "bit": 1,
+          "name": "suspended",
+          "desc": "The poll set is suspended on a bus that acknowledged nothing; MUST NOT be set unless installed is (SPEC.md 15.1.1)"
+        }
+      ],
+      "reserved_from": 2,
+      "reserved_purpose": "Poll-loop state added in a later minor"
     }
   },
   "records": {
@@ -1511,6 +1528,36 @@
           "desc": "Response identifier; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero. Entries strictly ascending over bits 0-29 (SPEC.md 15.2)"
         }
       ]
+    },
+    "obd_status": {
+      "access": "control",
+      "size": 4,
+      "desc": "The detail of an OBD_STATUS response. What the poll loop is doing, measured when asked.",
+      "fields": [
+        {
+          "name": "state",
+          "offset": 0,
+          "size": 1,
+          "type": "u8",
+          "bitmask": "obd_state"
+        },
+        {
+          "name": "reserved_1",
+          "offset": 1,
+          "size": 1,
+          "type": "u8",
+          "reserved": true,
+          "desc": "Poll-loop metadata"
+        },
+        {
+          "name": "reserved_2",
+          "offset": 2,
+          "size": 2,
+          "type": "u16",
+          "reserved": true,
+          "desc": "Poll-loop metadata"
+        }
+      ]
     }
   },
   "control": {
@@ -1627,6 +1674,14 @@
         "params": "interval_ms:u16, count:u8, schedule:u8*",
         "response": "",
         "desc": "Replace the whole poll set; count 0 stops transmitting. Response-paced: interval_ms is a MINIMUM spacing and 0 means none (SPEC.md 15.4). Bit 7 of a PID byte groups it with the next and each group carries a u16 minimum interval in ms (SPEC.md 15.4.1, 15.4.2)"
+      },
+      {
+        "value": 98,
+        "name": "OBD_STATUS",
+        "capability": "obd",
+        "params": "",
+        "response": "obd_status record",
+        "desc": "What the poll loop is doing, measured when asked: whether a poll set is installed, and whether it is suspended (SPEC.md 15.6.1)"
       }
     ]
   }

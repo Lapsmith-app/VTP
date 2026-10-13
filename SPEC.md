@@ -1189,6 +1189,7 @@ device has, and reaching it at all means the Control characteristic is live.
 | `0x50` | `GET_POWER` | `power` | — | `power_state record` | What the device knows about its own supply, measured when asked (SPEC.md 9.7) |
 | `0x60` | `OBD_INFO` | `obd` | — | `obd_probe record` | Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2) |
 | `0x61` | `OBD_POLL_SET` | `obd` | `interval_ms:u16, count:u8, schedule:u8*` | — | Replace the whole poll set; count 0 stops transmitting. Response-paced: interval_ms is a MINIMUM spacing and 0 means none (SPEC.md 15.4). Bit 7 of a PID byte groups it with the next and each group carries a u16 minimum interval in ms (SPEC.md 15.4.1, 15.4.2) |
+| `0x62` | `OBD_STATUS` | `obd` | — | `obd_status record` | What the poll loop is doing, measured when asked: whether a poll set is installed, and whether it is suspended (SPEC.md 15.6.1) |
 <!-- END GENERATED: control -->
 
 Opcode values `0x05`, `0x14` and `0x31` were assigned by pre-1.0 drafts and
@@ -1341,7 +1342,8 @@ or discarded when that slot is already taken.
 | `MONITOR_LIST` | A read |
 | `TIME_SYNC` | Each attempt is answered with a fresh reading, never a stale one |
 | `OBD_INFO` | Each attempt probes afresh and answers with a fresh reading — at the cost §15.2 states: a probe transmits, and replaces the probe result and poll set the lost attempt had already replaced |
-| `OBD_POLL_SET` | §15.4 — the request replaces the whole set, so repeating it replaces the set with itself |
+| `OBD_POLL_SET` | §15.4 — the request replaces the whole set, so repeating it replaces the set with itself; on a suspended set it also offers one request (§15.1.1), which a sleeping car leaves unacknowledged and suspended again |
+| `OBD_STATUS` | A read |
 
 A client MAY therefore retry any request whose response it did not receive. It
 MUST NOT assume the original did not take effect — only that repeating it is
@@ -1604,6 +1606,7 @@ introduced later: extensibility is decided before 1.0 or not at all
 | `aid_commit_result` | No — closed for major version 1 | — |
 | `obd_probe` | No — closed for major version 1 | — |
 | `obd_ecu` | No — closed for major version 1 | — |
+| `obd_status` | No — closed for major version 1 | — |
 <!-- END GENERATED: extensibility -->
 
 **Reserved space**, for flags and small values. Appendix A lists it.
@@ -2182,7 +2185,7 @@ person reading a client's screen, can know whether the dongle in their OBD
 port talks to their car. RATIONALE §11 is the full argument.
 
 `obd` requires `can` and `control` (§4.1): responses are delivered on the CAN
-stream — through the subscription table and §15.5's fallback rule — and both
+stream — through the subscription table and §15.5's fallback rule — and its
 opcodes live on Control. Bit 10 is past the eight bits the advertisement carries (§3.3), like
 `power` and `gnss_aiding`: polling is something a client does after it
 connects, not something it ranks devices by before it does.
@@ -2216,8 +2219,8 @@ holds on every car without knowing any of them.
 Because Info is read on every connection and never cached (§4), bit 10
 describes **this connection, not the model**. A device with a physical
 listen-only switch — a lifted TXD, a sniff-only jumper — MUST clear bit 10
-while the switch is set, and MUST answer `unsupported_opcode` to both opcodes
-exactly as if it had never implemented them.
+while the switch is set, and MUST answer `unsupported_opcode` to every OBD
+opcode exactly as if it had never implemented them.
 
 ### 15.1 What a device may transmit
 
@@ -2275,9 +2278,11 @@ is conservative in every bound here.
 
 A frame the controller holds and has not yet transmitted is **pending**, and
 a pending request is the outstanding request under all three bounds. The
-poll loop runs no timer against a pending frame: a request the bus has not
-carried is not unanswered, and a bus that carries nothing holds the loop
-until it does or the poll set clears (§15.7). The probe owes a control
+poll loop runs no abandonment timer against a pending frame: a request the
+bus has not carried is not unanswered. A bus carrying other traffic carries
+it once arbitration lets it out — `0x7DF` loses arbitration routinely on a
+loaded bus — and the loop waits for that. A bus carrying nothing at all is
+§15.1.1's, and the poll set is suspended there. The probe owes a control
 response and cannot wait, so §15.2 bounds it.
 
 **Link-layer retransmission is not a retry.** The rule binds what the device
@@ -2311,6 +2316,79 @@ and — unlike a published interval — needs no guess about a vehicle the devic
 has never met. What actually bounds the request rate is the car: a device
 that waits for an answer cannot outrun the ECU replying to it.
 
+### 15.1.1 A bus nobody acknowledges — suspension
+
+A car whose ignition is off has no node awake to acknowledge a frame. ISO
+11898-1 stops a transmitter's error counter at error-passive when the only
+fault is a missing acknowledgement, so a pending frame on that bus is
+repeated at the link layer's pace and the controller never reaches bus-off.
+A poll set left installed when the driver switches off — at a track day,
+after every session — would otherwise hold the device there for as long as
+the client stays connected. It does not (RATIONALE §11.10).
+
+A pending poll request is **unacknowledged** once it has pended for
+`OBD_RESPONSE_TIMEOUT_MS` and the device has received no frame in that time.
+A device MAY judge it unacknowledged sooner, once its controller reports
+error-passive and no frame has been received since the request was handed
+over. Both tests need silence, and silence is what keeps them off a live
+bus: any node that transmits also acknowledges, so a device that has heard
+anything is on a bus that will carry its frame once arbitration allows.
+
+When a poll request is unacknowledged, the device MUST **suspend** the poll
+set:
+
+- It ends the frame as §15.2 ends a probe request still pending at the same
+  point: the bus MUST NOT carry it afterwards, and the device makes that
+  impossible by whatever means its stack offers (§15.7). The request was
+  never transmitted in §15.1's sense, so it is not abandoned as unanswered,
+  and offering it again is not a retry.
+- It keeps the poll set. **Suspension is not a §15.7 edge**: the set, the
+  probe result and §15.5's fallback all stand, the polling flag stays set
+  (§15.6), and a client has nothing to re-arm.
+- It transmits nothing further under the set until the suspension ends,
+  except the re-offers below.
+
+A suspended device goes on receiving, because receiving is what ends the
+suspension. The poll loop continues from where it stood when:
+
+1. **The device receives a frame**, on any identifier: a node that
+   transmits is awake, and will acknowledge.
+2. **A re-offer is acknowledged** — the bus carried it, so it is a
+   transmitted request like any other, answered or abandoned under §15.1.
+3. **The client installs a non-empty poll set** (§15.4), whether a different
+   one or the same one again. The device offers one request under it at
+   once, within §15.1's bounds, and suspends again if that is
+   unacknowledged too.
+
+Every §15.7 edge also ends a suspension, by clearing the set it belongs to.
+
+**Re-offers.** A gatewayed port can wake with nothing on it: the gateway
+answers diagnostic requests and forwards no broadcast traffic, so a car
+whose driver has turned the key may send a suspended device nothing to
+receive. A suspended device SHOULD therefore **re-offer**: hand its
+controller one poll request — whichever group the schedule makes due, under
+§15.1's bounds — and judge it exactly as above. An unacknowledged re-offer
+is ended the same way and the suspension continues. A device MUST NOT make
+its first re-offer sooner than 15 s after the suspension began, its second
+sooner than 30 s after the first, or any later one sooner than 60 s after
+the one before. The floors are constants, not a setting, for the reason
+`OBD_RESPONSE_TIMEOUT_MS` is (§15.1); a device MAY wait longer, at the cost
+of a silent car waiting as long to be polled again, and a client with its
+own evidence that the car is awake re-arms (3. above) rather than waits.
+
+What a suspended device puts on a bus that acknowledges nothing is
+therefore one request's link-layer attempts for about
+`OBD_RESPONSE_TIMEOUT_MS`, at 15, 45 and 105 s at the earliest and no
+oftener than once a minute after that — where without this section it was
+the same attempts continuously. A re-offer is a
+poll request, made under a set the client installed and has not withdrawn
+(§15.1, rule 2); it is the frame the hold would have repeated, offered
+seldom, and neither a keep-alive nor a wake-up sequence.
+
+Suspension is not §15.8's. It is decided by this device's own frame going
+unacknowledged on a bus carrying nothing, and it ends on any frame at all:
+an inference about whether any node is awake, never about another tester.
+
 ### 15.2 OBD_INFO — the probe
 
 `OBD_INFO` (`0x60`) takes no parameters. It probes the bus and reports what
@@ -2339,9 +2417,12 @@ control response (§9) and MUST NOT wait indefinitely for a bus to carry its
 frame: a probe request still pending `OBD_RESPONSE_TIMEOUT_MS` after
 hand-over is treated as a request nothing answered, and MUST NOT be carried
 by the bus after that — the device makes it impossible by whatever means its
-stack offers, which is §15.7's rule applied to the probe's own frame. The
-probe then falls back to the other addressing, which is the addressing
-fallback above and not a retry, or concludes. On a bus with no other node a
+stack offers, which is §15.7's rule applied to the probe's own frame. A
+device MAY treat it so sooner, on the evidence §15.1.1 lets the poll loop
+act on: its controller reporting error-passive with no frame received since
+the request was handed over. The probe then falls back to the other
+addressing, which is the addressing fallback above and not a retry, or
+concludes. On a bus with no other node a
 probe therefore reports `responded` clear within a few hundred milliseconds.
 
 The detail of a successful response is one `obd_probe` record followed by
@@ -2593,7 +2674,8 @@ A request the bus carried and did not answer is abandoned at
 `OBD_RESPONSE_TIMEOUT_MS` (§15.1); the loop does not retry or reorder, and
 comes round again on the next pass. The client sees the gap as the absence of
 a response frame, which is the truth. What does hold the loop is a frame the
-bus has not yet carried (§15.1).
+bus has not yet carried (§15.1), and on a bus carrying nothing at all, a
+suspension (§15.1.1).
 
 Refusals, checked in this order after the §9 capability gate:
 
@@ -2631,6 +2713,15 @@ A refused request MUST leave the installed poll set unchanged. The opcode
 is idempotent — replacing a set with itself is the same set — which is its
 §9.4 retry-safety. The change takes effect promptly: after an `ok`, at most
 one further request MAY go out under the old set.
+
+An accepted non-empty poll set also **ends a suspension** (§15.1.1) — the
+one way a client ends one without clearing the set. The device offers a
+request under it at once, so a
+client that knows the car is awake does not wait for the next re-offer. On a
+car that is still asleep that offer goes unacknowledged and the set is
+suspended again, so re-installing a set is still retry-safe: it costs one
+request's attempts on a bus nobody is listening to, and leaves the set as
+it was.
 
 An accepted, non-empty poll set is the whole of what a client must do to
 receive the answers: §15.5 delivers them on the probe's reported response
@@ -2841,6 +2932,71 @@ one control round trip, disclosed by the `OBD_INFO` exchange itself, and a
 flag that flickered for it would blink faster than a batch flush can
 report.
 
+The flag says the poll set is installed, and a suspended set is (§15.1.1):
+it stays set through a suspension. **Suspension has no bit on the stream.**
+A suspended device has received nothing since it suspended, and receiving
+anything ends the suspension, so the only batch that could carry such a
+bit is one holding frames from before the bus fell silent — never one
+flushed at the moment a client is asking why the stream stopped. That
+question is `OBD_STATUS`'s (§15.6.1).
+
+### 15.6.1 OBD_STATUS — what the poll loop is doing
+
+`OBD_STATUS` (`0x62`) takes no parameters and reports the state of the poll
+loop, **measured when asked** — `GET_POWER`'s shape (§9.7). It transmits
+nothing and changes nothing. The detail is one `obd_status` record:
+
+<!-- BEGIN GENERATED: obd_status -->
+*The detail of an OBD_STATUS response. What the poll loop is doing, measured when asked.*
+
+Total: **4 bytes**. All fields little-endian.
+
+| Off | Size | Type | Field | Notes |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | `u8` | `state` | bitmask `obd_state` |
+| 1 | 1 | `u8` | `reserved_1` | Poll-loop metadata; **reserved — MUST be zero** |
+| 2 | 2 | `u16` | `reserved_2` | Poll-loop metadata; **reserved — MUST be zero** |
+<!-- END GENERATED: obd_status -->
+
+`state` bits:
+
+<!-- BEGIN GENERATED: bitmask:obd_state -->
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| 0 | `installed` | The poll set is non-empty, as can_flags.polling would say on a batch flushed now (SPEC.md 15.6) |
+| 1 | `suspended` | The poll set is suspended on a bus that acknowledged nothing; MUST NOT be set unless installed is (SPEC.md 15.1.1) |
+| 2+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
+<!-- END GENERATED: bitmask:obd_state -->
+
+`installed` is what `polling` would say on a batch flushed at the same
+instant (§15.6). `suspended` MUST NOT be set unless `installed` is: a
+suspension belongs to a poll set (§15.1.1). That is a content rule in §1.1's
+sense — a receiver decodes the record, MUST NOT read it as either state, and
+SHOULD surface it as a device defect, and a conforming encoder refuses to
+produce it.
+
+**It exists for one question the stream cannot answer.** A CAN stream that
+goes silent while a client has a poll set installed is a car that has gone
+to sleep, or a device that no longer holds the set, and silence is all the
+stream offers either way: a quiet bus produces no batches (§6.2), and the
+polling flag is on batches. The two need opposite recoveries — wait, or
+re-arm — and `installed` and `suspended` say which.
+
+**A client SHOULD ask before it re-arms into silence.** When `suspended` is
+set the device is already doing what a recovering client would: listening,
+and re-offering at the floors §15.1.1 sets. A client SHOULD NOT re-arm a
+suspended set on a timer of its own — every re-arm is one more request's
+attempts on a bus that has acknowledged nothing — and re-arms when it has
+evidence of its own that the car is awake, which it need not have. When
+`installed` is clear the set is gone, and the client re-arms as §15.7
+already makes the strategy. `CAN_RESET` clears a suspended set along with
+everything else, so a client that resets to recover from a sleeping car
+exchanges a suspension that would have ended by itself for a re-arm that
+suspends again.
+
+A payload whose length is not exactly the record is malformed and MUST be
+rejected whole (§1.1).
+
 ### 15.7 What stops the transmitter
 
 Transmit MUST NOT outlive the client that asked for it. The poll set is
@@ -2863,6 +3019,12 @@ cleared, and polling therefore stops, on every one of:
   poll set and MUST NOT resume transmitting on its own; recovery is a new
   `OBD_POLL_SET` from the client. `responded` reporting and the polling
   flag then tell the truth about a bus the device can no longer speak on.
+  Suspension (§15.1.1) is not bus-off and does not stand in for it: a
+  suspension that ends and lets the loop continue is not a device resuming
+  after bus-off, because its controller never reached it, and a controller
+  that does reach bus-off while the set is suspended — on a re-offer, or on
+  a fault that is not a missing acknowledgement — clears the set here like
+  any other.
 
 A device MUST NOT re-arm polling itself in any of these cases, and MUST
 NOT persist a poll set across connections. There is no state in which a
@@ -2924,7 +3086,8 @@ polling while this device is. The rules are fixed, not adaptive:
   heuristic that stops polling on a suspicion stops it on a coincidence,
   and a device whose transmit behaviour varies with unmodelled traffic is
   a device whose behaviour cannot be stated. What it does is what §15.1
-  says, always.
+  says, always. §15.1.1's suspension is not such an inference: it waits on
+  a bus carrying no traffic at all, and ends on any.
 - A device MUST NOT shorten its spacing, reorder its schedule, or add
   requests in response to anything it hears. Bus contention costs it
   answers, never restraint.
@@ -2941,7 +3104,7 @@ polling while this device is. The rules are fixed, not adaptive:
 
 The role is deliberately the floor, not the ceiling. Out of scope, each a
 candidate for a later minor's opcodes (§11.3) rather than a silent widening
-of these two:
+of these:
 
 - **Mode 22 manufacturer DIDs** — where brake pressure and steering angle
   live on gatewayed cars. It needs ISO-TP reassembly and flow control,
@@ -2984,6 +3147,7 @@ record tables above.
 | `gnss_aid_caps.validity` | bits 1–7 | Validity for aiding capabilities added in a later minor |
 | `aid_commit_result.validity` | bits 1–7 | Validity for commit results added in a later minor |
 | `obd_probe.validity` | bits 2–7 | Validity for probe results added in a later minor |
+| `obd_status.state` | bits 2–7 | Poll-loop state added in a later minor |
 | `info.reserved_22` | 2 bytes | Was obd_min_interval_ms; withdrawn with the fixed poll clock (SPEC.md 15.4) |
 | `can_header.reserved` | 2 bytes | Low byte earmarked for a bus index (SPEC.md 6.9); high byte unassigned |
 | `imu_header.reserved` | 2 bytes | In-band IMU metadata |
@@ -2993,6 +3157,8 @@ record tables above.
 | `gnss_aid_caps.reserved_2` | 2 bytes | Was aid_flags; aiding metadata |
 | `aid_begin_result.reserved_3` | 1 byte | Transfer metadata |
 | `obd_probe.reserved_18` | 2 bytes | Probe metadata |
+| `obd_status.reserved_1` | 1 byte | Poll-loop metadata |
+| `obd_status.reserved_2` | 2 bytes | Poll-loop metadata |
 | Extension types | `0x80`–`0xFF` | Vendor-private; this specification MUST NOT assign them (§5.5) |
 <!-- END GENERATED: reserved_space -->
 

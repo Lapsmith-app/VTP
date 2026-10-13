@@ -146,6 +146,10 @@ CAUGHT_BY = {
     "obd_polls_before_probe": "obd.poll_before_probe",
     "obd_delivery_needs_subscription": "obd.poll_and_flag",
     "obd_flag_never_set": "obd.poll_and_flag",
+    "obd_status_unsupported": "obd.status",
+    "obd_status_stale_installed": "obd.status",
+    "obd_status_suspended_awake": "obd.status",
+    "obd_status_reserved_nonzero": "obd.status",
 }
 
 #: A MUST or SHOULD check with no seeded fault against it, and why there is

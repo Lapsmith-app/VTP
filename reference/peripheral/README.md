@@ -585,6 +585,35 @@ dropped ECU still answers on the bus; §15.5's fallback is scoped to the
 reported identifiers, so its frames reach a client through the subscription
 table or not at all.
 
+### A car that switches off (SPEC.md §15.1.1)
+
+`--ignition ON:OFF` cycles the synthetic car's ignition: on for `ON` seconds,
+off for `OFF`. Off, the bus carries nothing and acknowledges nothing — no
+broadcast frames, and a request handed to the controller pends instead of
+going out — which is a car between sessions at a track day.
+
+```sh
+python3 serve.py --ignition 60:45               # off for 45 s every minute
+python3 serve.py --ignition 60:45 --gatewayed   # and nothing broadcast when on
+```
+
+A poll set installed across an off period is suspended about 100 ms after the
+car falls silent: the pending request is ended, the set is kept, and
+`OBD_STATUS` reports it `installed` and `suspended`. The device re-offers one
+request at 15 s, 45 s and 105 s into the suspension and once a minute after
+that, and resumes on the first frame the waking car sends. With
+`--gatewayed` the waking car sends nothing on its own, so the first re-offer
+after the ignition comes back is what resumes it. The polling flag stays set
+throughout, and the stream simply goes quiet, which is what a client has to
+learn to read as "asleep" rather than "lost the set" — the question
+`OBD_STATUS` answers. `OBD_INFO` on the sleeping car reports `responded`
+clear.
+
+This is the one link-layer state the synthetic bus models. An awake bus still
+acknowledges every frame at the instant it is handed over, so a frame pending
+behind other traffic — the case where the loop waits rather than suspends —
+is a bench measurement.
+
 ## The screen
 
 The window is a debug panel as well as the device's display, laid out around

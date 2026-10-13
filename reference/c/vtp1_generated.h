@@ -168,6 +168,12 @@
 #define VTP_OBD_ECU_SIZE 4
 #define VTP_OBD_ECU_OFF_ID 0
 
+/* The detail of an OBD_STATUS response. What the poll loop is doing, measured when asked. */
+#define VTP_OBD_STATUS_SIZE 4
+#define VTP_OBD_STATUS_OFF_STATE 0
+#define VTP_OBD_STATUS_OFF_RESERVED_1 1
+#define VTP_OBD_STATUS_OFF_RESERVED_2 2
+
 typedef enum {
     VTP_FIX_TYPE_NONE = 0,
     VTP_FIX_TYPE_DEAD_RECKON = 1,
@@ -296,6 +302,11 @@ typedef enum {
 #define VTP_OBD_VALIDITY_TRUNCATED (1u << 1)
 #define VTP_OBD_VALIDITY_RESERVED 0xFCu
 #define VTP_OBD_VALIDITY_KNOWN (~(uint32_t)VTP_OBD_VALIDITY_RESERVED)
+
+#define VTP_OBD_STATE_INSTALLED (1u << 0)
+#define VTP_OBD_STATE_SUSPENDED (1u << 1)
+#define VTP_OBD_STATE_RESERVED 0xFCu
+#define VTP_OBD_STATE_KNOWN (~(uint32_t)VTP_OBD_STATE_RESERVED)
 
 /* SPEC.md 4.1 -- a capability bit and every bit it requires. */
 typedef struct { uint32_t bit, requires_; const char *name; } vtp_capability_rule_t;

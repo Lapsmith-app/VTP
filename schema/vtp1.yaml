@@ -410,6 +410,21 @@ bitmasks:
       - {bit: 1, name: truncated, desc: "More ECUs answered than the record can name; the entries and the three masks describe the eight reported (SPEC.md 15.2)"}
     reserved_from: 2
     reserved_purpose: "Validity for probe results added in a later minor"
+  # SPEC.md 15.6.1. State, not validity: both bits are always meaningful,
+  # and clear is an answer. `installed` duplicates can_flags.polling on
+  # purpose -- the flag rides on batches, and the moment a client needs it
+  # is the moment the stream has gone silent and there are none.
+  #
+  # `suspended` has no can_flags twin, and cannot usefully have one: a
+  # suspension ends on the first frame received (SPEC.md 15.1.1), so no
+  # batch flushed during one carries a frame received during one.
+  obd_state:
+    width: 1
+    bits:
+      - {bit: 0, name: installed, desc: "The poll set is non-empty, as can_flags.polling would say on a batch flushed now (SPEC.md 15.6)"}
+      - {bit: 1, name: suspended, desc: "The poll set is suspended on a bus that acknowledged nothing; MUST NOT be set unless installed is (SPEC.md 15.1.1)"}
+    reserved_from: 2
+    reserved_purpose: "Poll-loop state added in a later minor"
 
 records:
 
@@ -737,6 +752,20 @@ records:
       - {name: id, offset: 0, size: 4, type: u32,
          desc: "Response identifier; bits 0-28 arbitration id, b29 extended, bits 30-31 MUST be zero. Entries strictly ascending over bits 0-29 (SPEC.md 15.2)"}
 
+  # SPEC.md 15.6.1. The detail of an OBD_STATUS response: what the poll loop
+  # is doing, measured when asked -- GET_POWER's shape again. SPEC.md 15.4
+  # refuses a read-back of the poll set because the client installed it and
+  # already knows it; what the client does NOT know is what the device has
+  # since observed about the bus, which is the only thing this record says.
+  obd_status:
+    access: control
+    size: 4
+    desc: "The detail of an OBD_STATUS response. What the poll loop is doing, measured when asked."
+    fields:
+      - {name: state, offset: 0, size: 1, type: u8, bitmask: obd_state}
+      - {name: reserved_1, offset: 1, size: 1, type: u8, reserved: true, desc: "Poll-loop metadata"}
+      - {name: reserved_2, offset: 2, size: 2, type: u16, reserved: true, desc: "Poll-loop metadata"}
+
 control:
   request:  "[opcode:u8][tag:u8][params...]"
   response: "[opcode:u8][tag:u8][status:u8][detail...]"
@@ -795,10 +824,10 @@ control:
     - {value: 0x50, name: GET_POWER,          capability: power,   params: "",                             response: "power_state record",    desc: "What the device knows about its own supply, measured when asked (SPEC.md 9.7)"}
     # SPEC.md 15. The OBD role: the first opcodes whose effect is on the
     # VEHICLE rather than on the device, which is why both belong to a
-    # capability bit of their own rather than riding on `can`. Two opcodes
-    # and not three: there is no OBD_POLL_STOP, because a poll set is a
-    # complete statement (SPEC.md 15.4) and the empty one already says stop
-    # -- the GNSS_AID_ABORT argument, one section over.
+    # capability bit of their own rather than riding on `can`. There is no
+    # OBD_POLL_STOP, because a poll set is a complete statement (SPEC.md
+    # 15.4) and the empty one already says stop -- the GNSS_AID_ABORT
+    # argument, one section over.
     #
     # OBD_INFO transmits. It is the probe, and SPEC.md 15.2 makes it the
     # first frame a device may ever put on the bus -- so the sequence a
@@ -811,3 +840,8 @@ control:
     # is how relative rates exist without per-PID rate fields (SPEC.md 15.4).
     - {value: 0x60, name: OBD_INFO,     capability: obd, params: "",                              response: "obd_probe record", desc: "Probe the bus and report what answered; replaces the probe result and clears the poll set (SPEC.md 15.2)"}
     - {value: 0x61, name: OBD_POLL_SET, capability: obd, params: "interval_ms:u16, count:u8, schedule:u8*", response: "",                 desc: "Replace the whole poll set; count 0 stops transmitting. Response-paced: interval_ms is a MINIMUM spacing and 0 means none (SPEC.md 15.4). Bit 7 of a PID byte groups it with the next and each group carries a u16 minimum interval in ms (SPEC.md 15.4.1, 15.4.2)"}
+    # OBD_STATUS is a read, and the only OBD opcode that transmits nothing.
+    # It exists because a suspended poll set (SPEC.md 15.1.1) is silent on
+    # the stream by construction, and the client's choice between waiting
+    # and re-arming turns on exactly that state (SPEC.md 15.6.1).
+    - {value: 0x62, name: OBD_STATUS,   capability: obd, params: "",                              response: "obd_status record", desc: "What the poll loop is doing, measured when asked: whether a poll set is installed, and whether it is suspended (SPEC.md 15.6.1)"}
