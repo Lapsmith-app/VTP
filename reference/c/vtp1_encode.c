@@ -512,6 +512,18 @@ int vtp_encode_power_state(const vtp_power_state_t *p, uint8_t *out, size_t cap)
     return VTP_POWER_STATE_SIZE;
 }
 
+int vtp_encode_obd_status(const vtp_obd_status_t *s, uint8_t *out, size_t cap) {
+    /* The device side of SPEC.md 15.6.1's content rule; the decoder accepts
+     * the same bytes and leaves the flagging to the caller. */
+    if ((s->state & VTP_OBD_STATE_SUSPENDED) && !(s->state & VTP_OBD_STATE_INSTALLED))
+        return -1;
+    if (cap < VTP_OBD_STATUS_SIZE) return -1;
+    memset(out, 0, VTP_OBD_STATUS_SIZE);
+    out[VTP_OBD_STATUS_OFF_STATE] =
+        (uint8_t)KNOWN_BITS(s->state, VTP_OBD_STATE_KNOWN);
+    return VTP_OBD_STATUS_SIZE;
+}
+
 int vtp_encode_control_response(const vtp_control_response_t *r,
                                 uint8_t *out, size_t cap) {
     /* An encoder must not emit what its own decoder rejects. SPEC.md §9. */

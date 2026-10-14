@@ -1012,6 +1012,10 @@ def _reserved_case(schema, record, field, value):
         return ({"probe": dict(clean, **{field: value}), "ecus": [ecu]},
                 encode(schema, "obd_probe", dict(clean, **{field: value}))
                 + encode(schema, "obd_ecu", ecu))
+    if record == "obd_status":
+        # Every assigned bit at once is a legal state -- a suspended set is an
+        # installed one (SPEC.md 15.6.1) -- so no clean baseline is needed.
+        return ({field: value}, encode(schema, record, {field: value}))
     if record == "aid_commit_result":
         # `incomplete`, because the reserved-bit case sets every ASSIGNED bit
         # of the mask alongside the reserved one -- and SPEC.md 14.4 sets
@@ -2726,6 +2730,65 @@ def vectors(schema):
          "must_reject": "length"},
     ]
 
+    # SPEC.md 15.6.1 -- OBD_STATUS. A fixed record of state bits with no
+    # validity mask: clear is an answer here, not an absence.
+    OS = {b["name"]: 1 << b["bit"]
+          for b in schema["bitmasks"]["obd_state"]["bits"]}
+    files["obd.json"] += [
+        case(schema, "obd_status", "status-nothing-installed",
+             dict(state=0),
+             "No poll set. The device transmits nothing under the poll loop, "
+             "and a client whose stream went silent while it believed a set "
+             "was installed has lost it -- the case for re-arming "
+             "(SPEC.md 15.6.1)."),
+        case(schema, "obd_status", "status-polling",
+             dict(state=OS["installed"]),
+             "A poll set installed and not suspended: what `polling` says on "
+             "every batch, available while there are none."),
+        case(schema, "obd_status", "status-suspended",
+             dict(state=OS["installed"] | OS["suspended"]),
+             "A poll set installed and suspended on a bus that acknowledged "
+             "nothing (SPEC.md 15.1.1). The client waits rather than re-arms: "
+             "the device is already listening, and re-offering.",
+             note="The case the opcode exists for. On the stream this state "
+                  "is indistinguishable from the first one -- no batches -- "
+                  "and the two need opposite recoveries."),
+        case(schema, "obd_status", "status-suspended-without-installed",
+             dict(state=OS["suspended"]),
+             "`suspended` with `installed` clear, a device-side violation of "
+             "SPEC.md 15.6.1: a suspension belongs to a poll set. The record "
+             "is well-formed, so a receiver MUST decode it -- and MUST NOT "
+             "read it as either state, and SHOULD report it as a device "
+             "defect.",
+             refused_by="obd-status-suspended-without-installed",
+             no_roundtrip=True,
+             note="No round-trip: a conforming encoder refuses this state, "
+                  "which is the device-side half of the same rule."),
+        case(schema, "obd_status", "status-reserved-state-bit-set",
+             dict(state=OS["installed"] | (1 << 7)),
+             "A future minor set obd_state bit 7. A decoder MUST ignore the "
+             "unknown bit and report the set installed, and a VTP/1.0 "
+             "encoder MUST normalise the bit away (SPEC.md 2).",
+             canonical=False),
+        case(schema, "obd_status", "status-reserved-bytes-nonzero",
+             dict(state=OS["installed"], reserved_1=0x5A, reserved_2=0xC3A5),
+             "Bytes 1-3 carry something a future minor assigned. A decoder "
+             "MUST ignore them, and a 1.0 encoder MUST normalise them to zero "
+             "(SPEC.md 2).",
+             canonical=False),
+        {"name": "status-short-payload",
+         "desc": "3 bytes. A truncated OBD_STATUS detail MUST be rejected whole.",
+         "record": "obd_status",
+         "hex": encode(schema, "obd_status", dict(state=0))[:-1].hex(),
+         "must_reject": "length"},
+        {"name": "status-long-payload",
+         "desc": "5 bytes. obd_status is a fixed-size record with no extension "
+                 "mechanism, so trailing bytes MUST be rejected.",
+         "record": "obd_status",
+         "hex": (encode(schema, "obd_status", dict(state=0)) + b"\x00").hex(),
+         "must_reject": "length"},
+    ]
+
     # ---- Control response envelope ---------------------------------------
     def resp(opcode, tag, status, detail=b""):
         return bytes([opcode, tag, status]) + detail
@@ -2841,6 +2904,14 @@ def vectors(schema):
     # emit a perfectly valid frame for a DIFFERENT one, and no decode input
     # reaches that.
     files["encoders.json"] = [
+        {"name": "obd-status-suspended-without-installed",
+         "record": "obd_status", "must_refuse": True,
+         "vector": "status-suspended-without-installed",
+         "desc": "SPEC.md 15.6.1 -- `suspended` without `installed`. A "
+                 "suspension belongs to a poll set, so this state names "
+                 "neither of the two a client must choose between: waiting "
+                 "on a sleeping car, or re-arming a set that is gone.",
+         "input": dict(state=2)},
         {"name": "power-percent-above-full",
          "record": "power_state", "must_refuse": True, "vector": "percent-above-full",
          "desc": "SPEC.md 9.7 -- a percent of 200 with its validity bit set. "

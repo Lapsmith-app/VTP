@@ -503,6 +503,93 @@
       "record": "obd_info",
       "hex": "0101df0700007dfc15c801e005887e0921000000e807000000",
       "must_reject": "length"
+    },
+    {
+      "name": "status-nothing-installed",
+      "desc": "No poll set. The device transmits nothing under the poll loop, and a client whose stream went silent while it believed a set was installed has lost it -- the case for re-arming (SPEC.md 15.6.1).",
+      "record": "obd_status",
+      "hex": "00000000",
+      "expect": {
+        "state": 0,
+        "reserved_1": 0,
+        "reserved_2": 0
+      }
+    },
+    {
+      "name": "status-polling",
+      "desc": "A poll set installed and not suspended: what `polling` says on every batch, available while there are none.",
+      "record": "obd_status",
+      "hex": "01000000",
+      "expect": {
+        "state": 1,
+        "reserved_1": 0,
+        "reserved_2": 0
+      }
+    },
+    {
+      "name": "status-suspended",
+      "desc": "A poll set installed and suspended on a bus that acknowledged nothing (SPEC.md 15.1.1). The client waits rather than re-arms: the device is already listening, and re-offering.",
+      "record": "obd_status",
+      "hex": "03000000",
+      "expect": {
+        "state": 3,
+        "reserved_1": 0,
+        "reserved_2": 0
+      },
+      "note": "The case the opcode exists for. On the stream this state is indistinguishable from the first one -- no batches -- and the two need opposite recoveries."
+    },
+    {
+      "name": "status-suspended-without-installed",
+      "desc": "`suspended` with `installed` clear, a device-side violation of SPEC.md 15.6.1: a suspension belongs to a poll set. The record is well-formed, so a receiver MUST decode it -- and MUST NOT read it as either state, and SHOULD report it as a device defect.",
+      "record": "obd_status",
+      "hex": "02000000",
+      "expect": {
+        "state": 2,
+        "reserved_1": 0,
+        "reserved_2": 0
+      },
+      "note": "No round-trip: a conforming encoder refuses this state, which is the device-side half of the same rule.",
+      "no_roundtrip": true
+    },
+    {
+      "name": "status-reserved-state-bit-set",
+      "desc": "A future minor set obd_state bit 7. A decoder MUST ignore the unknown bit and report the set installed, and a VTP/1.0 encoder MUST normalise the bit away (SPEC.md 2).",
+      "record": "obd_status",
+      "hex": "81000000",
+      "expect": {
+        "state": 129,
+        "reserved_1": 0,
+        "reserved_2": 0
+      },
+      "canonical": false,
+      "expect_roundtrip_hex": "01000000"
+    },
+    {
+      "name": "status-reserved-bytes-nonzero",
+      "desc": "Bytes 1-3 carry something a future minor assigned. A decoder MUST ignore them, and a 1.0 encoder MUST normalise them to zero (SPEC.md 2).",
+      "record": "obd_status",
+      "hex": "015aa5c3",
+      "expect": {
+        "state": 1,
+        "reserved_1": 90,
+        "reserved_2": 50085
+      },
+      "canonical": false,
+      "expect_roundtrip_hex": "01000000"
+    },
+    {
+      "name": "status-short-payload",
+      "desc": "3 bytes. A truncated OBD_STATUS detail MUST be rejected whole.",
+      "record": "obd_status",
+      "hex": "000000",
+      "must_reject": "length"
+    },
+    {
+      "name": "status-long-payload",
+      "desc": "5 bytes. obd_status is a fixed-size record with no extension mechanism, so trailing bytes MUST be rejected.",
+      "record": "obd_status",
+      "hex": "0000000000",
+      "must_reject": "length"
     }
   ]
 }

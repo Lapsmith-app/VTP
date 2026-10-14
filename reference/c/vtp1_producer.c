@@ -490,6 +490,13 @@ static void do_power_state(const jctx *c, const jv *in) {
     encoded(vtp_encode_power_state(&p, out, sizeof out), out);
 }
 
+static void do_obd_status(const jctx *c, const jv *in) {
+    vtp_obd_status_t s;
+    memset(&s, 0, sizeof s);
+    s.state = (uint8_t)jint(c, in, "state");
+    encoded(vtp_encode_obd_status(&s, out, sizeof out), out);
+}
+
 static void do_gnss_aid_caps(const jctx *c, const jv *in) {
     vtp_gnss_aid_caps_t a;
     memset(&a, 0, sizeof a);
@@ -595,6 +602,7 @@ int main(void) {
         else if (!strcmp(record, "aid_begin_result")) do_aid_begin_result(&ctx, in);
         else if (!strcmp(record, "aid_commit_result")) do_aid_commit_result(&ctx, in);
         else if (!strcmp(record, "obd_info"))         do_obd_info(&ctx, in);
+        else if (!strcmp(record, "obd_status"))       do_obd_status(&ctx, in);
         else printf("{\"ok\":false,\"reason\":\"harness: no encoder for record\"}\n");
         fflush(stdout);
     }

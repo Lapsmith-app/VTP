@@ -8,6 +8,82 @@ conformance vector.
 
 ## [Unreleased]
 
+### §15.1.1: a bus nobody acknowledges suspends the poll set, and `OBD_STATUS` says so
+
+Reported from both ends of the link: the first device firmware and its
+client, after a track day. The driver switched the ignition off at the end
+of each session with a poll set installed. Nothing acknowledged the pending
+request. The controller went error-passive in about 4 ms and, as ISO
+11898-1 allows a lone node, repeated the frame for as long as the set
+stayed installed. §15.1 told the device to hold it, and RATIONALE §11.8
+had declined a bound. The client could not see the condition: a sleeping
+bus flushes no batches, and the polling flag stays set. So it recovered
+the way it would from a device that had lost its set, with `CAN_RESET`
+and a re-arm, and put the same frame back on the bus at 4, 8, 16 and 32 s.
+
+§15 now says:
+
+- **A request is unacknowledged** once it has pended for
+  `OBD_RESPONSE_TIMEOUT_MS` with nothing received in the last
+  `OBD_RESPONSE_TIMEOUT_MS` (§15.1.1). A device MAY judge it sooner, when
+  its controller enters error-passive after the hand-over with nothing
+  received since. Ending the request abandons it for §15.1's bounds and
+  §15.4's pacing, so the loop is released. Both tests need silence, which
+  keeps them off a loaded bus where `0x7DF` merely loses arbitration.
+- **A device MUST then suspend the poll set** (§15.1.1). It ends the frame
+  as §15.2 ends a probe's, keeps the set, and transmits nothing more. The
+  suspension ends when a frame is received, when a re-offer is
+  acknowledged, or when the client installs a non-empty poll set. Every
+  §15.7 edge also ends it, by clearing the set. Suspension is not an edge:
+  the probe result, §15.5's fallback and the polling flag all stand.
+- **Re-offers** are one poll request each, judged the same way. A device
+  SHOULD make them and MUST NOT make them sooner than 15 s after the
+  suspension began, 30 s after the first, and 60 s after each one after
+  that. They exist for a gatewayed port, which can wake and send nothing.
+  On a sleeping bus, what a device transmits goes from continuous to one
+  request's attempts at 15, 45 and 105 s and then once a minute.
+- **`OBD_STATUS` (`0x62`)** is a new read, owned by `obd`, answered with a
+  4-byte `obd_status` record whose `state` carries `installed` and
+  `suspended` (§15.6.1). `suspended` without `installed` is a content
+  rule: decoded and flagged, refused by encoders. There is no suspension
+  bit on the stream, because a suspension ends on the first frame
+  received, so no batch flushed during one could say anything current.
+- **Clients are told what to do with silence** (§15.6.1). Ask before
+  re-arming. Do not re-arm a suspended set on a timer. A `CAN_RESET` to
+  recover from a sleeping car trades a suspension that would have ended by
+  itself for a re-arm that suspends again.
+- **The polling flag means a poll set is installed** (§15.6): polling, or
+  suspended and waiting to.
+- **Suspension is not bus-off** (§15.7). Resuming from one is not resuming
+  after bus-off, and a controller that reaches bus-off while suspended
+  clears the set like any other. It is not §15.8's tester inference either.
+- §15.2 lets a probe conclude early on the same error-passive evidence.
+  §15.4 says a re-install ends a suspension and stays retry-safe, and §9.4's
+  table carries both opcodes.
+
+RATIONALE §11.10 records why: suspension rather than the bound §11.8
+declined; a MUST rather than the reporter's MAY; why the set is kept
+rather than cleared as bus-off clears it; why the floors are fixed and
+capped at a minute; and why an opcode rather than `can_header.flags` bit 2.
+§11.8 now notes the bound it missed.
+
+On the wire this is one new opcode and one new record. No existing field,
+enum value, UUID or vector moves. The corpus gains eight `obd_status`
+vectors, two of them must-reject lengths and one the content rule, plus
+two producer cases (the refusal, and reserved state bits zeroed). The
+corpus is now 180 vectors across 14 record types, and 72 producer cases.
+Both reference codecs implement it.
+
+The reference peripheral now models a car that switches off. Run it with
+`--ignition ON:OFF`, add `--gatewayed` for a port that broadcasts nothing,
+or call `set_bus_awake()` in a test. Asleep, a handed-over request pends,
+the set suspends, re-offers land on the floors, and the first frame from
+the waking car resumes polling. The selftest pins each of those, and the
+probe of a sleeping car. The harness gains `obd.status`, checked in the
+states a live bus produces, with four seeded faults. Suspension on a real
+controller remains a bench measurement, and RATIONALE's closing section
+now says which part.
+
 ### §9.4: a full transmit pool is a reason to hold a response, not to refuse a request
 
 Reported from the first VTP/1 device firmware, and found on a bench rather
@@ -209,8 +285,7 @@ can contradict the record it rides on — plus three producer cases: two
 refusals and one that goes the other way, because no refusal can assert that
 the truncated record is legal. An encoder that refuses `truncated` outright
 leaves a device on a nine-ECU bus with no conforming answer at all, and fails
-that one. The corpus is 172 vectors and 70 producer cases. Reasoning in the
-RATIONALE contradictions section.
+that one. Reasoning in the RATIONALE contradictions section.
 
 The reference peripheral implements the selection rather than describing it:
 `_obd_probe` fixes the reported set from the PID `0x00` window, unions only

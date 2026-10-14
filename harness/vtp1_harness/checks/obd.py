@@ -18,6 +18,8 @@ from . import Fail, Observe, Skip, check
 POLLING = 1 << refdec.bit("can_flags", "polling")
 RESPONDED = 1 << refdec.bit("obd_validity", "responded")
 TRUNCATED = 1 << refdec.bit("obd_validity", "truncated")
+INSTALLED = 1 << refdec.bit("obd_state", "installed")
+SUSPENDED = 1 << refdec.bit("obd_state", "suspended")
 #: SPEC.md §15.2 -- the most ECUs one obd_probe record can name.
 MAX_ECUS = 8
 
@@ -596,6 +598,115 @@ async def obd_reset_stops(s):
                             struct.pack("<HB", 0, 0))
         except ControlTimeout:
             pass
+
+
+async def _obd_status(c, when):
+    """One OBD_STATUS, decoded, with SPEC.md 15.6.1's record rules applied.
+
+    Returns the state byte. Every way the answer itself can be wrong is a
+    Fail here, so the caller only has to say what the state should be."""
+    try:
+        r = await c.request(refdec.OPCODE["OBD_STATUS"])
+    except ControlTimeout:
+        raise Fail(f"OBD_STATUS {when} went unanswered; §9 requires a "
+                   f"response to every request a device applies") from None
+    if not r.ok:
+        raise Fail(
+            f"OBD_STATUS {when} was answered {r.status_name} on a device "
+            f"that declares `obd`. §9 makes the bit the opcode's owner, and "
+            f"§15.6.1 is the one way a client can tell a sleeping car from "
+            f"a lost poll set", response=r.raw.hex())
+    try:
+        st = r.detail_as("obd_status")
+    except refdec.Reject as exc:
+        raise Fail(f"the obd_status detail {when} did not decode: {exc}",
+                   detail=r.detail.hex()) from None
+    problems = []
+    reserved = st["state"] & refdec.reserved_mask("obd_state", 8)
+    if reserved:
+        problems.append(f"obd_status.state has reserved bits set "
+                        f"({reserved:#04x}); §2 -- MUST be zero on transmit")
+    if st["reserved_1"] or st["reserved_2"]:
+        problems.append(f"obd_status reserved bytes are "
+                        f"{st['reserved_1']:#04x}, {st['reserved_2']:#06x}; "
+                        f"§2 -- MUST be zero on transmit")
+    if st["state"] & SUSPENDED and not st["state"] & INSTALLED:
+        problems.append("`suspended` is set and `installed` is not; §15.6.1 "
+                        "-- a suspension belongs to a poll set, and this "
+                        "state names neither of the two a client must "
+                        "choose between")
+    if problems:
+        raise Fail(f"OBD_STATUS {when}: " + "; ".join(problems),
+                   detail=r.detail.hex())
+    return st["state"]
+
+
+@check(id="obd.status", section="15.6.1", phase="control", severity="MUST",
+       requires=("obd",), adversarial=True,
+       title="OBD_STATUS says installed exactly while a poll set is, and "
+             "not suspended while the car answers")
+async def obd_status(s):
+    c = _control(s)
+    # The idle half needs no probe: the empty set is accepted whatever the
+    # probe state (§15.4), so OBD_STATUS is asked even where OBD_INFO failed.
+    probe = s.state.get("obd_probe")
+    stop = struct.pack("<HB", 0, 0)
+    r = await c.request(refdec.OPCODE["OBD_POLL_SET"], stop)
+    if not r.ok:
+        raise Fail(f"the empty poll set was answered {r.status_name}; "
+                   f"§15.4 -- it is always accepted")
+    if await _obd_status(c, "with no poll set") & INSTALLED:
+        raise Fail("OBD_STATUS reports a poll set installed after the empty "
+                   "set cleared it; §15.6.1 -- `installed` is what the "
+                   "polling flag would say now, and a client reading it "
+                   "would wait on a car for a set that is gone")
+    if probe is None or not probe["probe"]["validity"] & RESPONDED:
+        return      # the idle state is all a car that answered nothing has
+    supported = next((pid for pid in range(0x01, 0x61)
+                      if _union_bit(probe, pid)), None)
+    if supported is None:
+        return
+    ecu_ids = {e["id"] for e in probe["ecus"]}
+    interval = 25
+    log = s.streams["can"]
+    try:
+        r = await c.request(
+            refdec.OPCODE["OBD_POLL_SET"],
+            struct.pack("<HB", interval, 1) + _schedule([supported]))
+        if not r.ok:
+            raise Fail(f"a poll set the probe verified was answered "
+                       f"{r.status_name}")
+        t0 = time.monotonic()
+        await asyncio.sleep(max(6 * interval / 1000, 0.4))
+        state = await _obd_status(c, "while polling")
+        answered = False
+        for n in log.since(t0):
+            try:
+                batch = refdec.decode("can_batch", n.payload)
+            except refdec.Reject:
+                continue
+            if any(_identity(rec) in ecu_ids for rec in batch["records"]):
+                answered = True
+                break
+        if not state & INSTALLED:
+            raise Fail("OBD_STATUS reports nothing installed while a poll "
+                       "set is; §15.6.1 -- a client that believed it would "
+                       "re-arm a set it already has, and a client that "
+                       "re-arms into silence is the one §15.6.1 warns about")
+        if answered and state & SUSPENDED:
+            raise Fail("OBD_STATUS reports the set suspended while the car "
+                       "is answering it; §15.1.1 -- a suspension needs a bus "
+                       "that acknowledges nothing, and a client told the car "
+                       "is asleep stops trusting a stream that is flowing")
+    finally:
+        try:
+            await c.request(refdec.OPCODE["OBD_POLL_SET"], stop)
+        except ControlTimeout:
+            pass
+    if await _obd_status(c, "after the stop") & INSTALLED:
+        raise Fail("OBD_STATUS still reports a poll set installed after the "
+                   "empty set stopped it; §15.6.1 -- `installed` is what "
+                   "the polling flag would say now")
 
 
 # --- SPEC.md 15.4.1: PID grouping ------------------------------------------

@@ -350,6 +350,19 @@ int vtp_decode_obd_info(const uint8_t *buf, size_t len,
  * validated by vtp_decode_obd_info. */
 void vtp_obd_ecu_at(const uint8_t *buf, uint8_t index, vtp_obd_ecu_t *out);
 
+/* SPEC.md §15.6.1 -- the detail of an OBD_STATUS response: what the poll
+ * loop is doing, measured when asked. State bits, not validity: clear is an
+ * answer. `suspended` without `installed` is a content rule the decoder
+ * deliberately does not reject (§1.1's split); the encoder refuses it. */
+typedef struct {
+    uint8_t  state;            /* bitmask obd_state */
+    uint8_t  reserved_1;       /* Appendix A holds it; MUST be ignored on receive */
+    uint16_t reserved_2;       /* likewise */
+} vtp_obd_status_t;
+
+int vtp_decode_obd_status(const uint8_t *buf, size_t len,
+                          vtp_obd_status_t *out, const char **err);
+
 /* SPEC.md §9.5 -- two readings of the device clock, so a client can take the
  * device's own processing time out of the round trip and bound its error. */
 typedef struct {

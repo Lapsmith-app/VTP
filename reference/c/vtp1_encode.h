@@ -76,6 +76,10 @@ int vtp_encode_obd_info(const vtp_obd_probe_t *probe,
                         const vtp_obd_ecu_t *ecus,
                         uint8_t *out, size_t cap);
 
+/* SPEC.md §15.6.1. Reserved state bits are written as zero. `suspended`
+ * without `installed` is refused: a suspension belongs to a poll set. */
+int vtp_encode_obd_status(const vtp_obd_status_t *s, uint8_t *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

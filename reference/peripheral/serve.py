@@ -1328,7 +1328,14 @@ async def main_async(args):
 
     device = dev.VtpDevice(mtu=args.mtu, gps_hz=args.gps_hz,
                            imu_hz=args.imu_hz, can_scale=args.can_scale,
-                           can_rates=dict(args.can_rate or ()))
+                           can_rates=dict(args.can_rate or ()),
+                           gatewayed=args.gatewayed, ignition=args.ignition)
+    if args.ignition:
+        log.info("the synthetic car's ignition cycles: on for %g s, off for "
+                 "%g s. A poll set installed across an off period is "
+                 "suspended and resumed (SPEC.md 15.1.1)%s", *args.ignition,
+                 "; the port is gatewayed, so only a re-offer can resume it"
+                 if args.gatewayed else "")
 
     bus = device.can_bus_rates(poll_hz=POLL_HZ)
     unknown = sorted(set(device.can_rates) - {cid for cid, _n, _e in bus})
@@ -1395,6 +1402,14 @@ def _positive_float(text):
     return value
 
 
+def _ignition(text):
+    """`ON:OFF` in seconds, both above zero."""
+    on, sep, off = text.partition(":")
+    if not sep:
+        raise argparse.ArgumentTypeError(f"expected ON:OFF, got {text!r}")
+    return _positive_float(on), _positive_float(off)
+
+
 def _can_rate(text):
     """`ID=HZ`, the id in any base Python reads, so 0x0C0 and 192 both work."""
     cid, sep, hz = text.partition("=")
@@ -1433,6 +1448,18 @@ def main():
                     help="give one CAN id an explicit rate, overriding its "
                          "natural rate and --can-scale both, e.g. "
                          "--can-rate 0x0C0=200. Repeatable")
+    ap.add_argument("--ignition", type=_ignition, metavar="ON:OFF",
+                    help="cycle the synthetic car's ignition, on for ON "
+                         "seconds and off for OFF, e.g. --ignition 120:60. "
+                         "Off, the bus carries and acknowledges nothing, so "
+                         "an installed poll set is suspended (SPEC.md "
+                         "15.1.1) -- the state a client sees at a track day "
+                         "between sessions. Default: always on")
+    ap.add_argument("--gatewayed", action="store_true",
+                    help="model a gatewayed OBD port: the ECUs answer "
+                         "requests and nothing else is broadcast, so a "
+                         "waking car sends a suspended poll set nothing to "
+                         "receive and only a re-offer resumes it")
     ap.add_argument("--no-display", action="store_true",
                     help="run headless; do not open the device screen")
     ap.add_argument("--encrypt", choices=ENCRYPTION_POSTURES,

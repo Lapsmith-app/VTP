@@ -374,6 +374,10 @@ FAULTS = {
     "obd_accepts_bad_group": "SPEC.md §15.4.1 — a group of seven PIDs, and a group left open past the end of the list, are both answered ok",
     "obd_ignores_group_minimum": "SPEC.md §15.4.2 — every group is transmitted every pass whatever minimum interval it was given",
     "obd_splits_groups": "SPEC.md §15.4.1 — bit 7 is parsed and answered ok, then the group's PIDs are scheduled individually: half the rate the client asked for, with nothing on the wire to say so",
+    "obd_status_unsupported": "SPEC.md §15.6.1 — OBD_STATUS refused by a device that declares the capability owning it",
+    "obd_status_stale_installed": "SPEC.md §15.6.1 — `installed` stays set after the poll set clears, so a client that lost its set is told to wait for a sleeping car",
+    "obd_status_suspended_awake": "SPEC.md §15.6.1 — `suspended` reported while the car is answering the poll set",
+    "obd_status_reserved_nonzero": "SPEC.md §15.6.1 — the reserved bytes of obd_status are not zero",
     # The four below are SCENARIO seeds, not matrix faults: none violates a
     # rule any single check can catch on its own. The first is a CONFORMING
     # car whose polled PID nothing answers (§15.4 makes that gap legal, so the
@@ -1559,6 +1563,28 @@ class LoopbackTransport(Transport):
             return bytearray(
                 response[:2]
                 + bytes([refdec.STATUS_VALUE["unsupported_opcode"]]))
+        if opcode == refdec.OPCODE["OBD_STATUS"]:
+            if "obd_status_unsupported" in self.faults:
+                return bytearray(
+                    response[:2]
+                    + bytes([refdec.STATUS_VALUE["unsupported_opcode"]]))
+            at = 3 + refdec.offset("obd_status", "state")
+            if status == 0 and "obd_status_stale_installed" in self.faults:
+                # A device that sets the bit on the first install and never
+                # clears it again.
+                self._obd_ever_installed = (
+                    getattr(self, "_obd_ever_installed", False)
+                    or bool(getattr(self.device, "_obd_poll", ())))
+                if self._obd_ever_installed:
+                    response[at] |= 1 << refdec.bit("obd_state", "installed")
+            if status == 0 and "obd_status_suspended_awake" in self.faults \
+                    and response[at] & (1 << refdec.bit("obd_state",
+                                                        "installed")):
+                response[at] |= 1 << refdec.bit("obd_state", "suspended")
+            if status == 0 and "obd_status_reserved_nonzero" in self.faults:
+                struct.pack_into(
+                    "<H", response,
+                    3 + refdec.offset("obd_status", "reserved_2"), 0xBEEF)
         if opcode == refdec.OPCODE["OBD_INFO"] and status == 0:
             base = 3
             if "obd_responded_without_ecus" in self.faults:

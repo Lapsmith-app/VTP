@@ -1194,8 +1194,8 @@ declaration would otherwise be weaker than it looks:
   bit while the switch is set, so the declaration tracks the hardware state
   it claims to describe.
 - **The flag makes it observable** (SPEC §15.6). A capability bit is a
-  statement of what a device may do; `can_flags` bit 1 states what it is
-  doing, on every batch, to anyone reading the stream — including a client
+  statement of what a device may do; `can_flags` bit 1 states what it has
+  been asked to do — a poll set installed — on every batch, to anyone reading the stream — including a client
   that never sent `OBD_POLL_SET` and a tool inspecting a log after the
   fact. The stop rules of SPEC §15.7 are auditable because the flag's
   falling edge is on the wire.
@@ -1519,6 +1519,14 @@ what a section wants, is not one this specification should write.
 The three places this section says "withdraws" are the three places the
 next section replaced the word.
 
+**The first decline was right about the bound it examined, and §11.10 is the
+one it missed.** It priced a timer that withdraws the pending frame and lets
+the loop hand over the next — a controller abort every 100 ms that changes
+nothing on the wire — and that bound would still change nothing. What it did
+not consider was a timer that withdraws the frame and *stops*. It also
+treated a bus with no node awake as a bench oddity, and a track day showed it
+to be every car after every session.
+
 ### 11.9 Why a pending frame has a deadline rather than a withdrawal
 
 Reported from the same firmware once the transport was being specified:
@@ -1583,6 +1591,128 @@ has no end. Whether a given driver's stop actually ends a pending frame on
 such a bus is a bench measurement, and the check is the one SPEC §15.7 now
 names — a capture after the edge shows the frame within the window, or
 never.
+
+### 11.10 Why a bus nobody acknowledges suspends the poll set, and why the client asks
+
+Reported from both ends of the link at once — the first device firmware and
+its client — after a track day. A poll set was installed when the driver
+switched the ignition off at the end of each session. Nothing acknowledged
+the pending request, the controller was error-passive within about 4 ms,
+and, because ISO 11898-1 stops the error counter climbing there when the
+only fault is a missing acknowledgement, it never reached bus-off. It
+repeated one frame for as long as the set stayed installed. The client saw
+the stream go silent and recovered the way a careful client would:
+`CAN_RESET`, then `OBD_POLL_SET` to re-arm what the reset had cleared. Each
+re-arm put the same unacknowledged frame straight back on a bus nobody was
+listening to, at 4, 8, 16 and 32 s, after all five sessions that day.
+
+Neither end could fix it within SPEC §15 as written. The device was holding
+the frame because SPEC §15.1 told it to, and §11.8 had declined the bound.
+The client could not see the condition at all: a sleeping bus produces no
+batches, SPEC §6.2 forbids an empty one, and the polling flag stays set
+because the set is non-empty. Silence was all it had, and silence looks
+exactly like the device-lost-its-set case that the reset-and-re-arm recovery
+exists for.
+
+**Suspension, not a bound.** §11.8 declined to withdraw the pending frame
+because the next one pends identically. That is true only if the loop goes
+on handing frames over. SPEC §15.1.1 withdraws the frame and *stops*: it
+keeps the set, transmits nothing until something says a node is awake, and
+re-offers at a floor. The trigger is the argument §11.9 already made for the
+stop rules: any awake node acknowledges a well-formed frame, so a frame still
+pending after `OBD_RESPONSE_TIMEOUT_MS` is on a bus with no node awake.
+§11.8's worry about single-shot transmission was a loaded bus, where `0x7DF`
+loses arbitration routinely. That bus is carrying other nodes' traffic, so
+the trigger requires silence as well: nothing received in the same window.
+The reporter's firmware tested "nothing received since hand-over". The
+specification tests the window instead. Under the reporter's test, a bus
+that falls silent while a frame is already pending behind other traffic has
+always heard something since the hand-over, and that frame would hold
+forever. The device's earlier judgement on its controller going
+error-passive is allowed as a MAY. It carries the same silence condition,
+and it gets a probe of a sleeping car answered in about 10 ms rather than
+about 240.
+
+**A MUST, where the reporter proposed a MAY.** A permission leaves every
+client handling two kinds of device: one that suspends and one that holds
+the frame indefinitely. The client cannot tell which it has without the
+status this section adds, and the only recovery that works on both is the
+probe cadence the reporter's client had to invent. The cost of the
+requirement is small and falls on what a device already has. SPEC §15.7 and
+SPEC §15.2 already require it to end a pending frame by whatever its stack
+offers, and a flag recording whether anything was received is the whole of
+the rest. The continuous repetition is also worse than a stall. It is a
+frame put onto a parked car's bus, unacknowledged, for as long as a phone
+stays in range of the dongle. On a car whose transceivers wake on bus
+activity, it is a reason for that car not to sleep.
+
+**Why the set is kept rather than cleared.** Bus-off clears the set
+(SPEC §15.7), and clearing is the simpler state machine. But bus-off clears it
+because the device can no longer speak on the bus. Here the device can
+speak, and nobody is listening. Clearing would hand recovery to the party
+that cannot see the car wake. A gatewayed port shows the client nothing at
+all, and a backgrounded phone may not be running timers when the driver
+turns the key. The device sees the first frame within milliseconds and
+resumes on it. That is not the "no state in which a VTP/1 device transmits
+and no connected client asked it to" that SPEC §15.7 forbids: the client is
+connected, its set is installed, and it never withdrew it. Suspension is
+the hold §11.8 required, made quiet.
+
+**Re-offers, and why their floors are numbers.** Resuming on a received
+frame covers every car that broadcasts when it wakes. It does not cover a
+gatewayed port, which answers diagnostics and forwards nothing else. So a
+suspended device offers one request occasionally, at floors of 15, 30 and
+then 60 s. The floors are the reporter's, and they are constants for the
+reason `OBD_RESPONSE_TIMEOUT_MS` is (SPEC §15.1): a second timing knob is a
+second thing to guess wrong. Doubling stops at a minute because uncapped
+doubling makes a car's wait to be polled again proportional to how long it
+slept. After a 30-minute session break that wait would be another 30
+minutes, on exactly the car that cannot announce it woke. A re-offer was
+checked against SPEC §15.1's "no keep-alive, no wake-up sequence". It is
+neither. It is a poll request under a set the client installed, and it is
+the frame the hold used to repeat continuously, now offered at most once a
+minute. What a suspended device puts on a sleeping bus can therefore be
+stated: one request's link-layer attempts for about 100 ms, at 15, 45 and
+105 s at the earliest, then no oftener than once a minute.
+
+**Why the client is told by an opcode, not a batch flag.** The reporter's
+device proposed `can_header.flags` bit 2, and its own client explained why
+that is not enough: a suspended device on a sleeping bus flushes no
+batches. The objection is stronger than "usually". Suspension ends on the
+first frame received, so a batch flushed during a suspension can only carry
+frames from before it. The bit would mark a straggler, never the moment a
+client is deciding what silence means. The question has to be asked, and
+then the shape follows from the existing opcodes. `OBD_INFO` clears the set
+it would be asking about. Re-sending `OBD_POLL_SET` ends the suspension it
+would be asking about. `GET_POWER` belongs to another role. So the answer
+is a new read, `OBD_STATUS`, measured when asked like `GET_POWER`.
+SPEC §15.4 refused a read-back of the poll set on the grounds that the client
+installed it and knows it. That argument does not reach suspension: it is
+the device's observation of the bus, not something the client did, and
+measuring when asked is exactly what that shape is for. `installed`
+duplicates the polling flag on purpose. The flag rides on batches, and the
+moment a client needs it is the moment there are none.
+
+**What the client is told to do.** The reporter's client learned the
+guidance in SPEC §15.6.1 the hard way, and it belongs in the specification
+rather than rediscovered by each client. Ask before re-arming into silence.
+Do not re-arm a suspended set on a timer, because the device is already
+listening and re-offering, and each re-arm is one more offer onto a bus that
+has acknowledged nothing. Do not `CAN_RESET` a sleeping car: that trades a
+suspension that ends by itself for a re-arm that suspends again. A client
+with its own evidence that the car is awake may still re-arm, and the device
+offers at once. Re-installing a set therefore stays retry-safe (SPEC §9.4),
+at a bounded cost.
+
+**What it costs.** One opcode and a 4-byte record. A state in the poll loop.
+On a car that wakes silently, up to a minute before polling resumes, unless
+the client re-arms. A device must keep receiving through a suspension, so a
+car left overnight with a client connected keeps the dongle awake. That
+belongs to the client's set, and the empty set is how a client lets the
+device sleep. Declined: clearing the polling flag while suspended (the flag
+says the set is installed, which is still true); a suspension bit on the
+stream (above); and hardware single-shot transmission, for §11.8's reasons
+unchanged.
 
 ---
 
@@ -1785,16 +1915,22 @@ SPEC.md §8.2 and SPEC.md §9.2 exist to prevent and no client can detect.
 This is a property of that backend, not of VTP/1. A BlueZ peripheral has a real
 `InterfacesRemoved` signal and needs none of it.
 
-The synthetic CAN bus has no link layer. Every frame the device hands over is
-acknowledged at the instant it is handed over, so the two instants SPEC §15.1
-distinguishes — hand-over and acknowledgement — coincide, a frame is never
-pending, and nothing there can exercise the rules that follow from the
-difference: the poll loop waiting on a pending frame, the probe treating
-one still pending at `OBD_RESPONSE_TIMEOUT_MS` as unanswered, SPEC §15.7's
-deadline on one when the poll set clears. The harness's loopback transport
-is the same bus, so it cannot
-either. Those rules are tested by a controller on a bus with no other node on
-it, which only a device can be plugged into.
+The synthetic CAN bus has one link-layer state. Awake, every frame the device
+hands over is acknowledged at the instant it is handed over, so the two
+instants SPEC §15.1 distinguishes — hand-over and acknowledgement —
+coincide, and a frame never pends behind other traffic. The loop waiting on
+such a frame is therefore untestable there. Asleep (`--ignition`, or
+`set_bus_awake(False)` in a test), the bus acknowledges nothing and carries
+nothing. A handed-over frame pends, and the rules about a bus with no node
+awake become reachable: SPEC §15.1.1's suspension, its re-offers and every
+way it ends, and the probe concluding `responded` clear. The selftest pins
+those timings. What remains a bench measurement is the controller itself:
+how fast a real part reaches error-passive, how many attempts it makes
+before it does, and whether its driver's stop actually ends a frame on a
+bus that never acknowledges (§11.9). The harness's loopback transport drives
+the awake bus and never puts it to sleep, because no check can ask a real
+device's car to switch off. `OBD_STATUS` is checked there in the states a
+live bus produces, and suspension itself is checked on a bench.
 
 The loopback transport has no transmit pool either: every hand-over is taken
 the instant it is offered, so a device holding a response the transport

@@ -87,6 +87,7 @@ GNSS_AID_BEGIN = _OPCODE["GNSS_AID_BEGIN"]
 GNSS_AID_COMMIT = _OPCODE["GNSS_AID_COMMIT"]
 OBD_INFO = _OPCODE["OBD_INFO"]
 OBD_POLL_SET = _OPCODE["OBD_POLL_SET"]
+OBD_STATUS = _OPCODE["OBD_STATUS"]
 
 #: handle_control's answer when the response is not ready to send yet.
 #: SPEC.md 15.2 -- the OBD_INFO response reports a COMPLETED probe, so it is
@@ -202,6 +203,14 @@ OBD_POLL_SLOTS = 16
 # ISO 15765-4's P2max of 50 ms: a logger that gives up on a slow gatewayed ECU
 # has lost the reading a tester would have waited for.
 OBD_RESPONSE_TIMEOUT_US = 100_000
+# SPEC.md 15.1.1 -- the floors on a suspended device's re-offers: the first no
+# sooner than 15 s after the suspension began, the second 30 s after the
+# first, every later one 60 s after the one before. Constants, like the
+# timeout above, and this build re-offers AT them: waiting longer is legal and
+# only makes a silent car wait as long to be polled again.
+OBD_REOFFER_FIRST_US = 15_000_000
+OBD_REOFFER_SECOND_US = 30_000_000
+OBD_REOFFER_LATER_US = 60_000_000
 # SPEC.md 15.4.1 -- bit 7 of a PID byte groups it with the byte that follows.
 # PIDs are 0x01..0x60, so bit 7 is space that reads zero on a device without
 # capability bit 11 and is refused there by rule 5 as a value out of range.
@@ -234,6 +243,9 @@ OBD_RESPONDED = next(1 << b["bit"]
 OBD_TRUNCATED = next(1 << b["bit"]
                      for b in enc.SCHEMA["bitmasks"]["obd_validity"]["bits"]
                      if b["name"] == "truncated")
+# SPEC.md 15.6.1's obd_state bits.
+OBD_STATE = {b["name"]: 1 << b["bit"]
+             for b in enc.SCHEMA["bitmasks"]["obd_state"]["bits"]}
 
 
 def _pid_mask(base, pids):
@@ -391,8 +403,27 @@ class VtpDevice:
 
     def __init__(self, *, now_us=None, mtu=247, gps_hz=10, imu_hz=100,
                  circuit=None, monitor_channels=None, capabilities=None,
-                 can_scale=1.0, can_rates=None, obd_latency_us=None):
+                 can_scale=1.0, can_rates=None, obd_latency_us=None,
+                 gatewayed=False, ignition=None):
         self._clock = now_us or self._monotonic_us
+        # SPEC.md 15.1.1 -- the synthetic car can be switched off. `ignition`
+        # is an (on_s, off_s) cycle, or None for a car that never sleeps; a
+        # test drives the bus directly with `set_bus_awake`, which overrides
+        # the cycle. Asleep, the bus carries nothing and acknowledges nothing:
+        # no broadcast frames, and a handed-over request PENDS rather than
+        # going out -- the one link-layer state this model has (RATIONALE,
+        # "What the reference peripheral cannot observe").
+        #
+        # `gatewayed` is a port whose gateway answers diagnostic requests and
+        # forwards no broadcast traffic, so an awake car can send a suspended
+        # device nothing to receive. That car is what re-offers are for.
+        self.gatewayed = gatewayed
+        self.ignition = ignition
+        self._bus_awake_override = None
+        # When the controller last received ANY frame, whatever its identifier
+        # and whether or not anything subscribed to it -- the evidence
+        # SPEC.md 15.1.1's tests run on. None means never.
+        self._last_rx_us = None
         self.obd_latency_us = (self.OBD_ECU_LATENCY_US if obd_latency_us is None
                                else obd_latency_us)
         self._origin_ns = time.monotonic_ns()
@@ -992,6 +1023,14 @@ class VtpDevice:
         # transmission just sent, and the loop fires again one tick later: the
         # spacing measured as an alternating 5 ms / 20 ms on a car whose
         # latency is a flat 20. Deliver first, then decide.
+        awake = self.bus_awake(now)
+        # The synthetic bus broadcasts continuously while the car is awake, so
+        # the controller has received a frame at every tick -- whether or not
+        # any subscription forwards one (SPEC.md 15.1.1 counts what the
+        # controller hears, not what the client is sent).
+        broadcasting = awake and not self.gatewayed
+        if broadcasting:
+            self._last_rx_us = now
         obd_frames = (list(self._due_obd_frames(now))
                       if caps & CAP_CAN else [])
 
@@ -1026,27 +1065,36 @@ class VtpDevice:
             # rather than a period. With interval 0 the car is the only pacing
             # there is, which is safe precisely because the first condition
             # waits for it.
-            answered = self._obd_outstanding_since is None
+            # SPEC.md 15.1.1 -- a pending frame goes out the moment a node is
+            # awake to acknowledge it, or is judged unacknowledged and ended.
+            self._obd_settle_pending(now, awake)
+            # Condition 1 of the three that end a suspension: a frame was
+            # received after it began. A node that transmits is awake.
+            if (self._obd_suspended_at is not None
+                    and self._last_rx_us is not None
+                    and self._last_rx_us > self._obd_suspended_at):
+                self._obd_resume()
+            # A pending request is the outstanding one (SPEC.md 15.1), so it
+            # blocks the next exactly as a transmitted one does.
+            answered = (self._obd_outstanding_since is None
+                        and self._obd_pending is None)
             spaced = (self._obd_last_tx_us is None
                       or now - self._obd_last_tx_us >= obd_interval_us)
-            if answered and spaced:
+            suspended = self._obd_suspended_at is not None
+            # Suspended, the only thing offered is a re-offer, at its floor.
+            reoffer_due = (suspended
+                           and now >= self._obd_next_reoffer_us)
+            if answered and spaced and (not suspended or reoffer_due):
                 due = self._obd_next_group(now)
                 if due is not None:
+                    if suspended:
+                        self._obd_reoffers += 1
+                        self._obd_next_reoffer_us = now + (
+                            OBD_REOFFER_SECOND_US if self._obd_reoffers == 1
+                            else OBD_REOFFER_LATER_US)
                     entry, group = due
-                    # SPEC.md 15.1 -- "transmitted" is the acknowledgement.
-                    # The synthetic bus has no link layer (RATIONALE, "What
-                    # the reference peripheral cannot observe"), so `now`
-                    # is that instant here. A real transport stamps the
-                    # three clock readings -- the group's, the spacing's
-                    # and the timeout's -- from its transmit-complete path;
-                    # the answer mark and the outstanding PIDs stay at
-                    # hand-over, where an answer cannot yet have arrived.
-                    entry[2] = now
-                    self._obd_last_tx_us = now
-                    self._obd_outstanding_since = now
-                    self._obd_answer_mark = self._obd_answers
-                    self._obd_outstanding_pids = frozenset(group)
-                    self._obd_transmit(group, now)
+                    self._obd_pending = (entry, group, now)
+                    self._obd_settle_pending(now, awake)
 
         # OBD responses first: anything a probe put on the synthetic bus
         # between polls carries an older bus-arrival time than the broadcast
@@ -1131,6 +1179,10 @@ class VtpDevice:
                                    ks[1]["order"]))[1]
 
     def _due_can_frames(self, now):
+        # A sleeping car broadcasts nothing, and neither does a gateway
+        # (SPEC.md 15.1.1's two cars).
+        if not self.bus_awake(now) or self.gatewayed:
+            return
         for cid, rate_hz, payload in self._bus_frames(now):
             sub = self._governing(cid)
             if sub is None:
@@ -1175,6 +1227,12 @@ class VtpDevice:
         self._obd_index = 0
         if not flush:
             self._obd_rx = []
+        # SPEC.md 15.7 -- a frame still pending on an edge MUST NOT pend past
+        # OBD_RESPONSE_TIMEOUT_MS after it. This bus is asleep whenever one
+        # pends at all, so it is ended now, with nothing to miss. And a
+        # suspension belongs to the set this clears (SPEC.md 15.1.1).
+        self._obd_pending = None
+        self._obd_resume()
         # `_obd_outstanding_since` is NOT cleared, for the reason
         # `_obd_last_tx_us` is not: it is a fact about the BUS, and the bus
         # does not care why the client changed its mind. Clearing it let a
@@ -1186,12 +1244,89 @@ class VtpDevice:
         # request stays outstanding until it is answered or abandoned at
         # OBD_RESPONSE_TIMEOUT_US, exactly as if nothing had happened.
 
+    def bus_awake(self, now=None):
+        """Whether the synthetic car is awake: the test override if one is
+        set, else the ignition cycle, else always (SPEC.md 15.1.1)."""
+        if self._bus_awake_override is not None:
+            return self._bus_awake_override
+        if self.ignition is None:
+            return True
+        now = self.now_us() if now is None else now
+        on_s, off_s = self.ignition
+        return (now / 1e6) % (on_s + off_s) < on_s
+
+    def set_bus_awake(self, awake):
+        """Switch the synthetic car on (True) or off (False); None returns it
+        to the ignition cycle."""
+        self._bus_awake_override = awake
+
+    def _obd_resume(self):
+        """End a suspension, whatever ended it (SPEC.md 15.1.1)."""
+        self._obd_suspended_at = None
+        self._obd_reoffers = 0
+        self._obd_next_reoffer_us = None
+
+    def _obd_settle_pending(self, now, awake):
+        """SPEC.md 15.1.1 -- what becomes of the frame the controller holds.
+
+        On an awake bus it is carried at once: that instant is the
+        acknowledgement, and with it the request is transmitted in SPEC.md
+        15.1's sense. A re-offer carried ends the suspension (condition 2).
+
+        On a sleeping bus it pends until it is unacknowledged -- pended for
+        OBD_RESPONSE_TIMEOUT_MS with nothing received in that time -- and is
+        then ended. It was never transmitted, so nothing about it is stamped:
+        no spacing, no group interval, no outstanding request to abandon. The
+        first such frame suspends the set; one that was a re-offer leaves the
+        suspension, and the re-offer schedule, as they were.
+        """
+        if self._obd_pending is None:
+            return
+        entry, group, handed = self._obd_pending
+        if awake:
+            self._obd_pending = None
+            # SPEC.md 15.1 -- "transmitted" is the acknowledgement. Awake,
+            # this bus acknowledges at once, so `now` is that instant. A real
+            # transport stamps the three clock readings -- the group's, the
+            # spacing's and the timeout's -- from its transmit-complete path;
+            # the answer mark and the outstanding PIDs stay at hand-over,
+            # where an answer cannot yet have arrived.
+            entry[2] = now
+            self._obd_last_tx_us = now
+            self._obd_outstanding_since = now
+            self._obd_answer_mark = self._obd_answers
+            self._obd_outstanding_pids = frozenset(group)
+            self._obd_transmit(group, now)
+            self._obd_resume()
+            return
+        heard = (self._last_rx_us is not None
+                 and now - self._last_rx_us < OBD_RESPONSE_TIMEOUT_US)
+        if now - handed < OBD_RESPONSE_TIMEOUT_US or heard:
+            return
+        self._obd_pending = None
+        if self._obd_suspended_at is None:
+            self._obd_suspended_at = now
+            self._obd_reoffers = 0
+            self._obd_next_reoffer_us = now + OBD_REOFFER_FIRST_US
+
+    def obd_status(self):
+        """SPEC.md 15.6.1 -- the obd_state bits, measured now."""
+        state = 0
+        if self._obd_poll:
+            state |= OBD_STATE["installed"]
+            if self._obd_suspended_at is not None:
+                state |= OBD_STATE["suspended"]
+        return state
+
     def _obd_clear(self, *, flush=False):
         """Everything _obd_stop clears, plus the probe result -- the
         connection edges, and a probe nothing answered (SPEC.md 15.2)."""
         self._obd_stop(flush=flush)
         self._obd_masks = None
         self._obd_ecu_ids = frozenset()
+        # What the controller last heard belongs to the connection too: a
+        # stale reading would steer SPEC.md 15.1.1's tests on the next one.
+        self._last_rx_us = None
         # A pending OBD_INFO response belongs to the connection that asked
         # for it: the edges run this, so it dies with the link rather than
         # being handed to the next central as an answer to nothing.
@@ -1425,6 +1560,9 @@ class VtpDevice:
             if t > now:
                 hold.append((t, cid, payload))
                 continue
+            # Received, whatever becomes of it below (SPEC.md 15.1.1).
+            if self._last_rx_us is None or t > self._last_rx_us:
+                self._last_rx_us = t
             if cid in self._obd_ecu_ids and \
                     self._obd_echoed_pid(payload) in self._obd_outstanding_pids:
                 self._obd_answers += 1
@@ -1505,6 +1643,17 @@ class VtpDevice:
         t = max(now, resolved_us)
         if self._obd_last_tx_us is not None:
             t = max(t, self._obd_last_tx_us + step_us)
+        if not self.bus_awake(now):
+            # SPEC.md 15.2 -- nothing acknowledges the probe's frame, so it is
+            # ended still pending at OBD_RESPONSE_TIMEOUT_MS and treated as a
+            # request nothing answered. It was never transmitted: the last
+            # transmission does not move, and the response says `responded`
+            # clear, which is the truth about a sleeping car. (This model has
+            # no 29-bit fallback, so there is one such frame, not two.)
+            self._obd_masks = None
+            self._obd_ecu_ids = frozenset()
+            return (t + OBD_RESPONSE_TIMEOUT_US,
+                    enc.encode_obd_info(dict(validity=0, count=0), []))
         answered = {}
         # SPEC.md 15.2 -- the eight this record can name, fixed by the PID
         # 0x00 window: everything that answers 0x00 is a responder, and the
@@ -1950,7 +2099,20 @@ class VtpDevice:
                 fresh.append([g, m, queue.pop(0) if queue else None])
             self._obd_poll = fresh
             self._obd_interval_ms = interval_ms
+            # SPEC.md 15.1.1, condition 3 -- the client's explicit ask ends a
+            # suspension, and the loop offers a request under the new set at
+            # once. On a car still asleep that one pends, is unacknowledged,
+            # and suspends the set afresh.
+            self._obd_resume()
             return reply(ST_OK)
+
+        if opcode == OBD_STATUS:
+            # SPEC.md 15.6.1 -- parameterless, and a read: it transmits
+            # nothing and changes nothing.
+            if params:
+                return reply(ST_BAD_PARAMS)
+            return reply(ST_OK, enc.encode_obd_status(
+                {"state": self.obd_status()}))
 
         if opcode == MONITOR_LIST:
             # SPEC.md §13.3 — parameterless: the declaration is not paged, so

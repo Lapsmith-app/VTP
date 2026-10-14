@@ -56,7 +56,7 @@ COMPOSITE = {"can_batch": ("can_header", "can_record"),
              "obd_info": ("obd_probe", "obd_ecu")}
 STANDALONE = ("gps_fix", "info", "control_response", "time_sync",
               "power_state", "gnss_aid_caps", "aid_begin_result",
-              "aid_commit_result")
+              "aid_commit_result", "obd_status")
 
 
 def cases():

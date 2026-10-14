@@ -287,6 +287,14 @@ int main(void) {
             put_power_absent(&p);
             finish(enc, vtp_encode_power_state(&p, enc, sizeof enc));
 
+        } else if (!strcmp(record, "obd_status")) {
+            vtp_obd_status_t st;
+            if (vtp_decode_obd_status(buf, len, &st, &err)) { reject(err); continue; }
+            printf("{\"ok\":true,\"state\":%u,\"reserved_1\":%u,"
+                   "\"reserved_2\":%u",
+                   st.state, st.reserved_1, st.reserved_2);
+            finish(enc, vtp_encode_obd_status(&st, enc, sizeof enc));
+
         } else if (!strcmp(record, "gnss_aid_caps")) {
             vtp_gnss_aid_caps_t c;
             if (vtp_decode_gnss_aid_caps(buf, len, &c, &err)) { reject(err); continue; }

@@ -643,6 +643,25 @@ def encode_obd_info(probe, ecus):
     return bytes(out)
 
 
+OBD_STATE_BIT = {b["name"]: 1 << b["bit"]
+                 for b in SCHEMA["bitmasks"]["obd_state"]["bits"]}
+
+
+def encode_obd_status(status):
+    """SPEC.md §15.6.1. The detail of an OBD_STATUS response.
+
+    `suspended` MUST NOT be set unless `installed` is: a suspension belongs to
+    a poll set (§15.1.1). The decoder takes the record as it comes and leaves
+    the flagging to the client; this is the device side of the rule.
+    """
+    state = status.get("state", 0)
+    if state & OBD_STATE_BIT["suspended"] and not state & OBD_STATE_BIT["installed"]:
+        raise EncodeError(
+            "obd_status.state sets suspended without installed; a suspension "
+            "belongs to a poll set (SPEC.md 15.6.1)")
+    return _pack("obd_status", status)
+
+
 # Keyed by the runner-contract record name, so a harness can round-trip a
 # decode without knowing which record it holds.
 ENCODERS = {
@@ -659,4 +678,5 @@ ENCODERS = {
     "aid_begin_result": encode_aid_begin_result,
     "aid_commit_result": encode_aid_commit_result,
     "obd_info": lambda d: encode_obd_info(d["probe"], d["ecus"]),
+    "obd_status": encode_obd_status,
 }
