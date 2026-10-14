@@ -647,9 +647,9 @@ async def _obd_status(c, when):
              "not suspended while the car answers")
 async def obd_status(s):
     c = _control(s)
-    probe = _probe(s)
-    if s.info is None:
-        raise Skip("Info did not decode")
+    # The idle half needs no probe: the empty set is accepted whatever the
+    # probe state (§15.4), so OBD_STATUS is asked even where OBD_INFO failed.
+    probe = s.state.get("obd_probe")
     stop = struct.pack("<HB", 0, 0)
     r = await c.request(refdec.OPCODE["OBD_POLL_SET"], stop)
     if not r.ok:
@@ -660,7 +660,7 @@ async def obd_status(s):
                    "set cleared it; §15.6.1 -- `installed` is what the "
                    "polling flag would say now, and a client reading it "
                    "would wait on a car for a set that is gone")
-    if not probe["probe"]["validity"] & RESPONDED:
+    if probe is None or not probe["probe"]["validity"] & RESPONDED:
         return      # the idle state is all a car that answered nothing has
     supported = next((pid for pid in range(0x01, 0x61)
                       if _union_bit(probe, pid)), None)

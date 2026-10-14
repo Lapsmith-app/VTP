@@ -24,9 +24,11 @@ and a re-arm, and put the same frame back on the bus at 4, 8, 16 and 32 s.
 §15 now says:
 
 - **A request is unacknowledged** once it has pended for
-  `OBD_RESPONSE_TIMEOUT_MS` with nothing received in that time (§15.1.1).
-  A device MAY judge it sooner, when its controller reports error-passive
-  with nothing received since the hand-over. Both tests need silence, which
+  `OBD_RESPONSE_TIMEOUT_MS` with nothing received in the last
+  `OBD_RESPONSE_TIMEOUT_MS` (§15.1.1). A device MAY judge it sooner, when
+  its controller enters error-passive after the hand-over with nothing
+  received since. Ending the request abandons it for §15.1's bounds and
+  §15.4's pacing, so the loop is released. Both tests need silence, which
   keeps them off a loaded bus where `0x7DF` merely loses arbitration.
 - **A device MUST then suspend the poll set** (§15.1.1). It ends the frame
   as §15.2 ends a probe's, keeps the set, and transmits nothing more. The
@@ -50,6 +52,8 @@ and a re-arm, and put the same frame back on the bus at 4, 8, 16 and 32 s.
   re-arming. Do not re-arm a suspended set on a timer. A `CAN_RESET` to
   recover from a sleeping car trades a suspension that would have ended by
   itself for a re-arm that suspends again.
+- **The polling flag means a poll set is installed** (§15.6): polling, or
+  suspended and waiting to.
 - **Suspension is not bus-off** (§15.7). Resuming from one is not resuming
   after bus-off, and a controller that reaches bus-off while suspended
   clears the set like any other. It is not §15.8's tester inference either.

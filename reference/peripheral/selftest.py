@@ -2237,6 +2237,25 @@ def main():
           "the first frame from a waking car ends the suspension and the "
           "loop polls at once (SPEC.md 15.1.1, condition 1)")
 
+    # The silence is a window, not "since hand-over": a frame heard while the
+    # request pends pushes the judgement back, and suspension waits for
+    # OBD_RESPONSE_TIMEOUT after it (SPEC.md 15.1.1).
+    h, hclk, _hsent, hhanded, hstep, _hctl, _hstatus, _ = sleepy()
+    hstep(0.5)
+    h.set_bus_awake(False)
+    for _ in range(100):
+        hstep(0.005)
+        if h._obd_pending is not None:
+            break
+    heard_at = h._obd_pending[2] + 60_000
+    h._obd_rx.append((heard_at, 0x2E0, bytes(8)))
+    hstep(0.4)
+    check(h._obd_suspended_at is not None
+          and h._obd_suspended_at - heard_at >= dev.OBD_RESPONSE_TIMEOUT_US,
+          "a frame received while the request pends defers the judgement: "
+          "nothing may be judged unacknowledged until the bus has been "
+          "silent for OBD_RESPONSE_TIMEOUT_MS (SPEC.md 15.1.1)")
+
     # Condition 3, and that it restarts nothing it should not: a client
     # re-arming a suspended set on a car still asleep spends one offer, and
     # the set suspends again.

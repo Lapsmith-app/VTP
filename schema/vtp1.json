@@ -504,7 +504,7 @@
         {
           "bit": 1,
           "name": "polling",
-          "desc": "The OBD poll set is non-empty: this device is transmitting diagnostic requests (SPEC.md 15.6)"
+          "desc": "The OBD poll set is non-empty: this device is polling, or suspended and waiting to (SPEC.md 15.6, 15.1.1)"
         }
       ],
       "reserved_from": 2,

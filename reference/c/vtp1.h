@@ -355,7 +355,9 @@ void vtp_obd_ecu_at(const uint8_t *buf, uint8_t index, vtp_obd_ecu_t *out);
  * answer. `suspended` without `installed` is a content rule the decoder
  * deliberately does not reject (§1.1's split); the encoder refuses it. */
 typedef struct {
-    uint8_t state;             /* bitmask obd_state */
+    uint8_t  state;            /* bitmask obd_state */
+    uint8_t  reserved_1;       /* Appendix A holds it; MUST be ignored on receive */
+    uint16_t reserved_2;       /* likewise */
 } vtp_obd_status_t;
 
 int vtp_decode_obd_status(const uint8_t *buf, size_t len,

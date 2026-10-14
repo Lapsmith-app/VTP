@@ -343,7 +343,7 @@ bitmasks:
       # because it is what makes SPEC.md 15.7's stop rules observable: after
       # CAN_RESET or an empty poll set, the next batch says whether the
       # transmitter actually stopped.
-      - {bit: 1, name: polling, desc: "The OBD poll set is non-empty: this device is transmitting diagnostic requests (SPEC.md 15.6)"}
+      - {bit: 1, name: polling, desc: "The OBD poll set is non-empty: this device is polling, or suspended and waiting to (SPEC.md 15.6, 15.1.1)"}
     reserved_from: 2
     reserved_purpose: "Additional batch-level CAN status"
   imu_flags:

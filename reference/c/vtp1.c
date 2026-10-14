@@ -442,7 +442,9 @@ int vtp_decode_obd_status(const uint8_t *b, size_t len,
                           vtp_obd_status_t *o, const char **err) {
     /* Fixed size, no extension mechanism: any other length is malformed. */
     if (len != VTP_OBD_STATUS_SIZE) { *err = "length"; return -1; }
-    o->state = b[VTP_OBD_STATUS_OFF_STATE];
+    o->state      = b[VTP_OBD_STATUS_OFF_STATE];
+    o->reserved_1 = b[VTP_OBD_STATUS_OFF_RESERVED_1];
+    o->reserved_2 = rd16(b + VTP_OBD_STATUS_OFF_RESERVED_2);
     /* `suspended` without `installed` decodes (SPEC.md 15.6.1): the record is
      * well formed, and flagging the contradiction is the caller's job. */
     return 0;

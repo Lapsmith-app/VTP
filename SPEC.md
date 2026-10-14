@@ -662,7 +662,7 @@ Total: **16 bytes**. All fields little-endian.
 | Bit | Name | Meaning |
 | --- | --- | --- |
 | 0 | `shedding` | Device is discarding accepted frames (SPEC.md 6.3) |
-| 1 | `polling` | The OBD poll set is non-empty: this device is transmitting diagnostic requests (SPEC.md 15.6) |
+| 1 | `polling` | The OBD poll set is non-empty: this device is polling, or suspended and waiting to (SPEC.md 15.6, 15.1.1) |
 | 2+ | *reserved* | MUST be zero on transmit; MUST be ignored on receive |
 <!-- END GENERATED: bitmask:can_flags -->
 
@@ -2327,10 +2327,13 @@ after every session — would otherwise hold the device there for as long as
 the client stays connected. It does not (RATIONALE §11.10).
 
 A pending poll request is **unacknowledged** once it has pended for
-`OBD_RESPONSE_TIMEOUT_MS` and the device has received no frame in that time.
-A device MAY judge it unacknowledged sooner, once its controller reports
-error-passive and no frame has been received since the request was handed
-over. Both tests need silence, and silence is what keeps them off a live
+`OBD_RESPONSE_TIMEOUT_MS` and the device has received no frame in the last
+`OBD_RESPONSE_TIMEOUT_MS` — a window ending now, not the whole time the
+frame has pended, so a frame that waited behind traffic is judged once the
+traffic stops. A device MAY judge it unacknowledged sooner, once its
+controller enters error-passive after the request was handed over and no
+frame has been received since the hand-over; a controller already
+error-passive at the hand-over is no evidence about this frame. Both tests need silence, and silence is what keeps them off a live
 bus: any node that transmits also acknowledges, so a device that has heard
 anything is on a bus that will carry its frame once arbitration allows.
 
@@ -2340,8 +2343,10 @@ set:
 - It ends the frame as §15.2 ends a probe request still pending at the same
   point: the bus MUST NOT carry it afterwards, and the device makes that
   impossible by whatever means its stack offers (§15.7). The request was
-  never transmitted in §15.1's sense, so it is not abandoned as unanswered,
-  and offering it again is not a retry.
+  never transmitted in §15.1's sense. Ending it **abandons** it for every
+  bound in §15.1 and for §15.4's pacing, so it releases the loop exactly as
+  an unanswered request abandoned at `OBD_RESPONSE_TIMEOUT_MS` does; it was
+  never asked, so offering it again is not a retry.
 - It keeps the poll set. **Suspension is not a §15.7 edge**: the set, the
   probe result and §15.5's fallback all stand, the polling flag stays set
   (§15.6), and a client has nothing to re-arm.
@@ -2419,8 +2424,8 @@ hand-over is treated as a request nothing answered, and MUST NOT be carried
 by the bus after that — the device makes it impossible by whatever means its
 stack offers, which is §15.7's rule applied to the probe's own frame. A
 device MAY treat it so sooner, on the evidence §15.1.1 lets the poll loop
-act on: its controller reporting error-passive with no frame received since
-the request was handed over. The probe then falls back to the other
+act on: its controller entering error-passive after the request was handed
+over, with no frame received since the hand-over. The probe then falls back to the other
 addressing, which is the addressing fallback above and not a retry, or
 concludes. On a bus with no other node a
 probe therefore reports `responded` clear within a few hundred milliseconds.
@@ -2634,7 +2639,8 @@ transmits the next group when *both* hold:
 1. the previous request has been **answered** — the first frame received on
    an identifier the most recent probe reported **whose echoed Mode 01 PID is
    one the outstanding request named** — or `OBD_RESPONSE_TIMEOUT_MS` has
-   elapsed since it was transmitted (§15.1), whichever comes first; and
+   elapsed since it was transmitted (§15.1), whichever comes first, or it
+   was ended untransmitted by a suspension (§15.1.1); and
 2. at least `interval_ms` has elapsed since the previous transmission.
 
 `interval_ms` is a **minimum spacing, not a period**, and **0 means the client
@@ -2920,8 +2926,10 @@ opens dies for want of a flow control this device will not send.
 `can_header.flags` bit 1 (`polling`) MUST be set on every CAN batch flushed
 while the device's poll set is non-empty, and MUST be clear on every batch
 flushed while it is empty. Bit 10 in Info says this device *can* transmit;
-this bit says it currently *is* — continuously, on the stream any client of
-the CAN role is already reading, at the cost of one reserved bit. It is
+this bit says it has been asked to — a poll set is installed, and the device
+is polling it or, while suspended (§15.1.1), waiting to — continuously, on
+the stream any client of the CAN role is already reading, at the cost of
+one reserved bit. It is
 what makes §15.7 observable: after a stop, the next batch says whether the
 transmitter actually stopped, and whoever is watching the stream — not
 necessarily whoever sent `OBD_POLL_SET` — can tell a transmitting dongle

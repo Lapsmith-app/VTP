@@ -1194,8 +1194,8 @@ declaration would otherwise be weaker than it looks:
   bit while the switch is set, so the declaration tracks the hardware state
   it claims to describe.
 - **The flag makes it observable** (SPEC §15.6). A capability bit is a
-  statement of what a device may do; `can_flags` bit 1 states what it is
-  doing, on every batch, to anyone reading the stream — including a client
+  statement of what a device may do; `can_flags` bit 1 states what it has
+  been asked to do — a poll set installed — on every batch, to anyone reading the stream — including a client
   that never sent `OBD_POLL_SET` and a tool inspecting a log after the
   fact. The stop rules of SPEC §15.7 are auditable because the flag's
   falling edge is on the wire.

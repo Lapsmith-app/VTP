@@ -1324,6 +1324,9 @@ class VtpDevice:
         self._obd_stop(flush=flush)
         self._obd_masks = None
         self._obd_ecu_ids = frozenset()
+        # What the controller last heard belongs to the connection too: a
+        # stale reading would steer SPEC.md 15.1.1's tests on the next one.
+        self._last_rx_us = None
         # A pending OBD_INFO response belongs to the connection that asked
         # for it: the edges run this, so it dies with the link rather than
         # being handed to the next central as an answer to nothing.
